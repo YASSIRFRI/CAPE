@@ -1,0 +1,25 @@
+Contents of files
+-----------------
+
+sapfl.tgz -> CAPE v0.1
+	first version of CAPE based on complete checkpoints
+	only loops and sections are translated
+	SAPFL = Semi Automatic Parallelization of For Loops
+
+dompcc.tgz -> CAPE v0.1.1
+	first version of CAPE using TXL instead of Lex and Yacc
+	DOMPCC = Distributed OpenMP C Compiler
+
+dompcc_Comment.tar.gz -> CAPE V0.1.2
+	extended version of the previous one
+
+20171001 TXL Transform.tgz -> v0.1.3
+	amélioration de la traduction avec TXL
+
+cape50.tgz -> CAPE v0.2
+	second version of CAPE based on DICKPT (home made incremental checkpoint)
+	CAPE = Checkpointing Aided Parallel Execution
+	DICKPT = Discontinuous Checkpointer
+
+201811280045cape700.tgz -> CAPE v0.3
+	third version of CAPE that includes more OpenMP constructs

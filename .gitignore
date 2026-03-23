@@ -1,0 +1,8 @@
+*.tgz
+*.gz
+*.o
+**/bin
+**/obj
+**/.claude
+
+
