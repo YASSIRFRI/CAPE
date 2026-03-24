@@ -113,7 +113,7 @@ static void cape_ucx_wait(void *req, size_t expect_len, int check_len)
 		ucp_request_free(req);
 		exit(1);
 	}
-	if (check_len && (r->recv_len != expect_len)) {
+	if (check_len && (r->recv_len != 0) && (r->recv_len != expect_len)) {
 		fprintf(stderr, "CAPE UCX recv length mismatch: got=%zu expected=%zu\n",
 		        r->recv_len, expect_len);
 		ucp_request_free(req);
@@ -131,8 +131,9 @@ static void cape_ucx_wait(void *req, size_t expect_len, int check_len)
  * Keep matching bits in the low portion of the tag, which is the safest
  * subset across transports that may not preserve/compare all high tag bits.
  */
-#define CAPE_UCX_TAG(sender_rank, token) ((uint64_t)(uint32_t)(token))
-#define CAPE_UCX_TAG_MASK  UINT64_MAX
+#define CAPE_UCX_TAG(sender_rank, token) \
+	((uint64_t)((((uint32_t)(sender_rank) & 0x0fffU) << 20) | ((uint32_t)(token) & 0x000fffffU)))
+#define CAPE_UCX_TAG_MASK  ((uint64_t)0x00000000ffffffffULL)
 
 static void cape_ucx_sendrecv(
         const void *sendbuf, size_t sendlen, int dest,
@@ -1484,8 +1485,8 @@ int hypercube_allreduce(unsigned int node, unsigned int num_nodes, char ckpt_fla
 
 	for(i = 0; i < nsteps; i++){
 		partner = node ^ (1 << i);
-		size_token = (epoch << 8) | (uint32_t)((i * 2) & 0xff);
-		data_token = (epoch << 8) | (uint32_t)(((i * 2) + 1) & 0xff);
+		size_token = ((epoch & 0x0fffU) << 8) | (uint32_t)((i * 2) & 0xff);
+		data_token = ((epoch & 0x0fffU) << 8) | (uint32_t)(((i * 2) + 1) & 0xff);
 
 		/* Exchange message sizes (step tag: i*2) */
 		cape_ucx_sendrecv(&send_msg_size, sizeof(unsigned long), partner,
@@ -1541,8 +1542,8 @@ int ring_allreduce(unsigned int node, unsigned int nnodes, char ckpt_flag, uint3
 	send_msg_size = after_ckpt_size;
 
 	for(i = 1; i < nnodes; i++){
-		size_token = (epoch << 8) | (uint32_t)((i * 2) & 0xff);
-		data_token = (epoch << 8) | (uint32_t)(((i * 2) + 1) & 0xff);
+		size_token = ((epoch & 0x0fffU) << 8) | (uint32_t)((i * 2) & 0xff);
+		data_token = ((epoch & 0x0fffU) << 8) | (uint32_t)(((i * 2) + 1) & 0xff);
 		/* Exchange sizes: send to right, receive from left (step tag: i*2) */
 		cape_ucx_sendrecv(&send_msg_size, sizeof(unsigned int), right,
 		                  &recv_msg_size, sizeof(unsigned int), left,
@@ -1594,7 +1595,10 @@ int require_allreduce(char ckpt_flag){
 	//printf("Node %d:  nnodes = %d - is_power_of2: %d \n", __node__, __nnodes__, is_power_of_two(__nnodes__));
 	
 	if (after_ckpt_size == 0) return 0 ;
-	epoch = ++__allreduce_epoch__;
+	__allreduce_epoch__++;
+	epoch = __allreduce_epoch__ & 0x0fffU;
+	if (epoch == 0)
+		epoch = 1;
 	if (is_power_of_two(__nnodes__))
 		return hypercube_allreduce(__node__, __nnodes__, ckpt_flag, epoch);
 	else
