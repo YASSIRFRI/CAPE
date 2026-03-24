@@ -976,6 +976,44 @@ int merge_data(char *s1, unsigned int pos_s1, unsigned size_s1,
 	}
 	return 2;	
 }
+
+static int validate_checkpoint_s_section(const char *ckpt,
+		size_t total_size,
+		unsigned long size_s,
+		const char *label)
+{
+	const unsigned long ckpt_header_size = sizeof(unsigned long) * 3;
+	unsigned long p = ckpt_header_size;
+	unsigned int len = 0;
+
+	if (total_size < ckpt_header_size) {
+		fprintf(stderr, "CAPE %s: checkpoint too small (%zu)\n", label, total_size);
+		return -1;
+	}
+	if ((size_s < ckpt_header_size) || (size_s > total_size)) {
+		fprintf(stderr, "CAPE %s: invalid size_s=%lu total=%zu\n",
+		        label, size_s, total_size);
+		return -1;
+	}
+
+	while (p < size_s) {
+		if ((size_s - p) < (sizeof(long) + sizeof(unsigned int))) {
+			fprintf(stderr, "CAPE %s: truncated record header at %lu/%lu\n",
+			        label, p, size_s);
+			return -1;
+		}
+		p += sizeof(long);
+		len = *(unsigned int *)(ckpt + p);
+		p += sizeof(unsigned int);
+		if (len > (size_s - p)) {
+			fprintf(stderr, "CAPE %s: truncated record payload at %lu len=%u size_s=%lu\n",
+			        label, p, len, size_s);
+			return -1;
+		}
+		p += len;
+	}
+	return 0;
+}
 /*
  * ---------------------------------------------------------------------
  * Merge a buffer to after_checkpoint
@@ -987,17 +1025,20 @@ int merge_data(char *s1, unsigned int pos_s1, unsigned size_s1,
  */
 int merge_checkpoint(char *src_ckpt, size_t src_size, char ckpt_flag){	
 	
-	FILE *tmp_stream;
-	char *tmp_ckpt;
-	size_t tmp_size;
+	FILE *tmp_stream = NULL;
+	char *tmp_ckpt = NULL;
+	size_t tmp_size = 0;
 	const unsigned long ckpt_header_size = sizeof(unsigned long) * 3;
 	
 	unsigned int src_pointer =0, tmp_pointer =0;
 	
-	if (src_size <= 4)
+	if (src_size < ckpt_header_size)
 		return 0;
 	
 	if (after_ckpt_size == 0){	
+		unsigned long size_s_src = *(unsigned long *)(src_ckpt + (2 * sizeof(unsigned long)));
+		if (validate_checkpoint_s_section(src_ckpt, src_size, size_s_src, "merge_checkpoint[src_init]") < 0)
+			return -1;
 		after_ckpt_stream = open_memstream(&after_ckpt, &after_ckpt_size);
 		fwrite(src_ckpt, src_size, 1, after_ckpt_stream);
 		fflush(after_ckpt_stream);
@@ -1034,10 +1075,21 @@ int merge_checkpoint(char *src_ckpt, size_t src_size, char ckpt_flag){
  	
  	size_s1 =  *(unsigned long *)(tmp_ckpt + tmp_pointer);
  	size_s2 =  *(unsigned long *)(src_ckpt + src_pointer);
-	if (size_s1 < ckpt_header_size) size_s1 = ckpt_header_size;
-	if (size_s2 < ckpt_header_size) size_s2 = ckpt_header_size;
-	if (size_s1 > tmp_size) size_s1 = tmp_size;
-	if (size_s2 > src_size) size_s2 = src_size;
+	if ((size_s1 < ckpt_header_size) || (size_s1 > tmp_size) ||
+	    (size_s2 < ckpt_header_size) || (size_s2 > src_size)) {
+		fprintf(stderr,
+		        "CAPE merge_checkpoint: invalid size_s values (size_s1=%lu tmp_size=%zu size_s2=%lu src_size=%zu)\n",
+		        size_s1, tmp_size, size_s2, src_size);
+		fclose(tmp_stream);
+		free(tmp_ckpt);
+		return -1;
+	}
+	if (validate_checkpoint_s_section(tmp_ckpt, tmp_size, size_s1, "merge_checkpoint[tmp]") < 0 ||
+	    validate_checkpoint_s_section(src_ckpt, src_size, size_s2, "merge_checkpoint[src]") < 0) {
+		fclose(tmp_stream);
+		free(tmp_ckpt);
+		return -1;
+	}
  	 	
  	src_pointer += sizeof(unsigned long);
  	tmp_pointer += sizeof(unsigned long);
@@ -1076,6 +1128,11 @@ int merge_checkpoint(char *src_ckpt, size_t src_size, char ckpt_flag){
 	if (merge_rc < 0) {
 		fprintf(stderr, "CAPE merge_checkpoint: malformed S section (size_s1=%lu size_s2=%lu)\n",
 		        size_s1, size_s2);
+		fclose(after_ckpt_stream);
+		after_ckpt_stream = NULL;
+		free(after_ckpt);
+		after_ckpt = NULL;
+		after_ckpt_size = 0;
 		fclose(tmp_stream);
 		free(tmp_ckpt);
 		tmp_ckpt = NULL;
@@ -1088,16 +1145,57 @@ int merge_checkpoint(char *src_ckpt, size_t src_size, char ckpt_flag){
 	//Check if exist reduction data
 	if (ckpt_flag == EXIT_CHECKPOINT){ 
 		while (	(tmp_pointer < tmp_size) && (src_pointer <src_size)){		
-			long addr;
-			unsigned int len;
+			long addr, src_addr;
+			unsigned int len, src_len;
 			
+			if ((tmp_size - tmp_pointer) < (sizeof(long) + sizeof(unsigned int)) ||
+			    (src_size - src_pointer) < (sizeof(long) + sizeof(unsigned int))) {
+				fprintf(stderr, "CAPE merge_checkpoint: malformed L header\n");
+				fclose(after_ckpt_stream);
+				after_ckpt_stream = NULL;
+				free(after_ckpt);
+				after_ckpt = NULL;
+				after_ckpt_size = 0;
+				fclose(tmp_stream);
+				free(tmp_ckpt);
+				return -1;
+			}
+
 			addr = *((long*)(tmp_ckpt + tmp_pointer));
-			src_pointer += sizeof(long);
+			src_addr = *((long*)(src_ckpt + src_pointer));
 			tmp_pointer += sizeof(long);
+			src_pointer += sizeof(long);
 
 			len = *(unsigned int *) (tmp_ckpt + tmp_pointer) ;
-			src_pointer += sizeof(unsigned int);
+			src_len = *(unsigned int *) (src_ckpt + src_pointer) ;
 			tmp_pointer += sizeof(unsigned int);
+			src_pointer += sizeof(unsigned int);
+			if ((addr != src_addr) || (len != src_len)) {
+				fprintf(stderr,
+				        "CAPE merge_checkpoint: L mismatch (addr=0x%lx src_addr=0x%lx len=%u src_len=%u)\n",
+				        addr, src_addr, len, src_len);
+				fclose(after_ckpt_stream);
+				after_ckpt_stream = NULL;
+				free(after_ckpt);
+				after_ckpt = NULL;
+				after_ckpt_size = 0;
+				fclose(tmp_stream);
+				free(tmp_ckpt);
+				return -1;
+			}
+			if ((len > (tmp_size - tmp_pointer)) || (len > (src_size - src_pointer))) {
+				fprintf(stderr,
+				        "CAPE merge_checkpoint: malformed L payload (len=%u tmp_left=%zu src_left=%zu)\n",
+				        len, tmp_size - tmp_pointer, src_size - src_pointer);
+				fclose(after_ckpt_stream);
+				after_ckpt_stream = NULL;
+				free(after_ckpt);
+				after_ckpt = NULL;
+				after_ckpt_size = 0;
+				fclose(tmp_stream);
+				free(tmp_ckpt);
+				return -1;
+			}
 			
 			fwrite(&addr, sizeof(long), 1, after_ckpt_stream);
 			fflush(after_ckpt_stream);
@@ -1107,7 +1205,18 @@ int merge_checkpoint(char *src_ckpt, size_t src_size, char ckpt_flag){
 			VarList *var = NULL; 
 			var = find_variable_by_addr(__var_list_head, addr , __parallel_level__);	
 			
-			if (var == NULL) return -1; //ERROR
+			if (var == NULL) {
+				fprintf(stderr, "CAPE merge_checkpoint: variable not found for addr=0x%lx level=%d\n",
+				        addr, __parallel_level__);
+				fclose(after_ckpt_stream);
+				after_ckpt_stream = NULL;
+				free(after_ckpt);
+				after_ckpt = NULL;
+				after_ckpt_size = 0;
+				fclose(tmp_stream);
+				free(tmp_ckpt);
+				return -1; //ERROR
+			}
 
 			int num, n1, n2;
 			unsigned long num_l, n1_l, n2_l;
@@ -1240,11 +1349,31 @@ int merge_checkpoint(char *src_ckpt, size_t src_size, char ckpt_flag){
 					break;
 				default:
 					printf("This datatype is not supported !!!!!");
+					fclose(after_ckpt_stream);
+					after_ckpt_stream = NULL;
+					free(after_ckpt);
+					after_ckpt = NULL;
+					after_ckpt_size = 0;
+					fclose(tmp_stream);
+					free(tmp_ckpt);
 					return -1;
 			}
 			
 			src_pointer += len;
 			tmp_pointer += len;
+		}
+		if ((tmp_pointer != tmp_size) || (src_pointer != src_size)) {
+			fprintf(stderr,
+			        "CAPE merge_checkpoint: uneven L sections (tmp_pointer=%u tmp_size=%zu src_pointer=%u src_size=%zu)\n",
+			        tmp_pointer, tmp_size, src_pointer, src_size);
+			fclose(after_ckpt_stream);
+			after_ckpt_stream = NULL;
+			free(after_ckpt);
+			after_ckpt = NULL;
+			after_ckpt_size = 0;
+			fclose(tmp_stream);
+			free(tmp_ckpt);
+			return -1;
 		}
 		
 
@@ -1306,6 +1435,7 @@ int hypercube_allreduce(unsigned int node, unsigned int num_nodes, char ckpt_fla
 	int i, nsteps = 0;
 	unsigned int partner;
 	unsigned long send_msg_size=0, recv_msg_size = 0;
+	int rc = 0;
 	char *send_msg;
 	char *recv_msg;
 
@@ -1323,16 +1453,23 @@ int hypercube_allreduce(unsigned int node, unsigned int num_nodes, char ckpt_fla
 		                  (uint64_t)(i * 2));
 
 		recv_msg = malloc(sizeof(char) * recv_msg_size);
+		if (recv_msg == NULL) {
+			fprintf(stderr, "CAPE hypercube_allreduce: malloc failed (recv_msg_size=%lu)\n",
+			        recv_msg_size);
+			return -1;
+		}
 
 		/* Exchange checkpoint data (step tag: i*2+1) */
 		cape_ucx_sendrecv(send_msg, send_msg_size, partner,
 		                  recv_msg, recv_msg_size, partner,
 		                  (uint64_t)(i * 2 + 1));
 
-		merge_checkpoint(recv_msg, recv_msg_size, ckpt_flag);
+		rc = merge_checkpoint(recv_msg, recv_msg_size, ckpt_flag);
 
 		free(recv_msg);
 		recv_msg_size = 0;
+		if (rc < 0)
+			return -1;
 
 		send_msg = after_ckpt;
 		send_msg_size = after_ckpt_size;
@@ -1350,13 +1487,16 @@ int ring_allreduce(unsigned int node, unsigned int nnodes, char ckpt_flag){
 
 	char *send_msg;
 	char *recv_msg;
+	char *owned_send_msg;
 	unsigned int send_msg_size, recv_msg_size;
+	int rc;
 
 	unsigned int i, left, right;
 	left  = (node - 1 + nnodes) % nnodes;
 	right = (node + 1) % nnodes;
 
 	send_msg = after_ckpt;
+	owned_send_msg = NULL;
 	send_msg_size = after_ckpt_size;
 
 	for(i = 1; i < nnodes; i++){
@@ -1366,20 +1506,36 @@ int ring_allreduce(unsigned int node, unsigned int nnodes, char ckpt_flag){
 		                  (uint64_t)(i * 2));
 
 		recv_msg = malloc(sizeof(char) * recv_msg_size);
+		if (recv_msg == NULL) {
+			fprintf(stderr, "CAPE ring_allreduce: malloc failed (recv_msg_size=%u)\n",
+			        recv_msg_size);
+			if (owned_send_msg != NULL)
+				free(owned_send_msg);
+			return -1;
+		}
 
 		/* Exchange data (step tag: i*2+1) */
 		cape_ucx_sendrecv(send_msg, send_msg_size, right,
 		                  recv_msg, recv_msg_size, left,
 		                  (uint64_t)(i * 2 + 1));
 
-		merge_checkpoint(recv_msg, recv_msg_size, ckpt_flag);
+		rc = merge_checkpoint(recv_msg, recv_msg_size, ckpt_flag);
+		if (owned_send_msg != NULL) {
+			free(owned_send_msg);
+			owned_send_msg = NULL;
+		}
+		if (rc < 0) {
+			free(recv_msg);
+			return -1;
+		}
 
-		send_msg      = recv_msg;
+		owned_send_msg = recv_msg;
+		send_msg      = owned_send_msg;
 		send_msg_size = recv_msg_size;
-
-		recv_msg      = NULL;
 		recv_msg_size = 0;
 	}
+	if (owned_send_msg != NULL)
+		free(owned_send_msg);
 	return 1;
 }
 
@@ -1395,9 +1551,9 @@ int require_allreduce(char ckpt_flag){
 	
 	if (after_ckpt_size == 0) return 0 ;	
 	if (is_power_of_two(__nnodes__))
-		hypercube_allreduce(__node__, __nnodes__, ckpt_flag);
+		return hypercube_allreduce(__node__, __nnodes__, ckpt_flag);
 	else
-		ring_allreduce(__node__, __nnodes__, ckpt_flag);
+		return ring_allreduce(__node__, __nnodes__, ckpt_flag);
 	
 }
 
@@ -1411,20 +1567,36 @@ int require_allreduce(char ckpt_flag){
 int inject_checkpoint(char *data_ckpt, size_t file_size){
 	unsigned long len=0, file_pointer = 0;
 	long addr;
+	const unsigned long ckpt_header_size = sizeof(unsigned long) * 3;
 	
-	if (file_size <= sizeof(unsigned long)*3) return 0;	
+	if (file_size <= ckpt_header_size) return 0;	
 	//printf("\n Node %d: inject ckpt - file size = %d bytes", __node__, file_size);
 	
 	__pc__ = *(unsigned long *) (data_ckpt + sizeof(unsigned long)); //get program counter
-	file_pointer = sizeof(unsigned long) * 3; //timestime, program counter, size_s	
+	file_pointer = ckpt_header_size; //timestime, program counter, size_s	
 	
 	while(file_pointer < file_size){
+		if ((file_size - file_pointer) < (sizeof(long) + sizeof(unsigned int))) {
+			fprintf(stderr, "CAPE inject_checkpoint: malformed record header at %lu/%zu\n",
+			        file_pointer, file_size);
+			return -1;
+		}
 		
 		addr = *(long *) (data_ckpt + file_pointer);		
 		file_pointer += sizeof(long);		
 		
 		len = *(unsigned int*) (data_ckpt + file_pointer );
 		file_pointer += sizeof(unsigned int);
+		if (len > (file_size - file_pointer)) {
+			fprintf(stderr,
+			        "CAPE inject_checkpoint: malformed record payload len=%lu left=%zu\n",
+			        len, file_size - file_pointer);
+			return -1;
+		}
+		if (addr == 0) {
+			fprintf(stderr, "CAPE inject_checkpoint: null destination address\n");
+			return -1;
+		}
 
 		memcpy(addr, data_ckpt+file_pointer, len)	;		
 		
@@ -2051,19 +2223,34 @@ void cape_begin(unsigned char name_directive, long first, long second){
 			break;
 	}	
 }
+
+static int cape_sync_checkpoint()
+{
+	if (require_allreduce(EXIT_CHECKPOINT) < 0) {
+		fprintf(stderr, "CAPE: allreduce checkpoint merge failed on node %d\n", __node__);
+		return -1;
+	}
+	if (inject_checkpoint(after_ckpt, after_ckpt_size) < 0) {
+		fprintf(stderr, "CAPE: checkpoint injection failed on node %d\n", __node__);
+		return -1;
+	}
+	return 0;
+}
 /*
  * ---------------------------------------------------------------------
  * Release variables environments of a block
  * ---------------------------------------------------------------------
- */
+*/
 void cape_end(unsigned char name_directive, unsigned char ops_flag){	
 	switch(name_directive){
 		case FOR:
 			__time_stamp__ = __right__;			
 			require_generate_checkpoint(ops_flag);
 			ckpt_stop();
-			require_allreduce(EXIT_CHECKPOINT);			
-			inject_checkpoint(after_ckpt, after_ckpt_size);
+			if (cape_sync_checkpoint() < 0) {
+				release_checkpoint();
+				exit(1);
+			}
 			release_checkpoint();
 			remove_parellel_region(__parallel_level__);
 			__parallel_level__ --;
@@ -2077,8 +2264,10 @@ void cape_end(unsigned char name_directive, unsigned char ops_flag){
 			__time_stamp__ = __pc__;
 			require_generate_checkpoint(ops_flag);
 			ckpt_stop();
-			require_allreduce(EXIT_CHECKPOINT);
-			inject_checkpoint(after_ckpt, after_ckpt_size);
+			if (cape_sync_checkpoint() < 0) {
+				release_checkpoint();
+				exit(1);
+			}
 			release_checkpoint();
 			close_parallel_window();
 			break;			
@@ -2086,9 +2275,11 @@ void cape_end(unsigned char name_directive, unsigned char ops_flag){
 			__time_stamp__ = __right__;
 			require_generate_checkpoint(ops_flag);
 			ckpt_stop();
-			require_allreduce(EXIT_CHECKPOINT);	
-			//print_data_in_checkpoint(after_ckpt, after_ckpt_size);			
-			inject_checkpoint(after_ckpt, after_ckpt_size);
+			//print_data_in_checkpoint(after_ckpt, after_ckpt_size);
+			if (cape_sync_checkpoint() < 0) {
+				release_checkpoint();
+				exit(1);
+			}
 			release_checkpoint();
 			close_parallel_window();			
 			break;
@@ -2096,8 +2287,10 @@ void cape_end(unsigned char name_directive, unsigned char ops_flag){
 			__time_stamp__ = __pc__;
 			require_generate_checkpoint(ops_flag);
 			ckpt_stop();
-			require_allreduce(EXIT_CHECKPOINT);			
-			inject_checkpoint(after_ckpt, after_ckpt_size);
+			if (cape_sync_checkpoint() < 0) {
+				release_checkpoint();
+				exit(1);
+			}
 			release_checkpoint();
 			remove_parellel_region(__parallel_level__);
 			__parallel_level__ --;
@@ -2212,8 +2405,10 @@ void ckpt_stop_2(){
 void cape_flush(){		
 	require_generate_checkpoint(FALSE);
 	ckpt_stop();
-	require_allreduce(EXIT_CHECKPOINT);			
-	inject_checkpoint(after_ckpt, after_ckpt_size);
+	if (cape_sync_checkpoint() < 0) {
+		release_checkpoint();
+		exit(1);
+	}
 	release_checkpoint();
 	ckpt_start();
 }
