@@ -1655,6 +1655,8 @@ int require_allreduce(char ckpt_flag){
 	
 	//printf("Node %d:  nnodes = %d - is_power_of2: %d \n", __node__, __nnodes__, is_power_of_two(__nnodes__));
 	
+	fprintf(stderr, "DEBUG require_allreduce: node=%d after_ckpt_size=%zu\n",
+	        __node__, after_ckpt_size); fflush(stderr);
 	if (after_ckpt_size == 0) return 0 ;
 	__allreduce_epoch__++;
 	epoch = __allreduce_epoch__ & 0x0fffU;
