@@ -11,10 +11,18 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "${SCRIPT_DIR}"
+PROJECT_DIR="${PROJECT_DIR:-${SLURM_SUBMIT_DIR:-${SCRIPT_DIR}}}"
+if [ ! -f "${PROJECT_DIR}/makefile" ]; then
+    PROJECT_DIR="${SCRIPT_DIR}"
+fi
+if [ ! -f "${PROJECT_DIR}/makefile" ]; then
+    echo "ERROR: makefile not found in PROJECT_DIR='${PROJECT_DIR}'" >&2
+    exit 1
+fi
+cd "${PROJECT_DIR}"
 JOB_TAG="${SLURM_JOB_ID:-local_$$}"
 
-RESULTS_DIR="${RESULTS_DIR:-${SLURM_SUBMIT_DIR:-${SCRIPT_DIR}}/results}"
+RESULTS_DIR="${RESULTS_DIR:-${SLURM_SUBMIT_DIR:-${PROJECT_DIR}}/results}"
 if ! mkdir -p "${RESULTS_DIR}" 2>/dev/null; then
     RESULTS_DIR="/tmp/${USER:-$(id -un)}/cape_results"
     mkdir -p "${RESULTS_DIR}"
@@ -36,11 +44,11 @@ if command -v module >/dev/null 2>&1; then
     module load OpenMPI/4.1.6-GCC-13.2.0 || module load OpenMPI || true
 fi
 
-make -C "${SCRIPT_DIR}" cleanall \
+make -C "${PROJECT_DIR}" cleanall \
     EXE_FOLDER="${BUILD_DIR}/bin" \
     O_FOLDER="${BUILD_DIR}/obj" \
     L_FOLDER="${BUILD_DIR}/lib" 2>/dev/null || true
-make -C "${SCRIPT_DIR}" cape_mamult \
+make -C "${PROJECT_DIR}" cape_mamult \
     EXE_FOLDER="${BUILD_DIR}/bin" \
     O_FOLDER="${BUILD_DIR}/obj" \
     L_FOLDER="${BUILD_DIR}/lib"
