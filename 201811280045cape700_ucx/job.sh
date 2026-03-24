@@ -75,6 +75,7 @@ cd "${SLURM_SUBMIT_DIR}"
 # ── Build ─────────────────────────────────────────────────────────────────────
 echo ""
 echo ">>> Compiling from $(pwd)..."
+mkdir -p bin obj lib
 make cleanall 2>/dev/null || true
 
 # UCX module ships installed headers, so UCX_SRC and UCX_GEN both point to
