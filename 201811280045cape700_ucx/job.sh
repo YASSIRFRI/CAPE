@@ -13,6 +13,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
 
+RESULTS_DIR="${RESULTS_DIR:-${SLURM_SUBMIT_DIR:-${SCRIPT_DIR}}/results}"
+if ! mkdir -p "${RESULTS_DIR}" 2>/dev/null; then
+    RESULTS_DIR="/tmp/${USER:-$(id -un)}/cape_results"
+    mkdir -p "${RESULTS_DIR}"
+fi
+
 N_VALUES_STR="${N_VALUES_STR:-64 96 128 160 192 224 256 320 384 448 512}"
 REPS="${REPS:-5}"
 read -r -a N_VALUES <<< "${N_VALUES_STR}"
@@ -57,7 +63,7 @@ else
     PMIX_LINK=""
 fi
 
-mkdir -p bin obj lib results
+mkdir -p bin obj lib
 make cleanall 2>/dev/null || true
 make cape_mamult \
     UCX_SRC="${UCX_INC}" \
@@ -67,7 +73,7 @@ make cape_mamult \
     "PMIX_LINK=${PMIX_LINK}" \
     CC=gcc
 
-CSV="results/ucx_mamult_${SLURM_JOB_ID}.csv"
+CSV="${RESULTS_DIR}/ucx_mamult_${SLURM_JOB_ID}.csv"
 echo "impl,n,rep,app_ms,job_id,nodes,ntasks" > "${CSV}"
 
 echo "Benchmarking UCX cape_mamult"
