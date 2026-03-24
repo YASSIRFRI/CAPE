@@ -145,9 +145,7 @@ static void cape_ucx_sendrecv(
         .cb.send      = cape_send_cb
     };
     ucp_request_param_t rp = {
-        .op_attr_mask = UCP_OP_ATTR_FIELD_CALLBACK
-                      | UCP_OP_ATTR_FIELD_FLAGS,
-        .flags        = UCP_OP_ATTR_FLAG_NO_IMM_CMPL,
+        .op_attr_mask = UCP_OP_ATTR_FIELD_CALLBACK,
         .cb.recv      = cape_recv_cb
     };
 
@@ -1659,10 +1657,10 @@ int inject_checkpoint(char *data_ckpt, size_t file_size){
 }
 
 void release_checkpoint(){
-	
-//	if (after_ckpt_stream != NULL){
-//		fclose(after_ckpt_stream);
-//	}
+	if (after_ckpt_stream != NULL){
+		fclose(after_ckpt_stream);
+		after_ckpt_stream = NULL;
+	}
 	free(after_ckpt);	
 	after_ckpt = NULL;
 	after_ckpt_size = 0;
@@ -2045,6 +2043,12 @@ static void ucx_exchange_addresses_via_fs(const char *dir, const char *jobid,
 }
 
 void cape_init(){
+	/* Keep default CAPE messages on eager path unless user explicitly overrides.
+	 * This avoids rendezvous metadata appearing in the receive buffer on some
+	 * UCX/IB setups when checkpoint payload is around 10KB. */
+	if (getenv("UCX_RNDV_THRESH") == NULL)
+		setenv("UCX_RNDV_THRESH", "65536", 0);
+
 	/* ------------------------------------------------------------------
 	 * 1. Get rank and size.
 	 *    With USE_PMIX: use the PMIx API (preferred, works with OpenMPI).
