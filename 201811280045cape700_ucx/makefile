@@ -1,100 +1,80 @@
-O_FOLDER=obj
-L_FOLDER=lib
-C_FOLDER=src
-I_FOLDER=include
-EXE_FOLDER=bin
-DOCS_FOLDER=docs
+O_FOLDER    = obj
+L_FOLDER    = lib
+C_FOLDER    = src
+I_FOLDER    = include
+EXE_FOLDER  = bin
 
-# UCX paths — override any of these to match your installation, e.g.:
-#   make UCX_SRC=/path/to/ucx/src UCX_GEN=/path/to/ucx/generated
-#
-# Default: UCX built from source at /usr/local/src/ucx, with the generated
-# ucp_version.h living alongside the project libs.
-UCX_SRC ?= /usr/local/src/ucx/src
-UCX_GEN ?= /home/yassir/internship/code/matmul_bench/ucx_gen
-UCX_LIB_DIR ?= /home/yassir/internship/code/matmul_bench/ucx_libs
+# ── UCX ───────────────────────────────────────────────────────────────────────
+# Override on the command line, e.g.:
+#   make cape_mamult UCX_SRC=/opt/ucx/include UCX_LIB=/opt/ucx/lib
+UCX_SRC     ?= /usr/local/src/ucx/src
+UCX_GEN     ?= /home/yassir/internship/code/matmul_bench/ucx_gen
+UCX_LIB     ?= /home/yassir/internship/code/matmul_bench/ucx_libs
 
-# PMIx paths (provided by OpenMPI/SLURM).
-PMIX_HOME ?= /home/linuxbrew/.linuxbrew
+# ── PMIx (optional) ───────────────────────────────────────────────────────────
+# Pass PMIX_FLAGS and PMIX_LINK from the build script when PMIx is available.
+# Leave empty to build without PMIx (uses SLURM env vars + shared filesystem).
+PMIX_FLAGS  ?=
+PMIX_LINK   ?=
 
-UCX_INC  = -I$(UCX_SRC) -I$(UCX_GEN)
-UCX_LIB  = -L$(UCX_LIB_DIR) -lucp -lucs
-PMIX_INC = -I$(PMIX_HOME)/include
-PMIX_LIB = -L$(PMIX_HOME)/lib -lpmix
+# ── Compiler & flags ─────────────────────────────────────────────────────────
+CC      ?= cc
+CFLAGS   = -I./$(I_FOLDER) -I$(UCX_SRC) -I$(UCX_GEN) $(PMIX_FLAGS)
+LDFLAGS  = -L$(UCX_LIB) -lucp -lucs $(PMIX_LINK) -Wl,-rpath,$(UCX_LIB)
 
-# Set USE_PMIX=1 to compile with PMIx support (requires pmix.h + libpmix).
-# Default: off — uses SLURM env vars + shared filesystem for bootstrapping.
-ifeq ($(USE_PMIX),1)
-PMIX_FLAGS = -DUSE_PMIX $(PMIX_INC)
-PMIX_LINK  = $(PMIX_LIB) -Wl,-rpath,$(PMIX_HOME)/lib
-else
-PMIX_FLAGS =
-PMIX_LINK  =
-endif
+# One-shot compile: cape.c + app.c -> binary
+COMPILE  = $(CC) -w $(CFLAGS) $(C_FOLDER)/monitor/cape.c
 
-CFLAGS  = -I./$(I_FOLDER) $(UCX_INC) $(PMIX_FLAGS)
-LDFLAGS = $(UCX_LIB) $(PMIX_LINK) -Wl,-rpath,$(UCX_LIB_DIR)
+# ── Default target ────────────────────────────────────────────────────────────
+all: cape_mamult cape_reduction
 
-CC = cc
-
-PWD = $(shell pwd)
-
-# Shorthand: compile cape.c + one app.c into a single binary
-COMPILE = $(CC) -w $(CFLAGS) $(C_FOLDER)/monitor/cape.c
-
-all:
-	$(COMPILE) $(C_FOLDER)/apps/cape_mamult.c    -o $(EXE_FOLDER)/cape_mamult    $(LDFLAGS)
-	$(COMPILE) $(C_FOLDER)/apps/cape_reduction.c -o $(EXE_FOLDER)/cape_reduction $(LDFLAGS)
-
-# ── Individual targets ────────────────────────────────────────────────────────
-
-cape_mamult: $(C_FOLDER)/monitor/cape.c ./$(I_FOLDER)/cape.h
+# ── Per-application targets ───────────────────────────────────────────────────
+cape_mamult:
 	$(COMPILE) $(C_FOLDER)/apps/cape_mamult.c -o $(EXE_FOLDER)/cape_mamult $(LDFLAGS)
 
-cape_mamult2d: $(C_FOLDER)/monitor/cape.c ./$(I_FOLDER)/cape.h
+cape_mamult2d:
 	$(COMPILE) $(C_FOLDER)/apps/cape_mamult2d.c -o $(EXE_FOLDER)/cape_mamult2d $(LDFLAGS)
 
-cape_pi: $(C_FOLDER)/monitor/cape.c ./$(I_FOLDER)/cape.h
+cape_pi:
 	$(COMPILE) $(C_FOLDER)/apps/cape_pi.c -o $(EXE_FOLDER)/cape_pi $(LDFLAGS)
 
-cape_prime: $(C_FOLDER)/monitor/cape.c ./$(I_FOLDER)/cape.h
+cape_prime:
 	$(COMPILE) $(C_FOLDER)/apps/cape_prime.c -o $(EXE_FOLDER)/cape_prime $(LDFLAGS)
 
-cape_prime_number: $(C_FOLDER)/monitor/cape.c ./$(I_FOLDER)/cape.h
+cape_prime_number:
 	$(COMPILE) $(C_FOLDER)/apps/cape_prime_number.c -o $(EXE_FOLDER)/cape_prime_number $(LDFLAGS)
 
-cape_reduction: $(C_FOLDER)/monitor/cape.c ./$(I_FOLDER)/cape.h
+cape_reduction:
 	$(COMPILE) $(C_FOLDER)/apps/cape_reduction.c -o $(EXE_FOLDER)/cape_reduction $(LDFLAGS)
 
-cape_for: $(C_FOLDER)/monitor/cape.c ./$(I_FOLDER)/cape.h
+cape_for:
 	$(COMPILE) $(C_FOLDER)/apps/cape_for.c -o $(EXE_FOLDER)/cape_for $(LDFLAGS)
 
-cape_for_nowait: $(C_FOLDER)/monitor/cape.c ./$(I_FOLDER)/cape.h
+cape_for_nowait:
 	$(COMPILE) $(C_FOLDER)/apps/cape_for_nowait.c -o $(EXE_FOLDER)/cape_for_nowait $(LDFLAGS)
 
-cape_parallel_for: $(C_FOLDER)/monitor/cape.c ./$(I_FOLDER)/cape.h
+cape_parallel_for:
 	$(COMPILE) $(C_FOLDER)/apps/cape_parallel_for.c -o $(EXE_FOLDER)/cape_parallel_for $(LDFLAGS)
 
-cape_vector1: $(C_FOLDER)/monitor/cape.c ./$(I_FOLDER)/cape.h
+cape_vector1:
 	$(COMPILE) $(C_FOLDER)/apps/cape_vector1.c -o $(EXE_FOLDER)/cape_vector1 $(LDFLAGS)
 
-cape_vector2: $(C_FOLDER)/monitor/cape.c ./$(I_FOLDER)/cape.h
+cape_vector2:
 	$(COMPILE) $(C_FOLDER)/apps/cape_vector2.c -o $(EXE_FOLDER)/cape_vector2 $(LDFLAGS)
 
-cape_critical: $(C_FOLDER)/monitor/cape.c ./$(I_FOLDER)/cape.h
+cape_critical:
 	$(COMPILE) $(C_FOLDER)/apps/cape_critical.c -o $(EXE_FOLDER)/cape_critical $(LDFLAGS)
 
-cape_critical2: $(C_FOLDER)/monitor/cape.c ./$(I_FOLDER)/cape.h
+cape_critical2:
 	$(COMPILE) $(C_FOLDER)/apps/cape_critical2.c -o $(EXE_FOLDER)/cape_critical2 $(LDFLAGS)
 
-cape_sections_nowait: $(C_FOLDER)/monitor/cape.c ./$(I_FOLDER)/cape.h
+cape_sections_nowait:
 	$(COMPILE) $(C_FOLDER)/apps/cape_sections_nowait.c -o $(EXE_FOLDER)/cape_sections_nowait $(LDFLAGS)
 
-cape_test_heap: $(C_FOLDER)/monitor/cape.c ./$(I_FOLDER)/cape.h
+cape_test_heap:
 	$(COMPILE) $(C_FOLDER)/apps/cape_test_heap.c -o $(EXE_FOLDER)/cape_test_heap $(LDFLAGS)
 
-# ── Build all apps ────────────────────────────────────────────────────────────
-.PHONY: apps
+# ── Build all applications ────────────────────────────────────────────────────
 apps: cape_mamult cape_mamult2d cape_pi cape_prime cape_prime_number \
       cape_reduction cape_for cape_for_nowait cape_parallel_for \
       cape_vector1 cape_vector2 cape_critical cape_critical2 \
@@ -102,4 +82,10 @@ apps: cape_mamult cape_mamult2d cape_pi cape_prime cape_prime_number \
 
 # ── Clean ─────────────────────────────────────────────────────────────────────
 cleanall:
-	rm -f $(O_FOLDER)/* $(EXE_FOLDER)/* $(L_FOLDER)/*
+	rm -f $(EXE_FOLDER)/* $(O_FOLDER)/* $(L_FOLDER)/*
+
+.PHONY: all apps cleanall \
+        cape_mamult cape_mamult2d cape_pi cape_prime cape_prime_number \
+        cape_reduction cape_for cape_for_nowait cape_parallel_for \
+        cape_vector1 cape_vector2 cape_critical cape_critical2 \
+        cape_sections_nowait cape_test_heap

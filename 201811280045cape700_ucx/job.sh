@@ -51,10 +51,12 @@ do
 done
 
 if [ "${_pmix_found}" -eq 1 ]; then
-    USE_PMIX_FLAG="USE_PMIX=1"
+    PMIX_FLAGS="-DUSE_PMIX -I${PMIX_HOME}/include"
+    PMIX_LINK="-L${PMIX_HOME}/lib -lpmix -Wl,-rpath,${PMIX_HOME}/lib"
     echo "PMIx      : ${PMIX_HOME} (enabled)"
 else
-    USE_PMIX_FLAG=""
+    PMIX_FLAGS=""
+    PMIX_LINK=""
     echo "PMIx      : not found — using SLURM env vars + shared filesystem"
 fi
 
@@ -67,22 +69,22 @@ echo " UCX       : ${UCX_INC}"
 echo " Node list : ${SLURM_JOB_NODELIST}"
 echo "========================================================"
 
-WORKDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "${WORKDIR}"
+# SLURM_SUBMIT_DIR is the directory sbatch was called from — always on shared NFS
+cd "${SLURM_SUBMIT_DIR}"
 
 # ── Build ─────────────────────────────────────────────────────────────────────
 echo ""
-echo ">>> Compiling..."
+echo ">>> Compiling from $(pwd)..."
 make cleanall 2>/dev/null || true
 
-# Both UCX_SRC and UCX_GEN point to the installed include dir — the module
-# ships pre-built headers so there is no separate generated tree.
+# UCX module ships installed headers, so UCX_SRC and UCX_GEN both point to
+# the same include directory — no separate generated tree needed.
 make apps \
     UCX_SRC="${UCX_INC}" \
     UCX_GEN="${UCX_INC}" \
-    UCX_LIB_DIR="${UCX_LIB}" \
-    PMIX_HOME="${PMIX_HOME}" \
-    ${USE_PMIX_FLAG} \
+    UCX_LIB="${UCX_LIB}" \
+    "PMIX_FLAGS=${PMIX_FLAGS}" \
+    "PMIX_LINK=${PMIX_LINK}" \
     CC=gcc
 
 echo ">>> Build OK"
