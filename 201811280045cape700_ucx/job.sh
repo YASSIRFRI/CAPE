@@ -1,23 +1,26 @@
 #!/bin/bash
-#SBATCH --job-name=cape_ucx_test
+#SBATCH --job-name=cape_ucx_bench
 #SBATCH --nodes=4
 #SBATCH --ntasks=4
 #SBATCH --ntasks-per-node=1
-#SBATCH --time=00:30:00
-#SBATCH --output=cape_ucx_%j.out
-#SBATCH --error=cape_ucx_%j.err
-# Adjust the partition name to match your cluster:
+#SBATCH --time=00:45:00
+#SBATCH --output=cape_ucx_bench_%j.out
+#SBATCH --error=cape_ucx_bench_%j.err
 #SBATCH --partition=compute
 
 set -euo pipefail
 
-# ── Modules ───────────────────────────────────────────────────────────────────
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "${SCRIPT_DIR}"
+
+N_VALUES_STR="${N_VALUES_STR:-64 96 128 160 192 224 256 320 384 448 512}"
+REPS="${REPS:-5}"
+read -r -a N_VALUES <<< "${N_VALUES_STR}"
+
 module purge
 module load GCCcore/13.2.0
 module load UCX/1.15.0-GCCcore-13.2.0
 
-# ── Resolve UCX paths from the loaded module ──────────────────────────────────
-# EasyBuild sets EBROOTUCX; fall back to ucx-config if the module doesn't.
 if [ -n "${EBROOTUCX:-}" ]; then
     UCX_INC="${EBROOTUCX}/include"
     UCX_LIB="${EBROOTUCX}/lib"
@@ -30,19 +33,15 @@ else
     exit 1
 fi
 
-# ── Resolve PMIx paths (optional) ────────────────────────────────────────────
-# PMIx is used for address exchange when available; falls back to shared-fs.
 _pmix_found=0
 PMIX_HOME=""
-
 for _pfx in \
     "${EBROOTPMIX:-__none__}" \
     "$(pmix_info --path prefix 2>/dev/null | awk '{print $NF}')" \
-    "$(pkg-config --variable=prefix pmix 2>/dev/null)" \
-    "$(dirname "$(dirname "$(command -v sinfo 2>/dev/null)")")"
+    "$(pkg-config --variable=prefix pmix 2>/dev/null)"
 do
     [ "${_pfx}" = "__none__" ] && continue
-    [ -z "${_pfx}" ]           && continue
+    [ -z "${_pfx}" ] && continue
     if [ -f "${_pfx}/include/pmix.h" ] && [ -f "${_pfx}/lib/libpmix.so" ]; then
         PMIX_HOME="${_pfx}"
         _pmix_found=1
@@ -53,34 +52,14 @@ done
 if [ "${_pmix_found}" -eq 1 ]; then
     PMIX_FLAGS="-DUSE_PMIX -I${PMIX_HOME}/include"
     PMIX_LINK="-L${PMIX_HOME}/lib -lpmix -Wl,-rpath,${PMIX_HOME}/lib"
-    echo "PMIx      : ${PMIX_HOME} (enabled)"
 else
     PMIX_FLAGS=""
     PMIX_LINK=""
-    echo "PMIx      : not found — using SLURM env vars + shared filesystem"
 fi
 
-echo "========================================================"
-echo " CAPE UCX test  |  Job ${SLURM_JOB_ID}  |  $(date)"
-echo "========================================================"
-echo " Nodes     : ${SLURM_JOB_NUM_NODES}"
-echo " Tasks     : ${SLURM_NTASKS}"
-echo " UCX       : ${UCX_INC}"
-echo " Node list : ${SLURM_JOB_NODELIST}"
-echo "========================================================"
-
-# SLURM_SUBMIT_DIR is the directory sbatch was called from — always on shared NFS
-cd "${SLURM_SUBMIT_DIR}"
-
-# ── Build ─────────────────────────────────────────────────────────────────────
-echo ""
-echo ">>> Compiling from $(pwd)..."
-mkdir -p bin obj lib
+mkdir -p bin obj lib results
 make cleanall 2>/dev/null || true
-
-# UCX module ships installed headers, so UCX_SRC and UCX_GEN both point to
-# the same include directory — no separate generated tree needed.
-make apps \
+make cape_mamult \
     UCX_SRC="${UCX_INC}" \
     UCX_GEN="${UCX_INC}" \
     UCX_LIB="${UCX_LIB}" \
@@ -88,48 +67,45 @@ make apps \
     "PMIX_LINK=${PMIX_LINK}" \
     CC=gcc
 
-echo ">>> Build OK"
+CSV="results/ucx_mamult_${SLURM_JOB_ID}.csv"
+echo "impl,n,rep,app_ms,job_id,nodes,ntasks" > "${CSV}"
 
-# ── Helper: run one test and print timing ─────────────────────────────────────
-# Usage: run_test <binary> <description> [extra args...]
-run_test() {
-    local bin=$1
-    local desc=$2
-    shift 2
+echo "Benchmarking UCX cape_mamult"
+echo "N values: ${N_VALUES[*]}"
+echo "Reps per N: ${REPS}"
+echo "CSV: ${CSV}"
 
-    if [ ! -x "bin/${bin}" ]; then
-        echo "  SKIP  ${bin} (binary not found)"
-        return
-    fi
-
+for n in "${N_VALUES[@]}"; do
     echo ""
-    echo "--- ${desc} ---"
-    local start end elapsed
-    start=$(date +%s%3N)
+    echo "=== UCX n=${n} reps=${REPS} ==="
 
-    srun --mpi=pmix \
-         --nodes="${SLURM_JOB_NUM_NODES}" \
-         --ntasks="${SLURM_NTASKS}" \
-         --ntasks-per-node=1 \
-         "bin/${bin}" "$@"
+    run_out=$(
+        UCX_RNDV_THRESH="${UCX_RNDV_THRESH:-65536}" \
+        srun --mpi=pmix \
+             --nodes="${SLURM_JOB_NUM_NODES}" \
+             --ntasks="${SLURM_NTASKS}" \
+             --ntasks-per-node=1 \
+             bin/cape_mamult "${n}" "${REPS}"
+    )
 
-    end=$(date +%s%3N)
-    elapsed=$(( end - start ))
-    echo "    Wall time: ${elapsed} ms"
-}
+    echo "${run_out}"
 
-# ── Tests ─────────────────────────────────────────────────────────────────────
+    awk -v impl="ucx" \
+        -v job="${SLURM_JOB_ID}" \
+        -v nodes="${SLURM_JOB_NUM_NODES}" \
+        -v tasks="${SLURM_NTASKS}" '
+        /^RESULT / {
+            n=""; rep=""; ms="";
+            for (i=1; i<=NF; i++) {
+                split($i, kv, "=");
+                if (kv[1] == "n")   n = kv[2];
+                if (kv[1] == "rep") rep = kv[2];
+                if (kv[1] == "ms")  ms = kv[2];
+            }
+            if (n != "" && rep != "" && ms != "")
+                printf "%s,%s,%s,%s,%s,%s,%s\n", impl, n, rep, ms, job, nodes, tasks;
+        }' <<< "${run_out}" >> "${CSV}"
+done
+
 echo ""
-echo "======== Running tests with ${SLURM_NTASKS} MPI tasks ========"
-
-run_test cape_mamult      "Matrix multiplication (100x100)"
-run_test cape_pi          "Pi approximation"
-run_test cape_prime       "Prime counting"
-run_test cape_reduction   "Reduction"
-run_test cape_for         "Parallel for"
-run_test cape_vector1     "Vector operation 1"
-run_test cape_vector2     "Vector operation 2"
-
-echo ""
-echo "======== All tests complete ========"
-echo "Output file: cape_ucx_${SLURM_JOB_ID}.out"
+echo "Done. UCX benchmark CSV: ${CSV}"

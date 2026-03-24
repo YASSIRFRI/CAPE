@@ -181,10 +181,10 @@ static void cape_ucx_sendrecv(
         .cb.recv      = cape_recv_cb
     };
 
-    fprintf(stderr, "CAPE DBG node %d: sendrecv send_tag=0x%lx recv_tag=0x%lx"
-            " sendlen=%zu recvlen=%zu dest=%d src=%d token=0x%x\n",
-            __node__, (unsigned long)send_tag, (unsigned long)recv_tag,
-            sendlen, recvlen, dest, src, (unsigned)token);
+    // fprintf(stderr, "CAPE DBG node %d: sendrecv send_tag=0x%lx recv_tag=0x%lx"
+    //         " sendlen=%zu recvlen=%zu dest=%d src=%d token=0x%x\n",
+    //         __node__, (unsigned long)send_tag, (unsigned long)recv_tag,
+    //         sendlen, recvlen, dest, src, (unsigned)token);
 
     /* Post receive before send to avoid lost-message races */
     void *rreq = ucp_tag_recv_nbx(ucp_worker, recvbuf, recvlen,
@@ -192,30 +192,30 @@ static void cape_ucx_sendrecv(
     void *sreq = ucp_tag_send_nbx(ucp_endpoints[dest], sendbuf, sendlen,
                                    send_tag, &sp);
 
-    fprintf(stderr, "CAPE DBG node %d: rreq=%p sreq=%p\n",
-            __node__, rreq, sreq);
+    // fprintf(stderr, "CAPE DBG node %d: rreq=%p sreq=%p\n",
+    //         __node__, rreq, sreq);
 
     ucp_tag_t matched_tag = 0;
     cape_ucx_wait(rreq, recvlen, 1, &matched_tag);
 
     /* Hex dump first 48 bytes of received data */
-    {
-        size_t dumplen = recvlen < 48 ? recvlen : 48;
-        fprintf(stderr, "CAPE DBG node %d: recv buf [%zu bytes] matched_tag=0x%lx:",
-                __node__, recvlen, (unsigned long)matched_tag);
-        for (size_t di = 0; di < dumplen; di++)
-            fprintf(stderr, " %02x", (unsigned char)((char *)recvbuf)[di]);
-        fprintf(stderr, "\n");
-    }
-    /* Also dump what we SENT for comparison */
-    {
-        size_t dumplen = sendlen < 48 ? sendlen : 48;
-        fprintf(stderr, "CAPE DBG node %d: send buf [%zu bytes]:",
-                __node__, sendlen);
-        for (size_t di = 0; di < dumplen; di++)
-            fprintf(stderr, " %02x", (unsigned char)((const char *)sendbuf)[di]);
-        fprintf(stderr, "\n");
-    }
+    // {
+    //     size_t dumplen = recvlen < 48 ? recvlen : 48;
+    //     fprintf(stderr, "CAPE DBG node %d: recv buf [%zu bytes] matched_tag=0x%lx:",
+    //             __node__, recvlen, (unsigned long)matched_tag);
+    //     for (size_t di = 0; di < dumplen; di++)
+    //         fprintf(stderr, " %02x", (unsigned char)((char *)recvbuf)[di]);
+    //     fprintf(stderr, "\n");
+    // }
+    // /* Also dump what we SENT for comparison */
+    // {
+    //     size_t dumplen = sendlen < 48 ? sendlen : 48;
+    //     fprintf(stderr, "CAPE DBG node %d: send buf [%zu bytes]:",
+    //             __node__, sendlen);
+    //     for (size_t di = 0; di < dumplen; di++)
+    //         fprintf(stderr, " %02x", (unsigned char)((const char *)sendbuf)[di]);
+    //     fprintf(stderr, "\n");
+    // }
 
     cape_ucx_wait(sreq, 0, 0, NULL);
 }
@@ -1565,9 +1565,9 @@ int hypercube_allreduce(unsigned int node, unsigned int num_nodes, char ckpt_fla
 		                  &recv_msg_size, sizeof(unsigned long), partner,
 		                  size_token);
 
-		fprintf(stderr, "CAPE DBG node %d step %d: SIZE exchange done"
-		        " sent=%lu recv=%lu\n",
-		        node, i, send_msg_size, recv_msg_size);
+		// fprintf(stderr, "CAPE DBG node %d step %d: SIZE exchange done"
+		//         " sent=%lu recv=%lu\n",
+		//         node, i, send_msg_size, recv_msg_size);
 
 		recv_msg = malloc(sizeof(char) * recv_msg_size);
 		if (recv_msg == NULL) {
