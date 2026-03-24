@@ -1,7 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/time.h>
-#include <unistd.h>
 #include "../../include/cape.h"
 
 #define DEFAULT_N 100
@@ -83,9 +82,7 @@ int main(int argc, char **argv)
 	cape_declare_variable(&b, CAPE_INT, MAX_N * MAX_N, 0);
 	cape_declare_variable(&c, CAPE_INT, MAX_N * MAX_N, 0);
 
-	fprintf(stderr, "DEBUG: before cape_init (pid=%d)\n", (int)getpid()); fflush(stderr);
 	cape_init();
-	fprintf(stderr, "DEBUG: after cape_init node=%d/%d\n", cape_get_node_num(), cape_get_num_nodes()); fflush(stderr);
 
 	cape_declare_variable(&n, CAPE_INT, 1, 0);
 	srand(12345);

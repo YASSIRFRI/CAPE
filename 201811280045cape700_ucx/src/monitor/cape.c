@@ -1655,8 +1655,6 @@ int require_allreduce(char ckpt_flag){
 	
 	//printf("Node %d:  nnodes = %d - is_power_of2: %d \n", __node__, __nnodes__, is_power_of_two(__nnodes__));
 	
-	fprintf(stderr, "DEBUG require_allreduce: node=%d after_ckpt_size=%zu\n",
-	        __node__, after_ckpt_size); fflush(stderr);
 	if (after_ckpt_size == 0) return 0 ;
 	__allreduce_epoch__++;
 	epoch = __allreduce_epoch__ & 0x0fffU;
@@ -2281,14 +2279,11 @@ void cape_finalize(){
 		}
 		if (req == NULL)
 			continue; /* completed immediately */
-		/* Spin until close completes */
-		cape_ucx_req_t *r = (cape_ucx_req_t *)req;
-		while (!r->completed)
+		/* Spin until close completes using ucp_request_check_status —
+		 * ep close does not fire send/recv callbacks so r->completed
+		 * is never set; poll the request status directly instead. */
+		while (ucp_request_check_status(req) == UCS_INPROGRESS)
 			ucp_worker_progress(ucp_worker);
-		r->completed  = 0;
-		r->status     = UCS_OK;
-		r->recv_len   = 0;
-		r->sender_tag = 0;
 		ucp_request_free(req);
 	}
 	free(ucp_endpoints);
