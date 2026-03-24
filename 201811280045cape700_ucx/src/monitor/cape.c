@@ -776,9 +776,13 @@ FILE *generate_checkpoint(VarList *vlist,
 			v = v->next;
 		}			
 	}
-	fseek(stream, 2*sizeof(unsigned long), SEEK_SET);
-	fwrite(&size_s, sizeof(unsigned long), 1, stream);
-	fflush(stream);
+	long end_pos = ftell(stream);
+	if (end_pos >= 0) {
+		fseek(stream, 2*sizeof(unsigned long), SEEK_SET);
+		fwrite(&size_s, sizeof(unsigned long), 1, stream);
+		fseek(stream, end_pos, SEEK_SET);
+		fflush(stream);
+	}
 	
 	return stream;
 
@@ -1390,9 +1394,13 @@ int merge_checkpoint(char *src_ckpt, size_t src_size, char ckpt_flag){
 		
 
 	}	
-	fseek(after_ckpt_stream, 2*sizeof(unsigned long), SEEK_SET);
-	fwrite(&size_s, sizeof(unsigned long), 1, after_ckpt_stream);
-	fflush(after_ckpt_stream);
+	long end_pos = ftell(after_ckpt_stream);
+	if (end_pos >= 0) {
+		fseek(after_ckpt_stream, 2*sizeof(unsigned long), SEEK_SET);
+		fwrite(&size_s, sizeof(unsigned long), 1, after_ckpt_stream);
+		fseek(after_ckpt_stream, end_pos, SEEK_SET);
+		fflush(after_ckpt_stream);
+	}
 
 	fclose(tmp_stream);
 	free(tmp_ckpt);	
