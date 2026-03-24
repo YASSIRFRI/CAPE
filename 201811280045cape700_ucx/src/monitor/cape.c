@@ -785,27 +785,35 @@ FILE *generate_checkpoint(VarList *vlist,
 int merge_data(char *s1, unsigned int pos_s1, unsigned size_s1, 
 				char *s2, unsigned int pos_s2, unsigned size_s2){
 	unsigned int p1, p2;
+	unsigned int end_s1, end_s2;
 	unsigned int len, len1, len2;
 	long addr1, addr2, old_addr2;
 	p1 = pos_s1;
 	p2 = pos_s2;
+	end_s1 = pos_s1 + size_s1;
+	end_s2 = pos_s2 + size_s2;
 	
 	//printf("*** NODE %d: Position 1= %d, possition 2 =%d: Merge %ld bytes s1 and %ld bytes s2 \n", __node__, pos_s1, pos_s2, size_s1, size_s2);
 	
-	if ((p1 >= size_s1) && (p2 >=size_s2))
+	if ((p1 >= end_s1) && (p2 >= end_s2))
 		return 0;
 	//if S1 == NULL =>  S = S2
-	if (p1 >= size_s1 ){
-		fwrite(s2 + p2, size_s2 - p2, 1, after_ckpt_stream);
+	if (p1 >= end_s1){
+		fwrite(s2 + p2, end_s2 - p2, 1, after_ckpt_stream);
 		fflush(after_ckpt_stream);
 		return 1;
 	}
 	//if S2 == NULL => S = S1
-	if (p2 >= size_s2 ){
-		fwrite(s1 + p1, size_s1 - p1, 1, after_ckpt_stream);
+	if (p2 >= end_s2){
+		fwrite(s1 + p1, end_s1 - p1, 1, after_ckpt_stream);
 		fflush(after_ckpt_stream);
 		return 1;
-	}		
+	}
+	/* Need at least [addr,len] header in each stream */
+	if ((end_s1 - p1) < (sizeof(long) + sizeof(unsigned int)) ||
+	    (end_s2 - p2) < (sizeof(long) + sizeof(unsigned int)))
+		return -1;
+
 	addr1 = *(long *) (s1 + p1 );
 	p1 += sizeof(long);
 	len1 = *(unsigned int *) (s1 + p1) ;
@@ -815,7 +823,7 @@ int merge_data(char *s1, unsigned int pos_s1, unsigned size_s1,
 	p2 += sizeof(long);
 	len2 = *(unsigned int *) (s2 + p2) ;
 	p2 += sizeof(unsigned int);
-	while ((p1 < size_s1) && (p2 < size_s2)){
+	while ((p1 < end_s1) && (p2 < end_s2)){
 		//printf("\n Node %ld: (0x%lx - %ld ) + (0x%lx - %ld)", __node__, addr1, len1, addr2, len2) ;
 		if (addr1 <= addr2){
 			fwrite(&addr1, sizeof(long), 1, after_ckpt_stream);
@@ -830,7 +838,7 @@ int merge_data(char *s1, unsigned int pos_s1, unsigned size_s1,
 			//S2:     -----		 ------	
 			if ((addr1 + len1) >= (addr2+ len2)){
 				p2 += len2;
-				if (p2 < size_s2) {				
+				if (p2 < end_s2) {
 					addr2 = *(long *) (s2 + p2 );
 					p2 += sizeof(long);
 					len2 = *(unsigned int *) (s2 + p2) ;
@@ -845,7 +853,7 @@ int merge_data(char *s1, unsigned int pos_s1, unsigned size_s1,
 				len2 = len2 - (addr2 - old_addr2);
 				p2 += (addr2 - old_addr2);			
 			}			
-			if (p1 < size_s1) {
+			if (p1 < end_s1) {
 				addr1 = *(long *) (s1 + p1 );
 				p1 += sizeof(long);
 				len1 = *(unsigned int *) (s1 + p1) ;
@@ -863,7 +871,7 @@ int merge_data(char *s1, unsigned int pos_s1, unsigned size_s1,
 				fflush(after_ckpt_stream);
 				//printf("\n Node %ld: Write: 0x%lx : %ld ", __node__, addr2, len2) ;
 				p2 += len2;					
-				if (p2 >= size_s2) break;
+				if (p2 >= end_s2) break;
 				addr2 = *(long *) (s2 + p2 );
 				p2 += sizeof(long);
 				len2 = *(unsigned int *) (s2 + p2) ;
@@ -887,7 +895,7 @@ int merge_data(char *s1, unsigned int pos_s1, unsigned size_s1,
 		}	
 	}	
 	//Merge the rest part
-	if (p1 < size_s1){
+	if (p1 < end_s1){
 		fwrite(&addr1, sizeof(long), 1, after_ckpt_stream);
 		fflush(after_ckpt_stream);
 		fwrite(&len1, sizeof(unsigned int), 1, after_ckpt_stream);
@@ -896,7 +904,7 @@ int merge_data(char *s1, unsigned int pos_s1, unsigned size_s1,
 		fflush(after_ckpt_stream);
 		p1 += len1;
 	}	
-	while (p1 < size_s1){
+	while (p1 < end_s1){
 		addr1 = *(long *) (s1 + p1 );
 		p1 += sizeof(long);
 		len1 = *(unsigned int *) (s1 + p1) ;
@@ -910,7 +918,7 @@ int merge_data(char *s1, unsigned int pos_s1, unsigned size_s1,
 		p1 += len1;		
 	}
 	
-	if (p2 < size_s2){
+	if (p2 < end_s2){
 		fwrite(&addr2, sizeof(long), 1, after_ckpt_stream);
 		fflush(after_ckpt_stream);
 		fwrite(&len2, sizeof(unsigned int), 1, after_ckpt_stream);
@@ -919,7 +927,7 @@ int merge_data(char *s1, unsigned int pos_s1, unsigned size_s1,
 		fflush(after_ckpt_stream);
 		p2 += len2;
 	}	
-	while (p2 < size_s2){
+	while (p2 < end_s2){
 		addr2 = *(long *) (s2 + p2 );
 		p2 += sizeof(long);
 		len2 = *(unsigned int *) (s2 + p2) ;
@@ -1030,8 +1038,8 @@ int merge_checkpoint(char *src_ckpt, size_t src_size, char ckpt_flag){
 			tmp_pointer += sizeof(long);
 
 			len = *(unsigned int *) (tmp_ckpt + tmp_pointer) ;
-			src_pointer += sizeof(long);
-			tmp_pointer += sizeof(long);
+			src_pointer += sizeof(unsigned int);
+			tmp_pointer += sizeof(unsigned int);
 			
 			fwrite(&addr, sizeof(long), 1, after_ckpt_stream);
 			fflush(after_ckpt_stream);
