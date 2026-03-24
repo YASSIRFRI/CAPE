@@ -46,6 +46,7 @@ static int __nnodes__ = -1 ; // Number of working nodes
 static int __total_nodes__ = -1 ; //Total nodes in the system
 static int __cape_token__ = -1;
 static unsigned int __current_session__ = -1;
+static uint32_t __allreduce_epoch__ = 0;
 
 static __is_inside_parallel_region__ = 0;
 
@@ -92,17 +93,23 @@ static void cape_recv_cb(void *request, ucs_status_t status,
 /* Block until a non-blocking UCX request finishes */
 static void cape_ucx_wait(void *req)
 {
-    if (req == NULL)
-        return; /* completed immediately */
+	if (req == NULL)
+		return; /* completed immediately */
     if (UCS_PTR_IS_ERR(req)) {
         fprintf(stderr, "CAPE UCX error: %s\n",
                 ucs_status_string(UCS_PTR_STATUS(req)));
         exit(1);
     }
-    cape_ucx_req_t *r = (cape_ucx_req_t *)req;
-    while (!r->completed)
-        ucp_worker_progress(ucp_worker);
-    ucp_request_free(req);
+	cape_ucx_req_t *r = (cape_ucx_req_t *)req;
+	while (!r->completed)
+		ucp_worker_progress(ucp_worker);
+	if (r->status != UCS_OK) {
+		fprintf(stderr, "CAPE UCX request failed: %s\n",
+		        ucs_status_string(r->status));
+		ucp_request_free(req);
+		exit(1);
+	}
+	ucp_request_free(req);
 }
 
 /*
@@ -110,14 +117,14 @@ static void cape_ucx_wait(void *req)
  * The UCX tag encodes the sender rank in the upper 32 bits so that a
  * receiver matches only messages from the expected peer.
  */
-#define CAPE_UCX_TAG(sender_rank, step) \
-    (((uint64_t)(unsigned int)(sender_rank) << 32) | (uint64_t)(step))
+#define CAPE_UCX_TAG(sender_rank, token) \
+    (((uint64_t)(unsigned int)(sender_rank) << 32) | (uint64_t)(uint32_t)(token))
 #define CAPE_UCX_TAG_MASK  UINT64_MAX
 
 static void cape_ucx_sendrecv(
         const void *sendbuf, size_t sendlen, int dest,
         void       *recvbuf, size_t recvlen, int src,
-        uint64_t    step)
+        uint32_t    token)
 {
     ucp_request_param_t sp = {
         .op_attr_mask = UCP_OP_ATTR_FIELD_CALLBACK,
@@ -130,10 +137,10 @@ static void cape_ucx_sendrecv(
 
     /* Post receive before send to avoid lost-message races */
     void *rreq = ucp_tag_recv_nbx(ucp_worker, recvbuf, recvlen,
-                                   CAPE_UCX_TAG(src,      step),
+                                   CAPE_UCX_TAG(src,      token),
                                    CAPE_UCX_TAG_MASK, &rp);
     void *sreq = ucp_tag_send_nbx(ucp_endpoints[dest], sendbuf, sendlen,
-                                   CAPE_UCX_TAG(__node__, step), &sp);
+                                   CAPE_UCX_TAG(__node__, token), &sp);
 
     cape_ucx_wait(rreq);
     cape_ucx_wait(sreq);
@@ -1438,11 +1445,12 @@ unsigned int nearest_power_of_two(unsigned int n){
  * Send and Receive checkpoint based on hypercube algorithm  
  *----------------------------------------------------------------------
  */
-int hypercube_allreduce(unsigned int node, unsigned int num_nodes, char ckpt_flag){
+int hypercube_allreduce(unsigned int node, unsigned int num_nodes, char ckpt_flag, uint32_t epoch){
 	int i, nsteps = 0;
 	unsigned int partner;
 	unsigned long send_msg_size=0, recv_msg_size = 0;
 	int rc = 0;
+	uint32_t size_token, data_token;
 	char *send_msg;
 	char *recv_msg;
 
@@ -1453,11 +1461,13 @@ int hypercube_allreduce(unsigned int node, unsigned int num_nodes, char ckpt_fla
 
 	for(i = 0; i < nsteps; i++){
 		partner = node ^ (1 << i);
+		size_token = (epoch << 8) | (uint32_t)((i * 2) & 0xff);
+		data_token = (epoch << 8) | (uint32_t)(((i * 2) + 1) & 0xff);
 
 		/* Exchange message sizes (step tag: i*2) */
 		cape_ucx_sendrecv(&send_msg_size, sizeof(unsigned long), partner,
 		                  &recv_msg_size, sizeof(unsigned long), partner,
-		                  (uint64_t)(i * 2));
+		                  size_token);
 
 		recv_msg = malloc(sizeof(char) * recv_msg_size);
 		if (recv_msg == NULL) {
@@ -1469,7 +1479,7 @@ int hypercube_allreduce(unsigned int node, unsigned int num_nodes, char ckpt_fla
 		/* Exchange checkpoint data (step tag: i*2+1) */
 		cape_ucx_sendrecv(send_msg, send_msg_size, partner,
 		                  recv_msg, recv_msg_size, partner,
-		                  (uint64_t)(i * 2 + 1));
+		                  data_token);
 
 		rc = merge_checkpoint(recv_msg, recv_msg_size, ckpt_flag);
 
@@ -1490,13 +1500,14 @@ int hypercube_allreduce(unsigned int node, unsigned int num_nodes, char ckpt_fla
  * Send and Receive checkpoint based on Ring algorithm  
  *----------------------------------------------------------------------
  */
-int ring_allreduce(unsigned int node, unsigned int nnodes, char ckpt_flag){
+int ring_allreduce(unsigned int node, unsigned int nnodes, char ckpt_flag, uint32_t epoch){
 
 	char *send_msg;
 	char *recv_msg;
 	char *owned_send_msg;
 	unsigned int send_msg_size, recv_msg_size;
 	int rc;
+	uint32_t size_token, data_token;
 
 	unsigned int i, left, right;
 	left  = (node - 1 + nnodes) % nnodes;
@@ -1507,10 +1518,12 @@ int ring_allreduce(unsigned int node, unsigned int nnodes, char ckpt_flag){
 	send_msg_size = after_ckpt_size;
 
 	for(i = 1; i < nnodes; i++){
+		size_token = (epoch << 8) | (uint32_t)((i * 2) & 0xff);
+		data_token = (epoch << 8) | (uint32_t)(((i * 2) + 1) & 0xff);
 		/* Exchange sizes: send to right, receive from left (step tag: i*2) */
 		cape_ucx_sendrecv(&send_msg_size, sizeof(unsigned int), right,
 		                  &recv_msg_size, sizeof(unsigned int), left,
-		                  (uint64_t)(i * 2));
+		                  size_token);
 
 		recv_msg = malloc(sizeof(char) * recv_msg_size);
 		if (recv_msg == NULL) {
@@ -1524,7 +1537,7 @@ int ring_allreduce(unsigned int node, unsigned int nnodes, char ckpt_flag){
 		/* Exchange data (step tag: i*2+1) */
 		cape_ucx_sendrecv(send_msg, send_msg_size, right,
 		                  recv_msg, recv_msg_size, left,
-		                  (uint64_t)(i * 2 + 1));
+		                  data_token);
 
 		rc = merge_checkpoint(recv_msg, recv_msg_size, ckpt_flag);
 		if (owned_send_msg != NULL) {
@@ -1553,14 +1566,16 @@ int ring_allreduce(unsigned int node, unsigned int nnodes, char ckpt_flag){
  */
 
 int require_allreduce(char ckpt_flag){
+	uint32_t epoch;
 	
 	//printf("Node %d:  nnodes = %d - is_power_of2: %d \n", __node__, __nnodes__, is_power_of_two(__nnodes__));
 	
-	if (after_ckpt_size == 0) return 0 ;	
+	if (after_ckpt_size == 0) return 0 ;
+	epoch = ++__allreduce_epoch__;
 	if (is_power_of_two(__nnodes__))
-		return hypercube_allreduce(__node__, __nnodes__, ckpt_flag);
+		return hypercube_allreduce(__node__, __nnodes__, ckpt_flag, epoch);
 	else
-		return ring_allreduce(__node__, __nnodes__, ckpt_flag);
+		return ring_allreduce(__node__, __nnodes__, ckpt_flag, epoch);
 	
 }
 
