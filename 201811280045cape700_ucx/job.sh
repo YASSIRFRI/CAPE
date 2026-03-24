@@ -7,7 +7,7 @@
 #SBATCH --output=cape_ucx_%j.out
 #SBATCH --error=cape_ucx_%j.err
 # Adjust the partition name to match your cluster:
-##SBATCH --partition=your_partition
+#SBATCH --partition=compute
 
 set -euo pipefail
 
