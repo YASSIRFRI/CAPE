@@ -61,21 +61,24 @@ cape_critical2: $(C_FOLDER)/monitor/cape.c ./$(I_FOLDER)/cape.h
 cape_sections_nowait: $(C_FOLDER)/monitor/cape.c ./$(I_FOLDER)/cape.h
 	$(CC) -w $(CFLAGS) $(C_FOLDER)/monitor/cape.c $(C_FOLDER)/apps/cape_sections_nowait.c -o $(EXE_FOLDER)/cape_sections_nowait $(LDFLAGS)
 
-#Compile applications
-APP_SRC := $(wildcard src/apps/*.c)
-APP_EXE := $(addprefix $(EXE_FOLDER)/,$(notdir $(APP_SRC:.c=)))
-
-monitor:
+# Build monitor object (used by the apps target below)
+monitor: $(C_FOLDER)/monitor/cape.c ./$(I_FOLDER)/cape.h
 	$(CC) -w -c $(CFLAGS) -o $(L_FOLDER)/cape.o $(C_FOLDER)/monitor/cape.c
 
-apps: $(APP_EXE)
+# Build all apps: compile monitor once, then link each app against it
+APPS = cape_mamult cape_mamult2d cape_pi cape_prime cape_prime_number \
+       cape_reduction cape_for cape_for_nowait cape_parallel_for \
+       cape_vector1 cape_vector2 cape_critical cape_critical2 \
+       cape_sections_nowait cape_test_heap
 
-$(O_FOLDER)/%.o: $(C_FOLDER)/apps/%.c
-	$(CC) -w -c $(CFLAGS) -o $@ $<
-
-$(EXE_FOLDER)/%: $(O_FOLDER)/%.o
-	$(CC) -o $@ $(L_FOLDER)/cape.o $< $(LDFLAGS)
-	rm $?
+apps: monitor
+	@for app in $(APPS); do \
+	    src=$(C_FOLDER)/apps/$${app}.c; \
+	    [ -f "$$src" ] || continue; \
+	    echo "  CC+LD  $$app"; \
+	    $(CC) -w $(CFLAGS) -o $(EXE_FOLDER)/$$app \
+	        $(L_FOLDER)/cape.o $$src $(LDFLAGS); \
+	done
 
 #Clean
 cleanall:
