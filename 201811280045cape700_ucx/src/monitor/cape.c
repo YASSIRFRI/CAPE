@@ -131,9 +131,21 @@ static void cape_ucx_wait(void *req, size_t expect_len, int check_len,
 		        " sender_tag=0x%lx\n",
 		        r->recv_len, expect_len,
 		        (unsigned long)r->sender_tag);
+		/* Reset before freeing so reuse from pool starts clean */
+		r->completed  = 0;
+		r->status     = UCS_OK;
+		r->recv_len   = 0;
+		r->sender_tag = 0;
 		ucp_request_free(req);
 		exit(1);
 	}
+	/* Reset before freeing so reuse from pool starts clean.
+	 * UCX's request_init may only be called on first allocation,
+	 * not on reuse from the free pool. */
+	r->completed  = 0;
+	r->status     = UCS_OK;
+	r->recv_len   = 0;
+	r->sender_tag = 0;
 	ucp_request_free(req);
 }
 
