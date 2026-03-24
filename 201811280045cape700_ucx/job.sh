@@ -12,11 +12,17 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
+JOB_TAG="${SLURM_JOB_ID:-local_$$}"
 
 RESULTS_DIR="${RESULTS_DIR:-${SLURM_SUBMIT_DIR:-${SCRIPT_DIR}}/results}"
 if ! mkdir -p "${RESULTS_DIR}" 2>/dev/null; then
     RESULTS_DIR="/tmp/${USER:-$(id -un)}/cape_results"
     mkdir -p "${RESULTS_DIR}"
+fi
+BUILD_DIR="${BUILD_DIR:-${SLURM_SUBMIT_DIR:-/tmp/${USER:-$(id -un)}}/cape_build_ucx_${JOB_TAG}}"
+if ! mkdir -p "${BUILD_DIR}/bin" "${BUILD_DIR}/obj" "${BUILD_DIR}/lib" 2>/dev/null; then
+    BUILD_DIR="/tmp/${USER:-$(id -un)}/cape_build_ucx_${JOB_TAG}"
+    mkdir -p "${BUILD_DIR}/bin" "${BUILD_DIR}/obj" "${BUILD_DIR}/lib"
 fi
 
 N_VALUES_STR="${N_VALUES_STR:-64 96 128 160 192 224 256 320 384 448 512}"
@@ -63,9 +69,14 @@ else
     PMIX_LINK=""
 fi
 
-mkdir -p bin obj lib
-make cleanall 2>/dev/null || true
-make cape_mamult \
+make -C "${SCRIPT_DIR}" cleanall \
+    EXE_FOLDER="${BUILD_DIR}/bin" \
+    O_FOLDER="${BUILD_DIR}/obj" \
+    L_FOLDER="${BUILD_DIR}/lib" 2>/dev/null || true
+make -C "${SCRIPT_DIR}" cape_mamult \
+    EXE_FOLDER="${BUILD_DIR}/bin" \
+    O_FOLDER="${BUILD_DIR}/obj" \
+    L_FOLDER="${BUILD_DIR}/lib" \
     UCX_SRC="${UCX_INC}" \
     UCX_GEN="${UCX_INC}" \
     UCX_LIB="${UCX_LIB}" \
@@ -73,12 +84,13 @@ make cape_mamult \
     "PMIX_LINK=${PMIX_LINK}" \
     CC=gcc
 
-CSV="${RESULTS_DIR}/ucx_mamult_${SLURM_JOB_ID}.csv"
+CSV="${RESULTS_DIR}/ucx_mamult_${JOB_TAG}.csv"
 echo "impl,n,rep,app_ms,job_id,nodes,ntasks" > "${CSV}"
 
 echo "Benchmarking UCX cape_mamult"
 echo "N values: ${N_VALUES[*]}"
 echo "Reps per N: ${REPS}"
+echo "Build dir: ${BUILD_DIR}"
 echo "CSV: ${CSV}"
 
 for n in "${N_VALUES[@]}"; do
@@ -91,7 +103,7 @@ for n in "${N_VALUES[@]}"; do
              --nodes="${SLURM_JOB_NUM_NODES}" \
              --ntasks="${SLURM_NTASKS}" \
              --ntasks-per-node=1 \
-             bin/cape_mamult "${n}" "${REPS}"
+             "${BUILD_DIR}/bin/cape_mamult" "${n}" "${REPS}"
     )
 
     echo "${run_out}"
