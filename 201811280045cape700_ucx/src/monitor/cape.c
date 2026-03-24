@@ -769,7 +769,9 @@ FILE *generate_checkpoint(VarList *vlist,
 			v = v->next;
 		}			
 	}
-	memcpy((after_ckpt + 2*sizeof(unsigned long)), &size_s, sizeof(unsigned long));		
+	fseek(stream, 2*sizeof(unsigned long), SEEK_SET);
+	fwrite(&size_s, sizeof(unsigned long), 1, stream);
+	fflush(stream);
 	
 	return stream;
 
@@ -1080,6 +1082,9 @@ int merge_checkpoint(char *src_ckpt, size_t src_size, char ckpt_flag){
 		fprintf(stderr,
 		        "CAPE merge_checkpoint: invalid size_s values (size_s1=%lu tmp_size=%zu size_s2=%lu src_size=%zu)\n",
 		        size_s1, tmp_size, size_s2, src_size);
+		fprintf(stderr,
+		        "CAPE merge_checkpoint: header dump local(t=%lu pc=0x%lx) remote(t=%lu pc=0x%lx)\n",
+		        t1, pc1, t2, pc2);
 		fclose(tmp_stream);
 		free(tmp_ckpt);
 		return -1;
@@ -1378,7 +1383,9 @@ int merge_checkpoint(char *src_ckpt, size_t src_size, char ckpt_flag){
 		
 
 	}	
-	memcpy(after_ckpt + (2*sizeof(unsigned long)), &size_s, sizeof(unsigned long) );		
+	fseek(after_ckpt_stream, 2*sizeof(unsigned long), SEEK_SET);
+	fwrite(&size_s, sizeof(unsigned long), 1, after_ckpt_stream);
+	fflush(after_ckpt_stream);
 
 	fclose(tmp_stream);
 	free(tmp_ckpt);	
