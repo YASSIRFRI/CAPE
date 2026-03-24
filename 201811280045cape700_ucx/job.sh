@@ -35,7 +35,6 @@ fi
 
 N_VALUES_STR="${N_VALUES_STR:-512 1024}"
 REPS="${REPS:-5}"
-RUN_TIMEOUT_SEC="${RUN_TIMEOUT_SEC:-600}"
 read -r -a N_VALUES <<< "${N_VALUES_STR}"
 
 module purge
@@ -99,7 +98,6 @@ echo "impl,n,rep,app_ms,job_id,nodes,ntasks" > "${CSV}"
 echo "Benchmarking UCX cape_mamult"
 echo "N values: ${N_VALUES[*]}"
 echo "Reps per N: ${REPS}"
-echo "Per-N timeout (s): ${RUN_TIMEOUT_SEC}"
 echo "Build dir: ${BUILD_DIR}"
 echo "CSV: ${CSV}"
 
@@ -111,28 +109,17 @@ for n in "${N_VALUES[@]}"; do
     : > "${run_log}"
 
     set +e
-    if command -v timeout >/dev/null 2>&1; then
-        UCX_RNDV_THRESH="${UCX_RNDV_THRESH:-65536}" \
-        timeout "${RUN_TIMEOUT_SEC}" \
-        srun --mpi=pmix \
-             --nodes="${SLURM_JOB_NUM_NODES}" \
-             --ntasks="${SLURM_NTASKS}" \
-             --ntasks-per-node=1 \
-             "${BUILD_DIR}/bin/cape_mamult" "${n}" "${REPS}" 2>&1 | tee -a "${run_log}"
-        rc=${PIPESTATUS[0]}
-    else
-        UCX_RNDV_THRESH="${UCX_RNDV_THRESH:-65536}" \
-        srun --mpi=pmix \
-             --nodes="${SLURM_JOB_NUM_NODES}" \
-             --ntasks="${SLURM_NTASKS}" \
-             --ntasks-per-node=1 \
-             "${BUILD_DIR}/bin/cape_mamult" "${n}" "${REPS}" 2>&1 | tee -a "${run_log}"
-        rc=${PIPESTATUS[0]}
-    fi
+    UCX_RNDV_THRESH="${UCX_RNDV_THRESH:-65536}" \
+    srun --mpi=pmix \
+         --nodes="${SLURM_JOB_NUM_NODES}" \
+         --ntasks="${SLURM_NTASKS}" \
+         --ntasks-per-node=1 \
+         "${BUILD_DIR}/bin/cape_mamult" "${n}" "${REPS}" 2>&1 | tee -a "${run_log}"
+    rc=${PIPESTATUS[0]}
     set -e
 
     if [ "${rc}" -ne 0 ]; then
-        echo "WARN: UCX run failed or timed out for n=${n} (rc=${rc}). See ${run_log}" >&2
+        echo "WARN: UCX run failed for n=${n} (rc=${rc}). See ${run_log}" >&2
         continue
     fi
 
