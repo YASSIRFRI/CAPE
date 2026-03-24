@@ -2301,11 +2301,26 @@ void cape_finalize(){
 	/* Flush and close all endpoints */
 	ucp_request_param_t close_param;
 	memset(&close_param, 0, sizeof(close_param));
-	close_param.op_attr_mask = UCP_OP_ATTR_FIELD_FLAGS;
-	close_param.flags        = UCP_EP_CLOSE_FLAG_FORCE;
 	for (int i = 0; i < __nnodes__; i++) {
 		void *req = ucp_ep_close_nbx(ucp_endpoints[i], &close_param);
-		cape_ucx_wait(req, 0, 0, NULL);
+		if (UCS_PTR_IS_ERR(req)) {
+			/* endpoint may already be in error state – skip */
+			fprintf(stderr, "CAPE DBG node %d: ep_close[%d] error: %s\n",
+			        __node__, i,
+			        ucs_status_string(UCS_PTR_STATUS(req)));
+			continue;
+		}
+		if (req == NULL)
+			continue; /* completed immediately */
+		/* Spin until close completes */
+		cape_ucx_req_t *r = (cape_ucx_req_t *)req;
+		while (!r->completed)
+			ucp_worker_progress(ucp_worker);
+		r->completed  = 0;
+		r->status     = UCS_OK;
+		r->recv_len   = 0;
+		r->sender_tag = 0;
+		ucp_request_free(req);
 	}
 	free(ucp_endpoints);
 	ucp_endpoints = NULL;
