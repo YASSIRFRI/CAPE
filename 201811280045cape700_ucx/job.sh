@@ -34,8 +34,8 @@ if ! mkdir -p "${BUILD_DIR}/bin" "${BUILD_DIR}/obj" "${BUILD_DIR}/lib" 2>/dev/nu
 fi
 
 N_VALUES_STR="${N_VALUES_STR:-512 1024}"
-REPS="${REPS:-3}"
-SRUN_MPI_FLAG="${SRUN_MPI_FLAG:---mpi=pmix}"
+REPS="${REPS:-5}"
+RUN_TIMEOUT_SEC="${RUN_TIMEOUT_SEC:-600}"
 read -r -a N_VALUES <<< "${N_VALUES_STR}"
 
 module purge
