@@ -876,7 +876,7 @@ int merge_data(char *s1, unsigned int pos_s1, unsigned size_s1,
 				fflush(after_ckpt_stream);				
 				fwrite(&len, sizeof(unsigned int), 1, after_ckpt_stream);
 				fflush(after_ckpt_stream);
-				fwrite(s2 + p2, len2, 1, after_ckpt_stream);
+				fwrite(s2 + p2, len, 1, after_ckpt_stream);
 				fflush(after_ckpt_stream);
 				//printf("\n Node %ld: Write: 0x%lx : %ld ", __node__, addr2, len2) ;
 				p2 += len;
