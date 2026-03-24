@@ -1077,7 +1077,10 @@ int merge_checkpoint(char *src_ckpt, size_t src_size, char ckpt_flag){
 	fflush(tmp_stream);
 	
 	//Close des_stream file
-	fclose(after_ckpt_stream);
+	if (after_ckpt_stream != NULL) {
+		fclose(after_ckpt_stream);
+		after_ckpt_stream = NULL;
+	}
 	free(after_ckpt);
 	after_ckpt = NULL;
 	after_ckpt_size = 0;
@@ -2046,8 +2049,7 @@ void cape_init(){
 	/* Keep default CAPE messages on eager path unless user explicitly overrides.
 	 * This avoids rendezvous metadata appearing in the receive buffer on some
 	 * UCX/IB setups when checkpoint payload is around 10KB. */
-	if (getenv("UCX_RNDV_THRESH") == NULL)
-		setenv("UCX_RNDV_THRESH", "65536", 0);
+	setenv("UCX_RNDV_THRESH", "65536", 0);
 
 	/* ------------------------------------------------------------------
 	 * 1. Get rank and size.
@@ -2509,12 +2511,18 @@ void __exit_func(){
 }
 
 void require_generate_checkpoint(char ops_flag){
-			
+
 	after_ckpt_stream = generate_checkpoint(__var_list_head,
 								__parallel_level__,		\
 								EXIT_CHECKPOINT,				\
 								ops_flag,						\
-								__time_stamp__,		\ 
-								__pc__);	
-	
+								__time_stamp__,		\
+								__pc__);
+	/* Close the memstream so that after_ckpt becomes a plain malloc'd
+	   buffer.  UCX RDMA (rendezvous protocol) needs a stable, registered
+	   buffer — keeping the stream open can interfere with that. */
+	if (after_ckpt_stream != NULL) {
+		fclose(after_ckpt_stream);
+		after_ckpt_stream = NULL;
+	}
 }
