@@ -655,7 +655,7 @@ FILE *generate_checkpoint(VarList *vlist,
 	fflush(stream);
 	
 	if (ckpt_data_size <= 0){ 
-		size_s = 12;
+		size_s = sizeof(unsigned long) * 3;
 		fwrite(&size_s, sizeof(unsigned long), 1, stream);
 		fflush(stream);		
 		return stream;
@@ -769,7 +769,7 @@ FILE *generate_checkpoint(VarList *vlist,
 			v = v->next;
 		}			
 	}
-	memcpy((after_ckpt + 2*sizeof(unsigned long)), &size_s, sizeof(unsigned int));		
+	memcpy((after_ckpt + 2*sizeof(unsigned long)), &size_s, sizeof(unsigned long));		
 	
 	return stream;
 
@@ -818,11 +818,15 @@ int merge_data(char *s1, unsigned int pos_s1, unsigned size_s1,
 	p1 += sizeof(long);
 	len1 = *(unsigned int *) (s1 + p1) ;
 	p1 += sizeof(unsigned int);
+	if (len1 > (end_s1 - p1))
+		return -1;
 	
 	addr2 = *(long *) (s2 + p2 );
 	p2 += sizeof(long);
 	len2 = *(unsigned int *) (s2 + p2) ;
 	p2 += sizeof(unsigned int);
+	if (len2 > (end_s2 - p2))
+		return -1;
 	while ((p1 < end_s1) && (p2 < end_s2)){
 		//printf("\n Node %ld: (0x%lx - %ld ) + (0x%lx - %ld)", __node__, addr1, len1, addr2, len2) ;
 		if (addr1 <= addr2){
@@ -830,6 +834,8 @@ int merge_data(char *s1, unsigned int pos_s1, unsigned size_s1,
 			fflush(after_ckpt_stream);
 			fwrite(&len1, sizeof(unsigned int), 1, after_ckpt_stream);
 			fflush(after_ckpt_stream);			
+			if (len1 > (end_s1 - p1))
+				return -1;
 			fwrite(s1 + p1, len1, 1, after_ckpt_stream);
 			fflush(after_ckpt_stream);
 			p1 += len1;
@@ -839,10 +845,14 @@ int merge_data(char *s1, unsigned int pos_s1, unsigned size_s1,
 			if ((addr1 + len1) >= (addr2+ len2)){
 				p2 += len2;
 				if (p2 < end_s2) {
+					if ((end_s2 - p2) < (sizeof(long) + sizeof(unsigned int)))
+						return -1;
 					addr2 = *(long *) (s2 + p2 );
 					p2 += sizeof(long);
 					len2 = *(unsigned int *) (s2 + p2) ;
 					p2 += sizeof(unsigned int);
+					if (len2 > (end_s2 - p2))
+						return -1;
 				}
 			}			
 			//S1: [-----------)       [--------)
@@ -854,10 +864,14 @@ int merge_data(char *s1, unsigned int pos_s1, unsigned size_s1,
 				p2 += (addr2 - old_addr2);			
 			}			
 			if (p1 < end_s1) {
+				if ((end_s1 - p1) < (sizeof(long) + sizeof(unsigned int)))
+					return -1;
 				addr1 = *(long *) (s1 + p1 );
 				p1 += sizeof(long);
 				len1 = *(unsigned int *) (s1 + p1) ;
 				p1 += sizeof(unsigned int);
+				if (len1 > (end_s1 - p1))
+					return -1;
 			}					
 		}else{ //addr1 > addr2
 			//S1:                      [-----------)         [--------)
@@ -867,15 +881,21 @@ int merge_data(char *s1, unsigned int pos_s1, unsigned size_s1,
 				fflush(after_ckpt_stream);
 				fwrite(&len2, sizeof(unsigned int), 1, after_ckpt_stream);
 				fflush(after_ckpt_stream);			
+				if (len2 > (end_s2 - p2))
+					return -1;
 				fwrite(s2 + p2, len2, 1, after_ckpt_stream);
 				fflush(after_ckpt_stream);
 				//printf("\n Node %ld: Write: 0x%lx : %ld ", __node__, addr2, len2) ;
 				p2 += len2;					
 				if (p2 >= end_s2) break;
+				if ((end_s2 - p2) < (sizeof(long) + sizeof(unsigned int)))
+					return -1;
 				addr2 = *(long *) (s2 + p2 );
 				p2 += sizeof(long);
 				len2 = *(unsigned int *) (s2 + p2) ;
 				p2 += sizeof(unsigned int);												
+				if (len2 > (end_s2 - p2))
+					return -1;
 			//S1:       [-----------)        [--------)
 			//S2:       	 -------[--------)--------[------)	
 			}else {
@@ -884,6 +904,8 @@ int merge_data(char *s1, unsigned int pos_s1, unsigned size_s1,
 				fflush(after_ckpt_stream);				
 				fwrite(&len, sizeof(unsigned int), 1, after_ckpt_stream);
 				fflush(after_ckpt_stream);
+				if (len > (end_s2 - p2))
+					return -1;
 				fwrite(s2 + p2, len, 1, after_ckpt_stream);
 				fflush(after_ckpt_stream);
 				//printf("\n Node %ld: Write: 0x%lx : %ld ", __node__, addr2, len2) ;
@@ -900,15 +922,21 @@ int merge_data(char *s1, unsigned int pos_s1, unsigned size_s1,
 		fflush(after_ckpt_stream);
 		fwrite(&len1, sizeof(unsigned int), 1, after_ckpt_stream);
 		fflush(after_ckpt_stream);			
+		if (len1 > (end_s1 - p1))
+			return -1;
 		fwrite(s1 + p1, len1, 1, after_ckpt_stream);
 		fflush(after_ckpt_stream);
 		p1 += len1;
 	}	
 	while (p1 < end_s1){
+		if ((end_s1 - p1) < (sizeof(long) + sizeof(unsigned int)))
+			return -1;
 		addr1 = *(long *) (s1 + p1 );
 		p1 += sizeof(long);
 		len1 = *(unsigned int *) (s1 + p1) ;
 		p1 += sizeof(unsigned int);
+		if (len1 > (end_s1 - p1))
+			return -1;
 		fwrite(&addr1, sizeof(long), 1, after_ckpt_stream);
 		fflush(after_ckpt_stream);
 		fwrite(&len1, sizeof(unsigned int), 1, after_ckpt_stream);
@@ -923,15 +951,21 @@ int merge_data(char *s1, unsigned int pos_s1, unsigned size_s1,
 		fflush(after_ckpt_stream);
 		fwrite(&len2, sizeof(unsigned int), 1, after_ckpt_stream);
 		fflush(after_ckpt_stream);			
+		if (len2 > (end_s2 - p2))
+			return -1;
 		fwrite(s2 + p2, len2, 1, after_ckpt_stream);
 		fflush(after_ckpt_stream);
 		p2 += len2;
 	}	
 	while (p2 < end_s2){
+		if ((end_s2 - p2) < (sizeof(long) + sizeof(unsigned int)))
+			return -1;
 		addr2 = *(long *) (s2 + p2 );
 		p2 += sizeof(long);
 		len2 = *(unsigned int *) (s2 + p2) ;
 		p2 += sizeof(unsigned int);
+		if (len2 > (end_s2 - p2))
+			return -1;
 		fwrite(&addr2, sizeof(long), 1, after_ckpt_stream);
 		fflush(after_ckpt_stream);
 		fwrite(&len2, sizeof(unsigned int), 1, after_ckpt_stream);
@@ -956,6 +990,7 @@ int merge_checkpoint(char *src_ckpt, size_t src_size, char ckpt_flag){
 	FILE *tmp_stream;
 	char *tmp_ckpt;
 	size_t tmp_size;
+	const unsigned long ckpt_header_size = sizeof(unsigned long) * 3;
 	
 	unsigned int src_pointer =0, tmp_pointer =0;
 	
@@ -984,6 +1019,7 @@ int merge_checkpoint(char *src_ckpt, size_t src_size, char ckpt_flag){
  	unsigned long t1, t2;
  	unsigned long pc1, pc2;
  	unsigned long size_s = 0, size_s1, size_s2;
+	int merge_rc = 0;
   	
 	
  	t1 = *(unsigned long *)tmp_ckpt;
@@ -998,6 +1034,10 @@ int merge_checkpoint(char *src_ckpt, size_t src_size, char ckpt_flag){
  	
  	size_s1 =  *(unsigned long *)(tmp_ckpt + tmp_pointer);
  	size_s2 =  *(unsigned long *)(src_ckpt + src_pointer);
+	if (size_s1 < ckpt_header_size) size_s1 = ckpt_header_size;
+	if (size_s2 < ckpt_header_size) size_s2 = ckpt_header_size;
+	if (size_s1 > tmp_size) size_s1 = tmp_size;
+	if (size_s2 > src_size) size_s2 = src_size;
  	 	
  	src_pointer += sizeof(unsigned long);
  	tmp_pointer += sizeof(unsigned long);
@@ -1013,7 +1053,12 @@ int merge_checkpoint(char *src_ckpt, size_t src_size, char ckpt_flag){
 		fflush(after_ckpt_stream);
 		fwrite(&size_s, sizeof(unsigned long), 1, after_ckpt_stream);
 		fflush(after_ckpt_stream);
-		merge_data(tmp_ckpt, tmp_pointer, size_s1, src_ckpt, src_pointer, size_s2);		
+		if ((size_s1 > tmp_pointer) && (size_s2 > src_pointer))
+			merge_rc = merge_data(tmp_ckpt, tmp_pointer, size_s1 - tmp_pointer, src_ckpt, src_pointer, size_s2 - src_pointer);
+		else if (size_s1 > tmp_pointer)
+			fwrite(tmp_ckpt + tmp_pointer, size_s1 - tmp_pointer, 1, after_ckpt_stream);
+		else if (size_s2 > src_pointer)
+			fwrite(src_ckpt + src_pointer, size_s2 - src_pointer, 1, after_ckpt_stream);
 	}else{	//C <-	t2, pc2, size_s, S2 + S1		
 		fwrite(&t2, sizeof(unsigned long), 1, after_ckpt_stream);
 		fflush(after_ckpt_stream);
@@ -1021,7 +1066,20 @@ int merge_checkpoint(char *src_ckpt, size_t src_size, char ckpt_flag){
 		fflush(after_ckpt_stream);
 		fwrite(&size_s, sizeof(unsigned long), 1, after_ckpt_stream);
 		fflush(after_ckpt_stream);		
-		merge_data(src_ckpt, src_pointer, size_s2, tmp_ckpt, tmp_pointer, size_s1);				
+		if ((size_s1 > tmp_pointer) && (size_s2 > src_pointer))
+			merge_rc = merge_data(src_ckpt, src_pointer, size_s2 - src_pointer, tmp_ckpt, tmp_pointer, size_s1 - tmp_pointer);
+		else if (size_s2 > src_pointer)
+			fwrite(src_ckpt + src_pointer, size_s2 - src_pointer, 1, after_ckpt_stream);
+		else if (size_s1 > tmp_pointer)
+			fwrite(tmp_ckpt + tmp_pointer, size_s1 - tmp_pointer, 1, after_ckpt_stream);
+	}
+	if (merge_rc < 0) {
+		fprintf(stderr, "CAPE merge_checkpoint: malformed S section (size_s1=%lu size_s2=%lu)\n",
+		        size_s1, size_s2);
+		fclose(tmp_stream);
+		free(tmp_ckpt);
+		tmp_ckpt = NULL;
+		return -1;
 	}
 	tmp_pointer = size_s1;
 	src_pointer = size_s2;	
