@@ -66,15 +66,17 @@ static ucp_ep_h     *ucp_endpoints;  /* one per peer process */
 typedef struct {
     volatile int completed;
     ucs_status_t status;
-    size_t recv_len;
+    size_t       recv_len;
+    ucp_tag_t    sender_tag;   /* actual tag of matched message */
 } cape_ucx_req_t;
 
 static void cape_ucx_req_init(void *request)
 {
     cape_ucx_req_t *r = (cape_ucx_req_t *)request;
-    r->completed = 0;
-    r->status    = UCS_OK;
-    r->recv_len  = 0;
+    r->completed  = 0;
+    r->status     = UCS_OK;
+    r->recv_len   = 0;
+    r->sender_tag = 0;
 }
 
 static void cape_send_cb(void *request, ucs_status_t status, void *user_data)
@@ -89,14 +91,19 @@ static void cape_recv_cb(void *request, ucs_status_t status,
 {
     cape_ucx_req_t *r = (cape_ucx_req_t *)request;
     r->status    = status;
-    if (info != NULL)
-        r->recv_len = info->length;
+    if (info != NULL) {
+        r->recv_len   = info->length;
+        r->sender_tag = info->sender_tag;
+    }
     r->completed = 1;
 }
 
-/* Block until a non-blocking UCX request finishes */
-static void cape_ucx_wait(void *req, size_t expect_len, int check_len)
+/* Block until a non-blocking UCX request finishes.
+ * out_tag: if non-NULL, receives the sender_tag from the matched message. */
+static void cape_ucx_wait(void *req, size_t expect_len, int check_len,
+                          ucp_tag_t *out_tag)
 {
+    if (out_tag) *out_tag = 0;
     if (req == NULL)
         return; /* completed immediately */
     if (UCS_PTR_IS_ERR(req)) {
@@ -107,15 +114,23 @@ static void cape_ucx_wait(void *req, size_t expect_len, int check_len)
 	cape_ucx_req_t *r = (cape_ucx_req_t *)req;
 	while (!r->completed)
 		ucp_worker_progress(ucp_worker);
+	if (out_tag)
+		*out_tag = r->sender_tag;
 	if (r->status != UCS_OK) {
 		fprintf(stderr, "CAPE UCX request failed: %s\n",
 		        ucs_status_string(r->status));
 		ucp_request_free(req);
 		exit(1);
 	}
+	fprintf(stderr, "CAPE DBG node %d: wait done recv_len=%zu sender_tag=0x%lx"
+	        " expect_len=%zu check_len=%d\n",
+	        __node__, r->recv_len, (unsigned long)r->sender_tag,
+	        expect_len, check_len);
 	if (check_len && (r->recv_len != 0) && (r->recv_len != expect_len)) {
-		fprintf(stderr, "CAPE UCX recv length mismatch: got=%zu expected=%zu\n",
-		        r->recv_len, expect_len);
+		fprintf(stderr, "CAPE UCX recv length mismatch: got=%zu expected=%zu"
+		        " sender_tag=0x%lx\n",
+		        r->recv_len, expect_len,
+		        (unsigned long)r->sender_tag);
 		ucp_request_free(req);
 		exit(1);
 	}
@@ -140,24 +155,57 @@ static void cape_ucx_sendrecv(
         void       *recvbuf, size_t recvlen, int src,
         uint32_t    token)
 {
+    ucp_tag_t send_tag = CAPE_UCX_TAG(__node__, token);
+    ucp_tag_t recv_tag = CAPE_UCX_TAG(src,      token);
+
     ucp_request_param_t sp = {
         .op_attr_mask = UCP_OP_ATTR_FIELD_CALLBACK,
         .cb.send      = cape_send_cb
     };
     ucp_request_param_t rp = {
-        .op_attr_mask = UCP_OP_ATTR_FIELD_CALLBACK,
+        .op_attr_mask = UCP_OP_ATTR_FIELD_CALLBACK
+                      | UCP_OP_ATTR_FIELD_FLAGS,
+        .flags        = UCP_OP_ATTR_FLAG_NO_IMM_CMPL,
         .cb.recv      = cape_recv_cb
     };
 
+    fprintf(stderr, "CAPE DBG node %d: sendrecv send_tag=0x%lx recv_tag=0x%lx"
+            " sendlen=%zu recvlen=%zu dest=%d src=%d token=0x%x\n",
+            __node__, (unsigned long)send_tag, (unsigned long)recv_tag,
+            sendlen, recvlen, dest, src, (unsigned)token);
+
     /* Post receive before send to avoid lost-message races */
     void *rreq = ucp_tag_recv_nbx(ucp_worker, recvbuf, recvlen,
-                                   CAPE_UCX_TAG(src,      token),
-                                   CAPE_UCX_TAG_MASK, &rp);
+                                   recv_tag, CAPE_UCX_TAG_MASK, &rp);
     void *sreq = ucp_tag_send_nbx(ucp_endpoints[dest], sendbuf, sendlen,
-                                   CAPE_UCX_TAG(__node__, token), &sp);
+                                   send_tag, &sp);
 
-    cape_ucx_wait(rreq, recvlen, 1);
-    cape_ucx_wait(sreq, 0, 0);
+    fprintf(stderr, "CAPE DBG node %d: rreq=%p sreq=%p\n",
+            __node__, rreq, sreq);
+
+    ucp_tag_t matched_tag = 0;
+    cape_ucx_wait(rreq, recvlen, 1, &matched_tag);
+
+    /* Hex dump first 48 bytes of received data */
+    {
+        size_t dumplen = recvlen < 48 ? recvlen : 48;
+        fprintf(stderr, "CAPE DBG node %d: recv buf [%zu bytes] matched_tag=0x%lx:",
+                __node__, recvlen, (unsigned long)matched_tag);
+        for (size_t di = 0; di < dumplen; di++)
+            fprintf(stderr, " %02x", (unsigned char)((char *)recvbuf)[di]);
+        fprintf(stderr, "\n");
+    }
+    /* Also dump what we SENT for comparison */
+    {
+        size_t dumplen = sendlen < 48 ? sendlen : 48;
+        fprintf(stderr, "CAPE DBG node %d: send buf [%zu bytes]:",
+                __node__, sendlen);
+        for (size_t di = 0; di < dumplen; di++)
+            fprintf(stderr, " %02x", (unsigned char)((const char *)sendbuf)[di]);
+        fprintf(stderr, "\n");
+    }
+
+    cape_ucx_wait(sreq, 0, 0, NULL);
 }
 /***********************************************************************/
 
@@ -1489,10 +1537,25 @@ int hypercube_allreduce(unsigned int node, unsigned int num_nodes, char ckpt_fla
 		size_token = ((epoch & 0x0fffU) << 8) | (uint32_t)((i * 2) & 0xff);
 		data_token = ((epoch & 0x0fffU) << 8) | (uint32_t)(((i * 2) + 1) & 0xff);
 
+		/* Log send buffer header before exchange */
+		if (send_msg_size >= 24) {
+			unsigned long dbg_t  = *(unsigned long *)(send_msg);
+			unsigned long dbg_pc = *(unsigned long *)(send_msg + 8);
+			unsigned long dbg_ss = *(unsigned long *)(send_msg + 16);
+			fprintf(stderr, "CAPE DBG node %d step %d: SEND hdr t=%lu pc=0x%lx"
+			        " size_s=%lu total=%lu partner=%u epoch=%u\n",
+			        node, i, dbg_t, dbg_pc, dbg_ss, send_msg_size,
+			        partner, (unsigned)epoch);
+		}
+
 		/* Exchange message sizes (step tag: i*2) */
 		cape_ucx_sendrecv(&send_msg_size, sizeof(unsigned long), partner,
 		                  &recv_msg_size, sizeof(unsigned long), partner,
 		                  size_token);
+
+		fprintf(stderr, "CAPE DBG node %d step %d: SIZE exchange done"
+		        " sent=%lu recv=%lu\n",
+		        node, i, send_msg_size, recv_msg_size);
 
 		recv_msg = malloc(sizeof(char) * recv_msg_size);
 		if (recv_msg == NULL) {
@@ -1505,6 +1568,16 @@ int hypercube_allreduce(unsigned int node, unsigned int num_nodes, char ckpt_fla
 		cape_ucx_sendrecv(send_msg, send_msg_size, partner,
 		                  recv_msg, recv_msg_size, partner,
 		                  data_token);
+
+		/* Log received header */
+		if (recv_msg_size >= 24) {
+			unsigned long dbg_t  = *(unsigned long *)(recv_msg);
+			unsigned long dbg_pc = *(unsigned long *)(recv_msg + 8);
+			unsigned long dbg_ss = *(unsigned long *)(recv_msg + 16);
+			fprintf(stderr, "CAPE DBG node %d step %d: RECV hdr t=%lu pc=0x%lx"
+			        " size_s=%lu total=%lu\n",
+			        node, i, dbg_t, dbg_pc, dbg_ss, recv_msg_size);
+		}
 
 		rc = merge_checkpoint(recv_msg, recv_msg_size, ckpt_flag);
 
@@ -2049,7 +2122,7 @@ void cape_init(){
 	/* Keep default CAPE messages on eager path unless user explicitly overrides.
 	 * This avoids rendezvous metadata appearing in the receive buffer on some
 	 * UCX/IB setups when checkpoint payload is around 10KB. */
-	setenv("UCX_RNDV_THRESH", "65536", 0);
+	setenv("UCX_RNDV_THRESH", "inf", 0);
 
 	/* ------------------------------------------------------------------
 	 * 1. Get rank and size.
@@ -2196,9 +2269,14 @@ void cape_init(){
 	const char *sharedir = getenv("SLURM_SUBMIT_DIR");
 	if (!jobid)    jobid    = "local";
 	if (!sharedir) sharedir = ".";
+	fprintf(stderr, "CAPE DBG node %d: fs exchange jobid=%s sharedir=%s"
+	        " local_addr_len=%zu\n",
+	        __node__, jobid, sharedir, local_addr_len);
 	ucx_exchange_addresses_via_fs(sharedir, jobid, local_addr, local_addr_len);
 #endif
 
+	fprintf(stderr, "CAPE DBG node %d/%d: init complete, %d endpoints created\n",
+	        __node__, __nnodes__, __nnodes__);
 	ucp_worker_release_address(ucp_worker, local_addr);
 }
 
@@ -2215,7 +2293,7 @@ void cape_finalize(){
 	close_param.flags        = UCP_EP_CLOSE_FLAG_FORCE;
 	for (int i = 0; i < __nnodes__; i++) {
 		void *req = ucp_ep_close_nbx(ucp_endpoints[i], &close_param);
-		cape_ucx_wait(req, 0, 0);
+		cape_ucx_wait(req, 0, 0, NULL);
 	}
 	free(ucp_endpoints);
 	ucp_endpoints = NULL;
