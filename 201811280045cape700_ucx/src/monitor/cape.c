@@ -719,10 +719,10 @@ FILE *generate_checkpoint(VarList *vlist,
 				if (start_addr > start){
 					len = start_addr - start ;
 					fwrite(&start, sizeof(unsigned long), 1, stream);
-					fwrite(&len, sizeof(unsigned long), 1, stream);
+					fwrite(&len, sizeof(unsigned int), 1, stream);
 					fwrite(start, len, 1, stream);
 					fflush(stream);
-				}				
+				}
 			}
 			else{ //8 bytes			
 				//Ignore the data that is not modified
@@ -741,11 +741,11 @@ FILE *generate_checkpoint(VarList *vlist,
 				if (start_addr > start){
 					len = start_addr - start ;
 					fwrite(&start, sizeof(unsigned long), 1, stream);
-					fwrite(&len, sizeof(unsigned long), 1, stream);
+					fwrite(&len, sizeof(unsigned int), 1, stream);
 					fwrite(start, len, 1, stream);
 					fflush(stream);
-				}			
-			}
+				}
+	}
 		
 			//printf("\nNode %d: File pointer %ld - file size %ld \n",__node__, file_pointer, ckpt_data_size);
 		}
@@ -1349,7 +1349,7 @@ int inject_checkpoint(char *data_ckpt, size_t file_size){
 	if (file_size <= sizeof(unsigned long)*3) return 0;	
 	//printf("\n Node %d: inject ckpt - file size = %d bytes", __node__, file_size);
 	
-	__pc__ = *(unsigned long *) (data_ckpt+ 4); //get program counter
+	__pc__ = *(unsigned long *) (data_ckpt + sizeof(unsigned long)); //get program counter
 	file_pointer = sizeof(unsigned long) * 3; //timestime, program counter, size_s	
 	
 	while(file_pointer < file_size){
@@ -1358,8 +1358,8 @@ int inject_checkpoint(char *data_ckpt, size_t file_size){
 		file_pointer += sizeof(long);		
 		
 		len = *(unsigned int*) (data_ckpt + file_pointer );
-		file_pointer += sizeof(long);			
-		
+		file_pointer += sizeof(unsigned int);
+
 		memcpy(addr, data_ckpt+file_pointer, len)	;		
 		
 		//if (__node__ == 0)
