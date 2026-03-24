@@ -31,22 +31,53 @@ else
 fi
 
 # ── Resolve PMIx paths ────────────────────────────────────────────────────────
-# Prefer an EasyBuild PMIx module, then PMIX_HOME, then SLURM's bundled PMIx.
-if [ -n "${EBROOTPMIX:-}" ]; then
+# Try sources in priority order; each must provide both a header and a library.
+_pmix_found=0
+
+# 1. EasyBuild PMIx module (EBROOTPMIX set by module load PMIx/...)
+if [ "${_pmix_found}" -eq 0 ] && [ -n "${EBROOTPMIX:-}" ]; then
     PMIX_INC="${EBROOTPMIX}/include"
     PMIX_LIB="${EBROOTPMIX}/lib"
-elif [ -n "${PMIX_HOME:-}" ]; then
-    PMIX_INC="${PMIX_HOME}/include"
-    PMIX_LIB="${PMIX_HOME}/lib"
-elif pkg-config --exists pmix 2>/dev/null; then
+    _pmix_found=1
+fi
+
+# 2. pmix_info utility — available when PMIx is installed as a standalone package
+if [ "${_pmix_found}" -eq 0 ] && command -v pmix_info &>/dev/null; then
+    _pfx=$(pmix_info --path prefix 2>/dev/null | awk '{print $NF}')
+    if [ -f "${_pfx}/include/pmix.h" ]; then
+        PMIX_INC="${_pfx}/include"
+        PMIX_LIB="${_pfx}/lib"
+        _pmix_found=1
+    fi
+fi
+
+# 3. pkg-config
+if [ "${_pmix_found}" -eq 0 ] && pkg-config --exists pmix 2>/dev/null; then
     PMIX_INC=$(pkg-config --variable=includedir pmix)
     PMIX_LIB=$(pkg-config --variable=libdir pmix)
-else
-    # Last resort: SLURM ships its own PMIx in its lib directory
-    SLURM_LIB=$(dirname "$(srun --version 2>/dev/null; which srun)")/../lib 2>/dev/null || SLURM_LIB=/usr/lib64
-    PMIX_INC=/usr/include/pmix
-    PMIX_LIB=${SLURM_LIB}
-    echo "WARNING: PMIx not found via module or pkg-config; trying ${PMIX_LIB}" >&2
+    _pmix_found=1
+fi
+
+# 4. SLURM bundles PMIx — headers are next to the SLURM install
+if [ "${_pmix_found}" -eq 0 ] && command -v sinfo &>/dev/null; then
+    _slurm_pfx=$(dirname "$(dirname "$(command -v sinfo)")")
+    if [ -f "${_slurm_pfx}/include/pmix.h" ]; then
+        PMIX_INC="${_slurm_pfx}/include"
+        PMIX_LIB="${_slurm_pfx}/lib"
+        _pmix_found=1
+    fi
+fi
+
+# 5. System-wide fallback (/usr)
+if [ "${_pmix_found}" -eq 0 ] && [ -f "/usr/include/pmix.h" ]; then
+    PMIX_INC="/usr/include"
+    PMIX_LIB="/usr/lib64"
+    _pmix_found=1
+fi
+
+if [ "${_pmix_found}" -eq 0 ]; then
+    echo "ERROR: cannot locate PMIx headers (pmix.h). Load a PMIx module or set EBROOTPMIX." >&2
+    exit 1
 fi
 
 echo "========================================================"

@@ -27,59 +27,69 @@ LDFLAGS = $(UCX_LIB) $(PMIX_LIB) -Wl,-rpath,$(UCX_LIB_DIR) -Wl,-rpath,$(PMIX_HOM
 
 CC = cc
 
-#Get current folder
 PWD = $(shell pwd)
 
+# Shorthand: compile cape.c + one app.c into a single binary
+COMPILE = $(CC) -w $(CFLAGS) $(C_FOLDER)/monitor/cape.c
+
 all:
-	$(CC) -w $(CFLAGS) $(C_FOLDER)/monitor/cape.c $(C_FOLDER)/apps/cape_mamult.c -o $(EXE_FOLDER)/cape_mamult $(LDFLAGS)
-	$(CC) -w -D DDEBUG $(CFLAGS) $(C_FOLDER)/monitor/cape.c $(C_FOLDER)/apps/cape_reduction.c -o $(EXE_FOLDER)/cape_reduction $(LDFLAGS)
+	$(COMPILE) $(C_FOLDER)/apps/cape_mamult.c    -o $(EXE_FOLDER)/cape_mamult    $(LDFLAGS)
+	$(COMPILE) $(C_FOLDER)/apps/cape_reduction.c -o $(EXE_FOLDER)/cape_reduction $(LDFLAGS)
+
+# ── Individual targets ────────────────────────────────────────────────────────
 
 cape_mamult: $(C_FOLDER)/monitor/cape.c ./$(I_FOLDER)/cape.h
-	$(CC) -w $(CFLAGS) $(C_FOLDER)/monitor/cape.c $(C_FOLDER)/apps/cape_mamult.c -o $(EXE_FOLDER)/cape_mamult $(LDFLAGS)
+	$(COMPILE) $(C_FOLDER)/apps/cape_mamult.c -o $(EXE_FOLDER)/cape_mamult $(LDFLAGS)
 
-cape_reduction: $(C_FOLDER)/monitor/cape.c ./$(I_FOLDER)/cape.h
-	$(CC) -w -D DDEBUG $(CFLAGS) $(C_FOLDER)/monitor/cape.c $(C_FOLDER)/apps/cape_reduction.c -o $(EXE_FOLDER)/cape_reduction $(LDFLAGS)
+cape_mamult2d: $(C_FOLDER)/monitor/cape.c ./$(I_FOLDER)/cape.h
+	$(COMPILE) $(C_FOLDER)/apps/cape_mamult2d.c -o $(EXE_FOLDER)/cape_mamult2d $(LDFLAGS)
+
+cape_pi: $(C_FOLDER)/monitor/cape.c ./$(I_FOLDER)/cape.h
+	$(COMPILE) $(C_FOLDER)/apps/cape_pi.c -o $(EXE_FOLDER)/cape_pi $(LDFLAGS)
 
 cape_prime: $(C_FOLDER)/monitor/cape.c ./$(I_FOLDER)/cape.h
-	$(CC) -w -D DDEBUG $(CFLAGS) $(C_FOLDER)/monitor/cape.c $(C_FOLDER)/apps/cape_prime.c -o $(EXE_FOLDER)/cape_prime $(LDFLAGS)
+	$(COMPILE) $(C_FOLDER)/apps/cape_prime.c -o $(EXE_FOLDER)/cape_prime $(LDFLAGS)
 
 cape_prime_number: $(C_FOLDER)/monitor/cape.c ./$(I_FOLDER)/cape.h
-	$(CC) -w -D DDEBUG $(CFLAGS) $(C_FOLDER)/monitor/cape.c $(C_FOLDER)/apps/cape_prime_number.c -o $(EXE_FOLDER)/cape_prime_number $(LDFLAGS)
+	$(COMPILE) $(C_FOLDER)/apps/cape_prime_number.c -o $(EXE_FOLDER)/cape_prime_number $(LDFLAGS)
 
-cape_for_nowait: $(C_FOLDER)/monitor/cape.c ./$(I_FOLDER)/cape.h
-	$(CC) -w -D DDEBUG $(CFLAGS) $(C_FOLDER)/monitor/cape.c $(C_FOLDER)/apps/cape_for_nowait.c -o $(EXE_FOLDER)/cape_for_nowait $(LDFLAGS)
+cape_reduction: $(C_FOLDER)/monitor/cape.c ./$(I_FOLDER)/cape.h
+	$(COMPILE) $(C_FOLDER)/apps/cape_reduction.c -o $(EXE_FOLDER)/cape_reduction $(LDFLAGS)
 
 cape_for: $(C_FOLDER)/monitor/cape.c ./$(I_FOLDER)/cape.h
-	$(CC) -w -D DDEBUG $(CFLAGS) $(C_FOLDER)/monitor/cape.c $(C_FOLDER)/apps/cape_for.c -o $(EXE_FOLDER)/cape_for $(LDFLAGS)
+	$(COMPILE) $(C_FOLDER)/apps/cape_for.c -o $(EXE_FOLDER)/cape_for $(LDFLAGS)
+
+cape_for_nowait: $(C_FOLDER)/monitor/cape.c ./$(I_FOLDER)/cape.h
+	$(COMPILE) $(C_FOLDER)/apps/cape_for_nowait.c -o $(EXE_FOLDER)/cape_for_nowait $(LDFLAGS)
+
+cape_parallel_for: $(C_FOLDER)/monitor/cape.c ./$(I_FOLDER)/cape.h
+	$(COMPILE) $(C_FOLDER)/apps/cape_parallel_for.c -o $(EXE_FOLDER)/cape_parallel_for $(LDFLAGS)
+
+cape_vector1: $(C_FOLDER)/monitor/cape.c ./$(I_FOLDER)/cape.h
+	$(COMPILE) $(C_FOLDER)/apps/cape_vector1.c -o $(EXE_FOLDER)/cape_vector1 $(LDFLAGS)
+
+cape_vector2: $(C_FOLDER)/monitor/cape.c ./$(I_FOLDER)/cape.h
+	$(COMPILE) $(C_FOLDER)/apps/cape_vector2.c -o $(EXE_FOLDER)/cape_vector2 $(LDFLAGS)
 
 cape_critical: $(C_FOLDER)/monitor/cape.c ./$(I_FOLDER)/cape.h
-	$(CC) -w $(CFLAGS) $(C_FOLDER)/monitor/cape.c $(C_FOLDER)/apps/cape_critical.c -o $(EXE_FOLDER)/cape_critical $(LDFLAGS)
+	$(COMPILE) $(C_FOLDER)/apps/cape_critical.c -o $(EXE_FOLDER)/cape_critical $(LDFLAGS)
 
 cape_critical2: $(C_FOLDER)/monitor/cape.c ./$(I_FOLDER)/cape.h
-	$(CC) -w $(CFLAGS) $(C_FOLDER)/monitor/cape.c $(C_FOLDER)/apps/cape_critical2.c -o $(EXE_FOLDER)/cape_critical2 $(LDFLAGS)
+	$(COMPILE) $(C_FOLDER)/apps/cape_critical2.c -o $(EXE_FOLDER)/cape_critical2 $(LDFLAGS)
 
 cape_sections_nowait: $(C_FOLDER)/monitor/cape.c ./$(I_FOLDER)/cape.h
-	$(CC) -w $(CFLAGS) $(C_FOLDER)/monitor/cape.c $(C_FOLDER)/apps/cape_sections_nowait.c -o $(EXE_FOLDER)/cape_sections_nowait $(LDFLAGS)
+	$(COMPILE) $(C_FOLDER)/apps/cape_sections_nowait.c -o $(EXE_FOLDER)/cape_sections_nowait $(LDFLAGS)
 
-# Build monitor object (used by the apps target below)
-monitor: $(C_FOLDER)/monitor/cape.c ./$(I_FOLDER)/cape.h
-	$(CC) -w -c $(CFLAGS) -o $(L_FOLDER)/cape.o $(C_FOLDER)/monitor/cape.c
+cape_test_heap: $(C_FOLDER)/monitor/cape.c ./$(I_FOLDER)/cape.h
+	$(COMPILE) $(C_FOLDER)/apps/cape_test_heap.c -o $(EXE_FOLDER)/cape_test_heap $(LDFLAGS)
 
-# Build all apps: compile monitor once, then link each app against it
-APPS = cape_mamult cape_mamult2d cape_pi cape_prime cape_prime_number \
-       cape_reduction cape_for cape_for_nowait cape_parallel_for \
-       cape_vector1 cape_vector2 cape_critical cape_critical2 \
-       cape_sections_nowait cape_test_heap
+# ── Build all apps ────────────────────────────────────────────────────────────
+.PHONY: apps
+apps: cape_mamult cape_mamult2d cape_pi cape_prime cape_prime_number \
+      cape_reduction cape_for cape_for_nowait cape_parallel_for \
+      cape_vector1 cape_vector2 cape_critical cape_critical2 \
+      cape_sections_nowait cape_test_heap
 
-apps: monitor
-	@for app in $(APPS); do \
-	    src=$(C_FOLDER)/apps/$${app}.c; \
-	    [ -f "$$src" ] || continue; \
-	    echo "  CC+LD  $$app"; \
-	    $(CC) -w $(CFLAGS) -o $(EXE_FOLDER)/$$app \
-	        $(L_FOLDER)/cape.o $$src $(LDFLAGS); \
-	done
-
-#Clean
+# ── Clean ─────────────────────────────────────────────────────────────────────
 cleanall:
 	rm -f $(O_FOLDER)/* $(EXE_FOLDER)/* $(L_FOLDER)/*
