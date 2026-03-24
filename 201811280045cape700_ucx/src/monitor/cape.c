@@ -66,6 +66,7 @@ static ucp_ep_h     *ucp_endpoints;  /* one per peer process */
 typedef struct {
     volatile int completed;
     ucs_status_t status;
+    size_t recv_len;
 } cape_ucx_req_t;
 
 static void cape_ucx_req_init(void *request)
@@ -73,6 +74,7 @@ static void cape_ucx_req_init(void *request)
     cape_ucx_req_t *r = (cape_ucx_req_t *)request;
     r->completed = 0;
     r->status    = UCS_OK;
+    r->recv_len  = 0;
 }
 
 static void cape_send_cb(void *request, ucs_status_t status, void *user_data)
@@ -87,14 +89,16 @@ static void cape_recv_cb(void *request, ucs_status_t status,
 {
     cape_ucx_req_t *r = (cape_ucx_req_t *)request;
     r->status    = status;
+    if (info != NULL)
+        r->recv_len = info->length;
     r->completed = 1;
 }
 
 /* Block until a non-blocking UCX request finishes */
-static void cape_ucx_wait(void *req)
+static void cape_ucx_wait(void *req, size_t expect_len, int check_len)
 {
-	if (req == NULL)
-		return; /* completed immediately */
+    if (req == NULL)
+        return; /* completed immediately */
     if (UCS_PTR_IS_ERR(req)) {
         fprintf(stderr, "CAPE UCX error: %s\n",
                 ucs_status_string(UCS_PTR_STATUS(req)));
@@ -109,6 +113,12 @@ static void cape_ucx_wait(void *req)
 		ucp_request_free(req);
 		exit(1);
 	}
+	if (check_len && (r->recv_len != expect_len)) {
+		fprintf(stderr, "CAPE UCX recv length mismatch: got=%zu expected=%zu\n",
+		        r->recv_len, expect_len);
+		ucp_request_free(req);
+		exit(1);
+	}
 	ucp_request_free(req);
 }
 
@@ -117,8 +127,11 @@ static void cape_ucx_wait(void *req)
  * The UCX tag encodes the sender rank in the upper 32 bits so that a
  * receiver matches only messages from the expected peer.
  */
-#define CAPE_UCX_TAG(sender_rank, token) \
-    (((uint64_t)(unsigned int)(sender_rank) << 32) | (uint64_t)(uint32_t)(token))
+/*
+ * Keep matching bits in the low portion of the tag, which is the safest
+ * subset across transports that may not preserve/compare all high tag bits.
+ */
+#define CAPE_UCX_TAG(sender_rank, token) ((uint64_t)(uint32_t)(token))
 #define CAPE_UCX_TAG_MASK  UINT64_MAX
 
 static void cape_ucx_sendrecv(
@@ -131,7 +144,9 @@ static void cape_ucx_sendrecv(
         .cb.send      = cape_send_cb
     };
     ucp_request_param_t rp = {
-        .op_attr_mask = UCP_OP_ATTR_FIELD_CALLBACK,
+        .op_attr_mask = UCP_OP_ATTR_FIELD_CALLBACK
+                      | UCP_OP_ATTR_FIELD_FLAGS,
+        .flags        = UCP_OP_ATTR_FLAG_NO_IMM_CMPL,
         .cb.recv      = cape_recv_cb
     };
 
@@ -142,8 +157,8 @@ static void cape_ucx_sendrecv(
     void *sreq = ucp_tag_send_nbx(ucp_endpoints[dest], sendbuf, sendlen,
                                    CAPE_UCX_TAG(__node__, token), &sp);
 
-    cape_ucx_wait(rreq);
-    cape_ucx_wait(sreq);
+    cape_ucx_wait(rreq, recvlen, 1);
+    cape_ucx_wait(sreq, 0, 0);
 }
 /***********************************************************************/
 
@@ -2190,7 +2205,7 @@ void cape_finalize(){
 	close_param.flags        = UCP_EP_CLOSE_FLAG_FORCE;
 	for (int i = 0; i < __nnodes__; i++) {
 		void *req = ucp_ep_close_nbx(ucp_endpoints[i], &close_param);
-		cape_ucx_wait(req);
+		cape_ucx_wait(req, 0, 0);
 	}
 	free(ucp_endpoints);
 	ucp_endpoints = NULL;
