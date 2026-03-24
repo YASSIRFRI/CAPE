@@ -5,7 +5,9 @@
 #include <fcntl.h>
 #include "../../include/cape.h"
 #include <ucp/api/ucp.h>
+#ifdef USE_PMIX
 #include <pmix.h>
+#endif
 #include <unistd.h>
 #include <sys/mman.h>
 #include <string.h>
@@ -52,7 +54,9 @@ char __ckpt_data_file[100];
 int __ckpt_data_size = 0;
 
 /**********UCX + PMIx State ********************************************/
-static pmix_proc_t   pmix_myproc;     /* own namespace/rank from PMIx    */
+#ifdef USE_PMIX
+static pmix_proc_t   pmix_myproc;
+#endif
 static ucp_context_h ucp_context;
 static ucp_worker_h  ucp_worker;
 static ucp_ep_h     *ucp_endpoints;  /* one per peer process */
@@ -1689,11 +1693,77 @@ void cape_free_memory(unsigned long manager_addr){
  * Version 7.0
  * ---------------------------------------------------------------------
  */
+/*
+ * Bootstrap helper: exchange UCX worker addresses via files on a shared
+ * filesystem.  Each rank writes its address to a file, signals readiness,
+ * then waits until every other rank has done the same before reading peers.
+ *
+ * Files are named  <dir>/cape_ucx_<jobid>_addr_<rank>
+ *                  <dir>/cape_ucx_<jobid>_rdy_<rank>
+ * so multiple concurrent jobs never collide.
+ */
+static void ucx_exchange_addresses_via_fs(const char *dir, const char *jobid,
+                                          ucp_address_t *local_addr,
+                                          size_t local_addr_len)
+{
+	char path[512];
+	FILE *f;
+
+	/* Write own address */
+	snprintf(path, sizeof(path), "%s/cape_ucx_%s_addr_%d", dir, jobid, __node__);
+	f = fopen(path, "wb");
+	if (!f) { perror("CAPE UCX: write addr file"); exit(1); }
+	fwrite(&local_addr_len, sizeof(size_t), 1, f);
+	fwrite(local_addr, local_addr_len, 1, f);
+	fclose(f);
+
+	/* Signal ready */
+	snprintf(path, sizeof(path), "%s/cape_ucx_%s_rdy_%d", dir, jobid, __node__);
+	f = fopen(path, "w");
+	if (!f) { perror("CAPE UCX: write rdy file"); exit(1); }
+	fclose(f);
+
+	/* Wait for all peers */
+	for (int i = 0; i < __nnodes__; i++) {
+		snprintf(path, sizeof(path), "%s/cape_ucx_%s_rdy_%d", dir, jobid, i);
+		while (access(path, F_OK) != 0)
+			usleep(10000); /* 10 ms */
+	}
+
+	/* Create endpoints */
+	ucs_status_t st;
+	ucp_endpoints = malloc(__nnodes__ * sizeof(ucp_ep_h));
+	for (int i = 0; i < __nnodes__; i++) {
+		snprintf(path, sizeof(path), "%s/cape_ucx_%s_addr_%d", dir, jobid, i);
+		f = fopen(path, "rb");
+		if (!f) { perror("CAPE UCX: read peer addr file"); exit(1); }
+		size_t peer_len;
+		fread(&peer_len, sizeof(size_t), 1, f);
+		ucp_address_t *peer_addr = malloc(peer_len);
+		fread(peer_addr, peer_len, 1, f);
+		fclose(f);
+
+		ucp_ep_params_t ep_params;
+		memset(&ep_params, 0, sizeof(ep_params));
+		ep_params.field_mask = UCP_EP_PARAM_FIELD_REMOTE_ADDRESS;
+		ep_params.address    = peer_addr;
+		st = ucp_ep_create(ucp_worker, &ep_params, &ucp_endpoints[i]);
+		free(peer_addr);
+		if (st != UCS_OK) {
+			fprintf(stderr, "CAPE UCX: ucp_ep_create(%d) failed: %s\n",
+			        i, ucs_status_string(st));
+			exit(1);
+		}
+	}
+}
+
 void cape_init(){
 	/* ------------------------------------------------------------------
-	 * 1. Initialise PMIx — this gives us our rank and job size without
-	 *    relying on any particular environment variable naming convention.
+	 * 1. Get rank and size.
+	 *    With USE_PMIX: use the PMIx API (preferred, works with OpenMPI).
+	 *    Without      : read SLURM_PROCID / SLURM_NTASKS set by srun.
 	 * ------------------------------------------------------------------ */
+#ifdef USE_PMIX
 	PMIX_PROC_CONSTRUCT(&pmix_myproc);
 	pmix_status_t pst = PMIx_Init(&pmix_myproc, NULL, 0);
 	if (pst != PMIX_SUCCESS) {
@@ -1701,11 +1771,8 @@ void cape_init(){
 		        PMIx_Error_string(pst));
 		exit(1);
 	}
-
-	/* Rank is directly available in pmix_myproc.rank */
 	__node__ = (int)pmix_myproc.rank;
 
-	/* Job size requires a wildcard query on the namespace */
 	pmix_proc_t wildcard;
 	PMIX_PROC_CONSTRUCT(&wildcard);
 	PMIX_LOAD_NSPACE(wildcard.nspace, pmix_myproc.nspace);
@@ -1720,6 +1787,22 @@ void cape_init(){
 	}
 	__nnodes__ = (int)val->data.uint32;
 	PMIX_VALUE_RELEASE(val);
+#else
+	/* srun sets SLURM_PROCID and SLURM_NTASKS for every task */
+	const char *rank_str = getenv("SLURM_PROCID");
+	const char *size_str = getenv("SLURM_NTASKS");
+	/* Also accept OpenMPI env vars when running under mpirun locally */
+	if (!rank_str) rank_str = getenv("OMPI_COMM_WORLD_RANK");
+	if (!size_str) size_str = getenv("OMPI_COMM_WORLD_SIZE");
+	if (!rank_str || !size_str) {
+		fprintf(stderr, "CAPE UCX: cannot determine rank/size. "
+		        "Run via srun (sets SLURM_PROCID/SLURM_NTASKS) "
+		        "or compile with -DUSE_PMIX.\n");
+		exit(1);
+	}
+	__node__   = atoi(rank_str);
+	__nnodes__ = atoi(size_str);
+#endif
 
 	/* ------------------------------------------------------------------
 	 * 2. Initialise UCX context.
@@ -1758,22 +1841,23 @@ void cape_init(){
 	}
 
 	/* ------------------------------------------------------------------
-	 * 4. Publish local UCX worker address via the PMIx KVS, then fence
-	 *    so every rank can retrieve every other rank's address.
+	 * 4. Exchange worker addresses and build endpoints.
+	 *    With USE_PMIX: use the PMIx KVS + Fence (in-memory, fast).
+	 *    Without      : use files on the shared filesystem.
 	 * ------------------------------------------------------------------ */
 	ucp_address_t *local_addr;
 	size_t         local_addr_len;
 	ucp_worker_get_address(ucp_worker, &local_addr, &local_addr_len);
 
-	/* Store local address as a PMIx byte object */
+#ifdef USE_PMIX
 	char pmix_key[64];
 	snprintf(pmix_key, sizeof(pmix_key), "cape_ucx_addr_%d", __node__);
 
 	pmix_value_t kval;
 	PMIX_VALUE_CONSTRUCT(&kval);
-	kval.type             = PMIX_BYTE_OBJECT;
-	kval.data.bo.bytes    = (char *)local_addr;
-	kval.data.bo.size     = local_addr_len;
+	kval.type          = PMIX_BYTE_OBJECT;
+	kval.data.bo.bytes = (char *)local_addr;
+	kval.data.bo.size  = local_addr_len;
 
 	pst = PMIx_Put(PMIX_GLOBAL, pmix_key, &kval);
 	if (pst != PMIX_SUCCESS) {
@@ -1781,24 +1865,9 @@ void cape_init(){
 		        PMIx_Error_string(pst));
 		exit(1);
 	}
-	pst = PMIx_Commit();
-	if (pst != PMIX_SUCCESS) {
-		fprintf(stderr, "CAPE UCX: PMIx_Commit failed: %s\n",
-		        PMIx_Error_string(pst));
-		exit(1);
-	}
+	PMIx_Commit();
+	PMIx_Fence(&wildcard, 1, NULL, 0);
 
-	/* Collective fence — exchanges all committed KVS data across ranks */
-	pst = PMIx_Fence(&wildcard, 1, NULL, 0);
-	if (pst != PMIX_SUCCESS) {
-		fprintf(stderr, "CAPE UCX: PMIx_Fence failed: %s\n",
-		        PMIx_Error_string(pst));
-		exit(1);
-	}
-
-	/* ------------------------------------------------------------------
-	 * 5. Retrieve all peer addresses and create UCX endpoints.
-	 * ------------------------------------------------------------------ */
 	ucp_endpoints = malloc(__nnodes__ * sizeof(ucp_ep_h));
 	for (int i = 0; i < __nnodes__; i++) {
 		pmix_proc_t peer;
@@ -1814,27 +1883,35 @@ void cape_init(){
 			        i, PMIx_Error_string(pst));
 			exit(1);
 		}
-
 		ucp_ep_params_t ep_params;
 		memset(&ep_params, 0, sizeof(ep_params));
 		ep_params.field_mask = UCP_EP_PARAM_FIELD_REMOTE_ADDRESS;
 		ep_params.address    = (ucp_address_t *)peer_val->data.bo.bytes;
 		st = ucp_ep_create(ucp_worker, &ep_params, &ucp_endpoints[i]);
 		PMIX_VALUE_RELEASE(peer_val);
-
 		if (st != UCS_OK) {
 			fprintf(stderr, "CAPE UCX: ucp_ep_create(%d) failed: %s\n",
 			        i, ucs_status_string(st));
 			exit(1);
 		}
 	}
+#else
+	/* Use shared filesystem for rendezvous.
+	 * SLURM_JOB_ID namespaces the files so concurrent jobs don't collide.
+	 * SLURM_SUBMIT_DIR is the shared NFS directory sbatch was run from.   */
+	const char *jobid  = getenv("SLURM_JOB_ID");
+	const char *sharedir = getenv("SLURM_SUBMIT_DIR");
+	if (!jobid)    jobid    = "local";
+	if (!sharedir) sharedir = ".";
+	ucx_exchange_addresses_via_fs(sharedir, jobid, local_addr, local_addr_len);
+#endif
 
 	ucp_worker_release_address(ucp_worker, local_addr);
 }
 
 /*
  * ---------------------------------------------------------------------
- * Release the UCX + PMIx environment
+ * Release the UCX environment (and PMIx if enabled).
  * ---------------------------------------------------------------------
  */
 void cape_finalize(){
@@ -1853,7 +1930,20 @@ void cape_finalize(){
 	ucp_worker_destroy(ucp_worker);
 	ucp_cleanup(ucp_context);
 
+#ifdef USE_PMIX
 	PMIx_Finalize(NULL, 0);
+#else
+	/* Remove this rank's rendezvous files */
+	const char *jobid    = getenv("SLURM_JOB_ID");
+	const char *sharedir = getenv("SLURM_SUBMIT_DIR");
+	if (!jobid)    jobid    = "local";
+	if (!sharedir) sharedir = ".";
+	char path[512];
+	snprintf(path, sizeof(path), "%s/cape_ucx_%s_addr_%d", sharedir, jobid, __node__);
+	unlink(path);
+	snprintf(path, sizeof(path), "%s/cape_ucx_%s_rdy_%d",  sharedir, jobid, __node__);
+	unlink(path);
+#endif
 }
 /*
  * ---------------------------------------------------------------------

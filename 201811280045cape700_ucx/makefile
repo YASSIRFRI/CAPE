@@ -22,8 +22,18 @@ UCX_LIB  = -L$(UCX_LIB_DIR) -lucp -lucs
 PMIX_INC = -I$(PMIX_HOME)/include
 PMIX_LIB = -L$(PMIX_HOME)/lib -lpmix
 
-CFLAGS  = -I./$(I_FOLDER) $(UCX_INC) $(PMIX_INC)
-LDFLAGS = $(UCX_LIB) $(PMIX_LIB) -Wl,-rpath,$(UCX_LIB_DIR) -Wl,-rpath,$(PMIX_HOME)/lib
+# Set USE_PMIX=1 to compile with PMIx support (requires pmix.h + libpmix).
+# Default: off — uses SLURM env vars + shared filesystem for bootstrapping.
+ifeq ($(USE_PMIX),1)
+PMIX_FLAGS = -DUSE_PMIX $(PMIX_INC)
+PMIX_LINK  = $(PMIX_LIB) -Wl,-rpath,$(PMIX_HOME)/lib
+else
+PMIX_FLAGS =
+PMIX_LINK  =
+endif
+
+CFLAGS  = -I./$(I_FOLDER) $(UCX_INC) $(PMIX_FLAGS)
+LDFLAGS = $(UCX_LIB) $(PMIX_LINK) -Wl,-rpath,$(UCX_LIB_DIR)
 
 CC = cc
 
