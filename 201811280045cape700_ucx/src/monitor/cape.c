@@ -724,12 +724,10 @@ FILE *generate_checkpoint(VarList *vlist,
 	
 	//write time stamp into checkpoint file
 	fwrite(&timestamp, sizeof(unsigned long), 1, stream);
-	fflush(stream);
 	
 	//write program counter into checkpoint file
 	programcounter = pc ;
 	fwrite(&programcounter, sizeof(unsigned long), 1, stream);
-	fflush(stream);
 	
 	if (ckpt_data_size <= 0){ 
 		size_s = sizeof(unsigned long) * 3;
@@ -740,7 +738,6 @@ FILE *generate_checkpoint(VarList *vlist,
 	
 	//Write size_s into checkpoint file, and this place will be modified after writting S part
 	fwrite(&size_s, sizeof(unsigned long), 1, stream);
-	fflush(stream);
 	
 	//Move to current window (the current level of VarList)
 	v = vlist;
@@ -798,7 +795,6 @@ FILE *generate_checkpoint(VarList *vlist,
 					fwrite(&start, sizeof(unsigned long), 1, stream);
 					fwrite(&len, sizeof(unsigned int), 1, stream);
 					fwrite(start, len, 1, stream);
-					fflush(stream);
 				}
 			}
 			else{ //8 bytes			
@@ -820,7 +816,6 @@ FILE *generate_checkpoint(VarList *vlist,
 					fwrite(&start, sizeof(unsigned long), 1, stream);
 					fwrite(&len, sizeof(unsigned int), 1, stream);
 					fwrite(start, len, 1, stream);
-					fflush(stream);
 				}
 	}
 		
@@ -828,6 +823,7 @@ FILE *generate_checkpoint(VarList *vlist,
 		}
 	}	
 	//Identity size of S part
+	fflush(stream);
 	size_s = after_ckpt_size;		
 	//Write L part into checkpoint
 	if((cflag == EXIT_CHECKPOINT) && (ops_flag==TRUE)){
@@ -841,7 +837,6 @@ FILE *generate_checkpoint(VarList *vlist,
 				fwrite(&v->var.addr, sizeof(long), 1, stream);
 				fwrite(&len, sizeof(unsigned int), 1, stream);
 				fwrite(v->var.addr, len, 1, stream);
-				fflush(stream);				
 			}
 			v = v->next;
 		}			

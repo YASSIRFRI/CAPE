@@ -1,0 +1,109 @@
+% Data Type Transformation Rules
+% Patricia REINOSO, 29 09 2017
+% 
+% Revision history:
+% 1.0 Initial revision - 29 09 2017
+%
+% Set of rules that deals with the variable types.
+% Data types considered:
+% - Integer.
+% - Character.
+% - Double.
+% - Float.
+% - Long.
+% - Unsigned character.
+% - Unsigned interger.
+% - Unsigned float.
+
+% Definition of data type as the union
+% of decl_specifiers taken from the C Grammar 
+% and the data type defined in the CAPE Grammar.
+
+define data_type 
+		[decl_specifiers]
+	|	[cape_data_type]
+end define
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%				VARIABLE TYPE REPLACEMENT 			  	%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+% Functions for replacing the variable type to the corresponding one.
+% replaceVarType is the intermediate function.
+function replaceVarType 
+	replace [data_type]
+		DeclSpec [data_type]
+	by 
+		DeclSpec [replaceIntType] 
+				 [replaceCharType]
+				 [replaceDoubleType]
+				 [replaceFloatType] 
+				 [replaceLongType] 
+				 [replaceUnsignedCharType]
+				 [replaceUnsignedFloatType] 
+				 [replaceUnsignedIntType]
+end function
+
+% Handles the character type.
+function replaceCharType
+	replace [data_type]
+		char
+	by 
+		CAPE_CHAR
+end function
+
+% Handles the double type.
+function replaceDoubleType
+	replace [data_type]
+		double
+	by 
+		CAPE_DOUBLE
+end function
+
+% Handles the float type.
+function replaceFloatType
+	replace [data_type]
+		'float
+	by 
+		CAPE_FLOAT
+end function
+
+% Handles the interger type.
+function replaceIntType
+	replace [data_type]
+		int
+	by 
+		CAPE_INT
+end function
+
+% Handles the long type.
+function replaceLongType
+	replace [data_type]
+		'long
+	by 
+		CAPE_LONG
+end function
+
+% Handles the unsigned character type.
+function replaceUnsignedCharType
+	replace [data_type]
+		unsigned char
+	by 
+		CAPE_UNSIGNED_CHAR
+end function
+
+% Handles the unsigned float type.
+function replaceUnsignedFloatType
+	replace [data_type]
+		unsigned 'float
+	by 
+		CAPE_UNSIGNED_FLOAT
+end function
+
+% Handles the unsigned interger type.
+function replaceUnsignedIntType
+	replace [data_type]
+		unsigned int
+	by 
+		CAPE_UNSIGNED_INT
+end function

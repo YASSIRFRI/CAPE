@@ -1,0 +1,261 @@
+% Grammar definition for OpenMP.
+% Patricia REINOSO, 29 09 2017
+% 
+% Revision history:
+% 1.0 Initial revision - 29 09 2017
+%
+% Grammar definition for OpenMP, based on C syntax.
+% Constructs and clauses are included.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%						KEYS 						  	%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+keys
+	automic
+	barrier
+	critical
+	copyin
+	copyprivate
+	default
+	firstprivate
+	flush
+	for
+	lastprivate
+	master
+	max
+	min
+	omp
+	ordered
+	parallel
+	private
+	reduction
+	shared
+	sections
+	single
+	threadprivat
+end keys
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%				ENVIRONMENT ROUTINES 				  	%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+define omp_environment_routine
+		omp_set_num_threads([reference_id])	    
+	|	omp_get_num_threads()					
+	|	omp_get_thread_num()					
+end define 
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%					DIRECTIVES 						  	%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+define pragma_omp
+		'#pragma omp [omp_construct]
+end define 
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%					CONSTRUCTS		 				  	%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+define omp_construct
+		[threadprivate_construct]
+	|	[parallel_construct]
+	|	[parallel_for_construct]
+	|	[parallel_sections_construct]
+	|	[for_construct]
+	|	[sections_construct]
+	|	[single_construct]
+	|	[master_construct]
+	|	[critical_construct]
+	|	[barrier_construct]
+	|	[automic_construct] 
+	|	[flush_construct]
+	|	ordered
+end define
+
+define threadprivate_construct 
+		threadprivate([list decl_specifiers]) [NL]
+end define
+
+define parallel_construct
+		parallel [repeat parallel_construct_clauses]	[NL]
+		[statement]
+end define
+
+define parallel_for_construct
+		parallel for [repeat parallel_construct_clauses] [NL]
+		[for_statement]
+end define
+
+define parallel_sections_construct
+		parallel sections [repeat parallel_construct_clauses] [NL]
+		'{ 
+			[repeat section_structure+]
+		'}
+end define 
+
+define for_construct
+		'for [repeat for_construct_clauses]		[NL]
+		[for_statement]
+end define
+
+define sections_construct
+		sections [repeat sections_construct_clauses]	[NL]
+		'{ 
+			[repeat section_structure+]
+		'}
+end define 
+
+define section_structure
+		'['#pragma omp section']	[NL]
+		[repeat compound_statement_body]
+end define
+
+define single_construct
+		single 	[repeat single_construct_clauses]	[NL]
+		[compound_statement]
+end define 
+
+define master_construct 
+		master [NL]
+		[compound_statement]
+end define 
+
+define critical_construct
+		critical [NL]
+		[compound_statement]
+end define
+
+define barrier_construct
+		barrier	[NL]
+end define
+
+define automic_construct
+		automic [NL]
+		[compound_statement]
+end define
+
+define flush_construct
+		flush 							[NL]
+	|	flush ([list decl_specifiers]) 	[NL]
+end define
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%						CLAUSES 					  	%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+define omp_clause
+		[omp_default_clause]
+	|	[omp_shared_clause]
+	|	[omp_private_clause]
+	|	[omp_firstprivate_clause]
+	|	[omp_lastprivate_clause]
+	|	[omp_reduction_clause]
+	|	[omp_copyin_clause]
+	|	[omp_copyprivate_clause]
+	|	[omp_nowait_clause]
+	|	[single_construct_clauses]
+	|	[sections_construct_clauses]
+	|	[for_construct_clauses]
+	|	[parallel_construct_clauses]
+end define
+
+define omp_default_clause
+		default([default_clause_argument]) 
+end define 
+
+define default_clause_argument
+		shared
+	|	none
+end define
+
+define omp_shared_clause
+		shared([list reference_id])
+end define
+
+define omp_private_clause
+		'private '( [list reference_id] ')
+end define
+
+define omp_firstprivate_clause
+		firstprivate([list reference_id])
+end define
+
+define omp_lastprivate_clause
+		lastprivate([list reference_id])
+end define
+
+define omp_reduction_clause
+		reduction([omp_operator]:[list reference_id])
+end define
+
+define omp_copyin_clause
+		copyin([list reference_id])
+end define
+
+define omp_copyprivate_clause
+		copyprivate([list reference_id])
+end define
+
+define omp_nowait_clause
+		nowait
+end define
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%					CLAUSE OPTIONS	 				  	%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+define multiple_clause
+		[parallel_construct_clauses]
+	|	[for_construct_clauses]
+	|	[sections_construct_clauses]
+	|	[single_construct_clauses]
+end define
+
+define parallel_construct_clauses
+		[omp_default_clause]
+	|	[omp_shared_clause]
+	|	[omp_private_clause]
+	|	[omp_firstprivate_clause]
+	|	[omp_lastprivate_clause]
+	|	[omp_reduction_clause]
+	|	[omp_copyin_clause]
+end define
+
+define for_construct_clauses
+		[omp_private_clause]
+	|	[omp_firstprivate_clause]
+	|	[omp_lastprivate_clause]
+	|	[omp_reduction_clause]
+	|	[omp_nowait_clause]
+end define
+
+define sections_construct_clauses
+		[omp_private_clause]
+	|	[omp_firstprivate_clause]
+	|	[omp_lastprivate_clause]
+	|	[omp_reduction_clause]
+	|	[omp_nowait_clause]
+end define
+
+define single_construct_clauses
+		[omp_private_clause]
+	|	[omp_firstprivate_clause]
+	|	[omp_copyprivate_clause]
+	|	[omp_nowait_clause]
+end define
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%						OPERATORS	 				  	%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+define omp_operator
+		'+
+	|	'*
+	|	max
+	|	min
+end define
+
+

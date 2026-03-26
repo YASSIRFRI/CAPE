@@ -1,0 +1,2521 @@
+Starting parse
+Entering state 0
+Reading a token: --(end of buffer or a NUL)
+--accepting rule at line 85 ("
+
+
+")
+--accepting rule at line 42 ("typedef")
+Next token is token TYPEDEF ()
+Shifting token TYPEDEF ()
+Entering state 2
+Reducing stack by rule 87 (line 188):
+   $1 = token TYPEDEF ()
+-> $$ = nterm storage_class_specifier ()
+Stack now 0
+Entering state 25
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 44 ("unsigned")
+Next token is token UNSIGNED ()
+Shifting token UNSIGNED ()
+Entering state 12
+Reducing stack by rule 100 (line 204):
+   $1 = token UNSIGNED ()
+-> $$ = nterm type_specifier ()
+Stack now 0 25
+Entering state 26
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 32 ("int")
+Next token is token INT ()
+Shifting token INT ()
+Entering state 9
+Reducing stack by rule 95 (line 199):
+   $1 = token INT ()
+-> $$ = nterm type_specifier ()
+Stack now 0 25 26
+Entering state 26
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 49 ("size_t")
+Next token is token IDENTIFIER ()
+Shifting token IDENTIFIER ()
+Entering state 49
+Reducing stack by rule 212 (line 425):
+   $1 = token IDENTIFIER ()
+-> $$ = nterm TYPE_NAME ()
+Stack now 0 25 26 26
+Entering state 37
+Reducing stack by rule 103 (line 207):
+   $1 = nterm TYPE_NAME ()
+-> $$ = nterm type_specifier ()
+Stack now 0 25 26 26
+Entering state 26
+Reading a token: --accepting rule at line 87 (";")
+Next token is token ';' ()
+Reducing stack by rule 79 (line 171):
+   $1 = nterm type_specifier ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 25 26 26
+Entering state 51
+Reducing stack by rule 80 (line 172):
+   $1 = nterm type_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 25 26
+Entering state 51
+Reducing stack by rule 80 (line 172):
+   $1 = nterm type_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 25
+Entering state 50
+Reducing stack by rule 78 (line 170):
+   $1 = nterm storage_class_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0
+Entering state 24
+Next token is token ';' ()
+Shifting token ';' ()
+Entering state 45
+Reducing stack by rule 75 (line 164):
+   $1 = nterm declaration_specifiers ()
+   $2 = token ';' ()
+-> $$ = nterm declaration ()
+Stack now 0
+Entering state 23
+Reducing stack by rule 207 (line 415):
+   $1 = nterm declaration ()
+-> $$ = nterm external_declaration ()
+Stack now 0
+Entering state 35
+Reducing stack by rule 204 (line 409):
+   $1 = nterm external_declaration ()
+-> $$ = nterm translation_unit ()
+Stack now 0
+Entering state 34
+Reading a token: --accepting rule at line 85 ("
+
+
+")
+--accepting rule at line 42 ("typedef")
+Next token is token TYPEDEF ()
+Shifting token TYPEDEF ()
+Entering state 2
+Reducing stack by rule 87 (line 188):
+   $1 = token TYPEDEF ()
+-> $$ = nterm storage_class_specifier ()
+Stack now 0 34
+Entering state 25
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 44 ("unsigned")
+Next token is token UNSIGNED ()
+Shifting token UNSIGNED ()
+Entering state 12
+Reducing stack by rule 100 (line 204):
+   $1 = token UNSIGNED ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25
+Entering state 26
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 19 ("char")
+Next token is token CHAR ()
+Shifting token CHAR ()
+Entering state 7
+Reducing stack by rule 93 (line 197):
+   $1 = token CHAR ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25 26
+Entering state 26
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 49 ("__u_char")
+Next token is token IDENTIFIER ()
+Shifting token IDENTIFIER ()
+Entering state 49
+Reducing stack by rule 212 (line 425):
+   $1 = token IDENTIFIER ()
+-> $$ = nterm TYPE_NAME ()
+Stack now 0 34 25 26 26
+Entering state 37
+Reducing stack by rule 103 (line 207):
+   $1 = nterm TYPE_NAME ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25 26 26
+Entering state 26
+Reading a token: --accepting rule at line 87 (";")
+Next token is token ';' ()
+Reducing stack by rule 79 (line 171):
+   $1 = nterm type_specifier ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25 26 26
+Entering state 51
+Reducing stack by rule 80 (line 172):
+   $1 = nterm type_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25 26
+Entering state 51
+Reducing stack by rule 80 (line 172):
+   $1 = nterm type_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25
+Entering state 50
+Reducing stack by rule 78 (line 170):
+   $1 = nterm storage_class_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34
+Entering state 24
+Next token is token ';' ()
+Shifting token ';' ()
+Entering state 45
+Reducing stack by rule 75 (line 164):
+   $1 = nterm declaration_specifiers ()
+   $2 = token ';' ()
+-> $$ = nterm declaration ()
+Stack now 0 34
+Entering state 23
+Reducing stack by rule 207 (line 415):
+   $1 = nterm declaration ()
+-> $$ = nterm external_declaration ()
+Stack now 0 34
+Entering state 64
+Reducing stack by rule 205 (line 410):
+   $1 = nterm translation_unit ()
+   $2 = nterm external_declaration ()
+-> $$ = nterm translation_unit ()
+Stack now 0
+Entering state 34
+Reading a token: --accepting rule at line 85 ("
+")
+--accepting rule at line 42 ("typedef")
+Next token is token TYPEDEF ()
+Shifting token TYPEDEF ()
+Entering state 2
+Reducing stack by rule 87 (line 188):
+   $1 = token TYPEDEF ()
+-> $$ = nterm storage_class_specifier ()
+Stack now 0 34
+Entering state 25
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 44 ("unsigned")
+Next token is token UNSIGNED ()
+Shifting token UNSIGNED ()
+Entering state 12
+Reducing stack by rule 100 (line 204):
+   $1 = token UNSIGNED ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25
+Entering state 26
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 36 ("short")
+Next token is token SHORT ()
+Shifting token SHORT ()
+Entering state 8
+Reducing stack by rule 94 (line 198):
+   $1 = token SHORT ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25 26
+Entering state 26
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 32 ("int")
+Next token is token INT ()
+Shifting token INT ()
+Entering state 9
+Reducing stack by rule 95 (line 199):
+   $1 = token INT ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25 26 26
+Entering state 26
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 49 ("__u_short")
+Next token is token IDENTIFIER ()
+Shifting token IDENTIFIER ()
+Entering state 49
+Reducing stack by rule 212 (line 425):
+   $1 = token IDENTIFIER ()
+-> $$ = nterm TYPE_NAME ()
+Stack now 0 34 25 26 26 26
+Entering state 37
+Reducing stack by rule 103 (line 207):
+   $1 = nterm TYPE_NAME ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25 26 26 26
+Entering state 26
+Reading a token: --accepting rule at line 87 (";")
+Next token is token ';' ()
+Reducing stack by rule 79 (line 171):
+   $1 = nterm type_specifier ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25 26 26 26
+Entering state 51
+Reducing stack by rule 80 (line 172):
+   $1 = nterm type_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25 26 26
+Entering state 51
+Reducing stack by rule 80 (line 172):
+   $1 = nterm type_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25 26
+Entering state 51
+Reducing stack by rule 80 (line 172):
+   $1 = nterm type_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25
+Entering state 50
+Reducing stack by rule 78 (line 170):
+   $1 = nterm storage_class_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34
+Entering state 24
+Next token is token ';' ()
+Shifting token ';' ()
+Entering state 45
+Reducing stack by rule 75 (line 164):
+   $1 = nterm declaration_specifiers ()
+   $2 = token ';' ()
+-> $$ = nterm declaration ()
+Stack now 0 34
+Entering state 23
+Reducing stack by rule 207 (line 415):
+   $1 = nterm declaration ()
+-> $$ = nterm external_declaration ()
+Stack now 0 34
+Entering state 64
+Reducing stack by rule 205 (line 410):
+   $1 = nterm translation_unit ()
+   $2 = nterm external_declaration ()
+-> $$ = nterm translation_unit ()
+Stack now 0
+Entering state 34
+Reading a token: --accepting rule at line 85 ("
+")
+--accepting rule at line 42 ("typedef")
+Next token is token TYPEDEF ()
+Shifting token TYPEDEF ()
+Entering state 2
+Reducing stack by rule 87 (line 188):
+   $1 = token TYPEDEF ()
+-> $$ = nterm storage_class_specifier ()
+Stack now 0 34
+Entering state 25
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 44 ("unsigned")
+Next token is token UNSIGNED ()
+Shifting token UNSIGNED ()
+Entering state 12
+Reducing stack by rule 100 (line 204):
+   $1 = token UNSIGNED ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25
+Entering state 26
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 32 ("int")
+Next token is token INT ()
+Shifting token INT ()
+Entering state 9
+Reducing stack by rule 95 (line 199):
+   $1 = token INT ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25 26
+Entering state 26
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 49 ("__u_int")
+Next token is token IDENTIFIER ()
+Shifting token IDENTIFIER ()
+Entering state 49
+Reducing stack by rule 212 (line 425):
+   $1 = token IDENTIFIER ()
+-> $$ = nterm TYPE_NAME ()
+Stack now 0 34 25 26 26
+Entering state 37
+Reducing stack by rule 103 (line 207):
+   $1 = nterm TYPE_NAME ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25 26 26
+Entering state 26
+Reading a token: --accepting rule at line 87 (";")
+Next token is token ';' ()
+Reducing stack by rule 79 (line 171):
+   $1 = nterm type_specifier ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25 26 26
+Entering state 51
+Reducing stack by rule 80 (line 172):
+   $1 = nterm type_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25 26
+Entering state 51
+Reducing stack by rule 80 (line 172):
+   $1 = nterm type_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25
+Entering state 50
+Reducing stack by rule 78 (line 170):
+   $1 = nterm storage_class_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34
+Entering state 24
+Next token is token ';' ()
+Shifting token ';' ()
+Entering state 45
+Reducing stack by rule 75 (line 164):
+   $1 = nterm declaration_specifiers ()
+   $2 = token ';' ()
+-> $$ = nterm declaration ()
+Stack now 0 34
+Entering state 23
+Reducing stack by rule 207 (line 415):
+   $1 = nterm declaration ()
+-> $$ = nterm external_declaration ()
+Stack now 0 34
+Entering state 64
+Reducing stack by rule 205 (line 410):
+   $1 = nterm translation_unit ()
+   $2 = nterm external_declaration ()
+-> $$ = nterm translation_unit ()
+Stack now 0
+Entering state 34
+Reading a token: --accepting rule at line 85 ("
+")
+--accepting rule at line 42 ("typedef")
+Next token is token TYPEDEF ()
+Shifting token TYPEDEF ()
+Entering state 2
+Reducing stack by rule 87 (line 188):
+   $1 = token TYPEDEF ()
+-> $$ = nterm storage_class_specifier ()
+Stack now 0 34
+Entering state 25
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 44 ("unsigned")
+Next token is token UNSIGNED ()
+Shifting token UNSIGNED ()
+Entering state 12
+Reducing stack by rule 100 (line 204):
+   $1 = token UNSIGNED ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25
+Entering state 26
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 33 ("long")
+Next token is token LONG ()
+Shifting token LONG ()
+Entering state 10
+Reducing stack by rule 96 (line 200):
+   $1 = token LONG ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25 26
+Entering state 26
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 32 ("int")
+Next token is token INT ()
+Shifting token INT ()
+Entering state 9
+Reducing stack by rule 95 (line 199):
+   $1 = token INT ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25 26 26
+Entering state 26
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 49 ("__u_long")
+Next token is token IDENTIFIER ()
+Shifting token IDENTIFIER ()
+Entering state 49
+Reducing stack by rule 212 (line 425):
+   $1 = token IDENTIFIER ()
+-> $$ = nterm TYPE_NAME ()
+Stack now 0 34 25 26 26 26
+Entering state 37
+Reducing stack by rule 103 (line 207):
+   $1 = nterm TYPE_NAME ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25 26 26 26
+Entering state 26
+Reading a token: --accepting rule at line 87 (";")
+Next token is token ';' ()
+Reducing stack by rule 79 (line 171):
+   $1 = nterm type_specifier ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25 26 26 26
+Entering state 51
+Reducing stack by rule 80 (line 172):
+   $1 = nterm type_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25 26 26
+Entering state 51
+Reducing stack by rule 80 (line 172):
+   $1 = nterm type_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25 26
+Entering state 51
+Reducing stack by rule 80 (line 172):
+   $1 = nterm type_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25
+Entering state 50
+Reducing stack by rule 78 (line 170):
+   $1 = nterm storage_class_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34
+Entering state 24
+Next token is token ';' ()
+Shifting token ';' ()
+Entering state 45
+Reducing stack by rule 75 (line 164):
+   $1 = nterm declaration_specifiers ()
+   $2 = token ';' ()
+-> $$ = nterm declaration ()
+Stack now 0 34
+Entering state 23
+Reducing stack by rule 207 (line 415):
+   $1 = nterm declaration ()
+-> $$ = nterm external_declaration ()
+Stack now 0 34
+Entering state 64
+Reducing stack by rule 205 (line 410):
+   $1 = nterm translation_unit ()
+   $2 = nterm external_declaration ()
+-> $$ = nterm translation_unit ()
+Stack now 0
+Entering state 34
+Reading a token: --accepting rule at line 85 ("
+
+
+")
+--accepting rule at line 42 ("typedef")
+Next token is token TYPEDEF ()
+Shifting token TYPEDEF ()
+Entering state 2
+Reducing stack by rule 87 (line 188):
+   $1 = token TYPEDEF ()
+-> $$ = nterm storage_class_specifier ()
+Stack now 0 34
+Entering state 25
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 37 ("signed")
+Next token is token SIGNED ()
+Shifting token SIGNED ()
+Entering state 11
+Reducing stack by rule 99 (line 203):
+   $1 = token SIGNED ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25
+Entering state 26
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 19 ("char")
+Next token is token CHAR ()
+Shifting token CHAR ()
+Entering state 7
+Reducing stack by rule 93 (line 197):
+   $1 = token CHAR ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25 26
+Entering state 26
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 49 ("__int8_t")
+Next token is token IDENTIFIER ()
+Shifting token IDENTIFIER ()
+Entering state 49
+Reducing stack by rule 212 (line 425):
+   $1 = token IDENTIFIER ()
+-> $$ = nterm TYPE_NAME ()
+Stack now 0 34 25 26 26
+Entering state 37
+Reducing stack by rule 103 (line 207):
+   $1 = nterm TYPE_NAME ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25 26 26
+Entering state 26
+Reading a token: --accepting rule at line 87 (";")
+Next token is token ';' ()
+Reducing stack by rule 79 (line 171):
+   $1 = nterm type_specifier ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25 26 26
+Entering state 51
+Reducing stack by rule 80 (line 172):
+   $1 = nterm type_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25 26
+Entering state 51
+Reducing stack by rule 80 (line 172):
+   $1 = nterm type_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25
+Entering state 50
+Reducing stack by rule 78 (line 170):
+   $1 = nterm storage_class_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34
+Entering state 24
+Next token is token ';' ()
+Shifting token ';' ()
+Entering state 45
+Reducing stack by rule 75 (line 164):
+   $1 = nterm declaration_specifiers ()
+   $2 = token ';' ()
+-> $$ = nterm declaration ()
+Stack now 0 34
+Entering state 23
+Reducing stack by rule 207 (line 415):
+   $1 = nterm declaration ()
+-> $$ = nterm external_declaration ()
+Stack now 0 34
+Entering state 64
+Reducing stack by rule 205 (line 410):
+   $1 = nterm translation_unit ()
+   $2 = nterm external_declaration ()
+-> $$ = nterm translation_unit ()
+Stack now 0
+Entering state 34
+Reading a token: --accepting rule at line 85 ("
+")
+--accepting rule at line 42 ("typedef")
+Next token is token TYPEDEF ()
+Shifting token TYPEDEF ()
+Entering state 2
+Reducing stack by rule 87 (line 188):
+   $1 = token TYPEDEF ()
+-> $$ = nterm storage_class_specifier ()
+Stack now 0 34
+Entering state 25
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 44 ("unsigned")
+Next token is token UNSIGNED ()
+Shifting token UNSIGNED ()
+Entering state 12
+Reducing stack by rule 100 (line 204):
+   $1 = token UNSIGNED ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25
+Entering state 26
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 19 ("char")
+Next token is token CHAR ()
+Shifting token CHAR ()
+Entering state 7
+Reducing stack by rule 93 (line 197):
+   $1 = token CHAR ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25 26
+Entering state 26
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 49 ("__uint8_t")
+Next token is token IDENTIFIER ()
+Shifting token IDENTIFIER ()
+Entering state 49
+Reducing stack by rule 212 (line 425):
+   $1 = token IDENTIFIER ()
+-> $$ = nterm TYPE_NAME ()
+Stack now 0 34 25 26 26
+Entering state 37
+Reducing stack by rule 103 (line 207):
+   $1 = nterm TYPE_NAME ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25 26 26
+Entering state 26
+Reading a token: --accepting rule at line 87 (";")
+Next token is token ';' ()
+Reducing stack by rule 79 (line 171):
+   $1 = nterm type_specifier ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25 26 26
+Entering state 51
+Reducing stack by rule 80 (line 172):
+   $1 = nterm type_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25 26
+Entering state 51
+Reducing stack by rule 80 (line 172):
+   $1 = nterm type_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25
+Entering state 50
+Reducing stack by rule 78 (line 170):
+   $1 = nterm storage_class_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34
+Entering state 24
+Next token is token ';' ()
+Shifting token ';' ()
+Entering state 45
+Reducing stack by rule 75 (line 164):
+   $1 = nterm declaration_specifiers ()
+   $2 = token ';' ()
+-> $$ = nterm declaration ()
+Stack now 0 34
+Entering state 23
+Reducing stack by rule 207 (line 415):
+   $1 = nterm declaration ()
+-> $$ = nterm external_declaration ()
+Stack now 0 34
+Entering state 64
+Reducing stack by rule 205 (line 410):
+   $1 = nterm translation_unit ()
+   $2 = nterm external_declaration ()
+-> $$ = nterm translation_unit ()
+Stack now 0
+Entering state 34
+Reading a token: --accepting rule at line 85 ("
+")
+--accepting rule at line 42 ("typedef")
+Next token is token TYPEDEF ()
+Shifting token TYPEDEF ()
+Entering state 2
+Reducing stack by rule 87 (line 188):
+   $1 = token TYPEDEF ()
+-> $$ = nterm storage_class_specifier ()
+Stack now 0 34
+Entering state 25
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 37 ("signed")
+Next token is token SIGNED ()
+Shifting token SIGNED ()
+Entering state 11
+Reducing stack by rule 99 (line 203):
+   $1 = token SIGNED ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25
+Entering state 26
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 36 ("short")
+Next token is token SHORT ()
+Shifting token SHORT ()
+Entering state 8
+Reducing stack by rule 94 (line 198):
+   $1 = token SHORT ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25 26
+Entering state 26
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 32 ("int")
+Next token is token INT ()
+Shifting token INT ()
+Entering state 9
+Reducing stack by rule 95 (line 199):
+   $1 = token INT ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25 26 26
+Entering state 26
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 49 ("__int16_t")
+Next token is token IDENTIFIER ()
+Shifting token IDENTIFIER ()
+Entering state 49
+Reducing stack by rule 212 (line 425):
+   $1 = token IDENTIFIER ()
+-> $$ = nterm TYPE_NAME ()
+Stack now 0 34 25 26 26 26
+Entering state 37
+Reducing stack by rule 103 (line 207):
+   $1 = nterm TYPE_NAME ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25 26 26 26
+Entering state 26
+Reading a token: --accepting rule at line 87 (";")
+Next token is token ';' ()
+Reducing stack by rule 79 (line 171):
+   $1 = nterm type_specifier ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25 26 26 26
+Entering state 51
+Reducing stack by rule 80 (line 172):
+   $1 = nterm type_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25 26 26
+Entering state 51
+Reducing stack by rule 80 (line 172):
+   $1 = nterm type_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25 26
+Entering state 51
+Reducing stack by rule 80 (line 172):
+   $1 = nterm type_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25
+Entering state 50
+Reducing stack by rule 78 (line 170):
+   $1 = nterm storage_class_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34
+Entering state 24
+Next token is token ';' ()
+Shifting token ';' ()
+Entering state 45
+Reducing stack by rule 75 (line 164):
+   $1 = nterm declaration_specifiers ()
+   $2 = token ';' ()
+-> $$ = nterm declaration ()
+Stack now 0 34
+Entering state 23
+Reducing stack by rule 207 (line 415):
+   $1 = nterm declaration ()
+-> $$ = nterm external_declaration ()
+Stack now 0 34
+Entering state 64
+Reducing stack by rule 205 (line 410):
+   $1 = nterm translation_unit ()
+   $2 = nterm external_declaration ()
+-> $$ = nterm translation_unit ()
+Stack now 0
+Entering state 34
+Reading a token: --accepting rule at line 85 ("
+")
+--accepting rule at line 42 ("typedef")
+Next token is token TYPEDEF ()
+Shifting token TYPEDEF ()
+Entering state 2
+Reducing stack by rule 87 (line 188):
+   $1 = token TYPEDEF ()
+-> $$ = nterm storage_class_specifier ()
+Stack now 0 34
+Entering state 25
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 44 ("unsigned")
+Next token is token UNSIGNED ()
+Shifting token UNSIGNED ()
+Entering state 12
+Reducing stack by rule 100 (line 204):
+   $1 = token UNSIGNED ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25
+Entering state 26
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 36 ("short")
+Next token is token SHORT ()
+Shifting token SHORT ()
+Entering state 8
+Reducing stack by rule 94 (line 198):
+   $1 = token SHORT ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25 26
+Entering state 26
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 32 ("int")
+Next token is token INT ()
+Shifting token INT ()
+Entering state 9
+Reducing stack by rule 95 (line 199):
+   $1 = token INT ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25 26 26
+Entering state 26
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 49 ("__uint16_t")
+Next token is token IDENTIFIER ()
+Shifting token IDENTIFIER ()
+Entering state 49
+Reducing stack by rule 212 (line 425):
+   $1 = token IDENTIFIER ()
+-> $$ = nterm TYPE_NAME ()
+Stack now 0 34 25 26 26 26
+Entering state 37
+Reducing stack by rule 103 (line 207):
+   $1 = nterm TYPE_NAME ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25 26 26 26
+Entering state 26
+Reading a token: --accepting rule at line 87 (";")
+Next token is token ';' ()
+Reducing stack by rule 79 (line 171):
+   $1 = nterm type_specifier ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25 26 26 26
+Entering state 51
+Reducing stack by rule 80 (line 172):
+   $1 = nterm type_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25 26 26
+Entering state 51
+Reducing stack by rule 80 (line 172):
+   $1 = nterm type_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25 26
+Entering state 51
+Reducing stack by rule 80 (line 172):
+   $1 = nterm type_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25
+Entering state 50
+Reducing stack by rule 78 (line 170):
+   $1 = nterm storage_class_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34
+Entering state 24
+Next token is token ';' ()
+Shifting token ';' ()
+Entering state 45
+Reducing stack by rule 75 (line 164):
+   $1 = nterm declaration_specifiers ()
+   $2 = token ';' ()
+-> $$ = nterm declaration ()
+Stack now 0 34
+Entering state 23
+Reducing stack by rule 207 (line 415):
+   $1 = nterm declaration ()
+-> $$ = nterm external_declaration ()
+Stack now 0 34
+Entering state 64
+Reducing stack by rule 205 (line 410):
+   $1 = nterm translation_unit ()
+   $2 = nterm external_declaration ()
+-> $$ = nterm translation_unit ()
+Stack now 0
+Entering state 34
+Reading a token: --accepting rule at line 85 ("
+")
+--accepting rule at line 42 ("typedef")
+Next token is token TYPEDEF ()
+Shifting token TYPEDEF ()
+Entering state 2
+Reducing stack by rule 87 (line 188):
+   $1 = token TYPEDEF ()
+-> $$ = nterm storage_class_specifier ()
+Stack now 0 34
+Entering state 25
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 37 ("signed")
+Next token is token SIGNED ()
+Shifting token SIGNED ()
+Entering state 11
+Reducing stack by rule 99 (line 203):
+   $1 = token SIGNED ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25
+Entering state 26
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 32 ("int")
+Next token is token INT ()
+Shifting token INT ()
+Entering state 9
+Reducing stack by rule 95 (line 199):
+   $1 = token INT ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25 26
+Entering state 26
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 49 ("__int32_t")
+Next token is token IDENTIFIER ()
+Shifting token IDENTIFIER ()
+Entering state 49
+Reducing stack by rule 212 (line 425):
+   $1 = token IDENTIFIER ()
+-> $$ = nterm TYPE_NAME ()
+Stack now 0 34 25 26 26
+Entering state 37
+Reducing stack by rule 103 (line 207):
+   $1 = nterm TYPE_NAME ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25 26 26
+Entering state 26
+Reading a token: --accepting rule at line 87 (";")
+Next token is token ';' ()
+Reducing stack by rule 79 (line 171):
+   $1 = nterm type_specifier ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25 26 26
+Entering state 51
+Reducing stack by rule 80 (line 172):
+   $1 = nterm type_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25 26
+Entering state 51
+Reducing stack by rule 80 (line 172):
+   $1 = nterm type_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25
+Entering state 50
+Reducing stack by rule 78 (line 170):
+   $1 = nterm storage_class_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34
+Entering state 24
+Next token is token ';' ()
+Shifting token ';' ()
+Entering state 45
+Reducing stack by rule 75 (line 164):
+   $1 = nterm declaration_specifiers ()
+   $2 = token ';' ()
+-> $$ = nterm declaration ()
+Stack now 0 34
+Entering state 23
+Reducing stack by rule 207 (line 415):
+   $1 = nterm declaration ()
+-> $$ = nterm external_declaration ()
+Stack now 0 34
+Entering state 64
+Reducing stack by rule 205 (line 410):
+   $1 = nterm translation_unit ()
+   $2 = nterm external_declaration ()
+-> $$ = nterm translation_unit ()
+Stack now 0
+Entering state 34
+Reading a token: --accepting rule at line 85 ("
+")
+--accepting rule at line 42 ("typedef")
+Next token is token TYPEDEF ()
+Shifting token TYPEDEF ()
+Entering state 2
+Reducing stack by rule 87 (line 188):
+   $1 = token TYPEDEF ()
+-> $$ = nterm storage_class_specifier ()
+Stack now 0 34
+Entering state 25
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 44 ("unsigned")
+Next token is token UNSIGNED ()
+Shifting token UNSIGNED ()
+Entering state 12
+Reducing stack by rule 100 (line 204):
+   $1 = token UNSIGNED ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25
+Entering state 26
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 32 ("int")
+Next token is token INT ()
+Shifting token INT ()
+Entering state 9
+Reducing stack by rule 95 (line 199):
+   $1 = token INT ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25 26
+Entering state 26
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 49 ("__uint32_t")
+Next token is token IDENTIFIER ()
+Shifting token IDENTIFIER ()
+Entering state 49
+Reducing stack by rule 212 (line 425):
+   $1 = token IDENTIFIER ()
+-> $$ = nterm TYPE_NAME ()
+Stack now 0 34 25 26 26
+Entering state 37
+Reducing stack by rule 103 (line 207):
+   $1 = nterm TYPE_NAME ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25 26 26
+Entering state 26
+Reading a token: --accepting rule at line 87 (";")
+Next token is token ';' ()
+Reducing stack by rule 79 (line 171):
+   $1 = nterm type_specifier ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25 26 26
+Entering state 51
+Reducing stack by rule 80 (line 172):
+   $1 = nterm type_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25 26
+Entering state 51
+Reducing stack by rule 80 (line 172):
+   $1 = nterm type_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25
+Entering state 50
+Reducing stack by rule 78 (line 170):
+   $1 = nterm storage_class_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34
+Entering state 24
+Next token is token ';' ()
+Shifting token ';' ()
+Entering state 45
+Reducing stack by rule 75 (line 164):
+   $1 = nterm declaration_specifiers ()
+   $2 = token ';' ()
+-> $$ = nterm declaration ()
+Stack now 0 34
+Entering state 23
+Reducing stack by rule 207 (line 415):
+   $1 = nterm declaration ()
+-> $$ = nterm external_declaration ()
+Stack now 0 34
+Entering state 64
+Reducing stack by rule 205 (line 410):
+   $1 = nterm translation_unit ()
+   $2 = nterm external_declaration ()
+-> $$ = nterm translation_unit ()
+Stack now 0
+Entering state 34
+Reading a token: --accepting rule at line 85 ("
+
+
+
+
+ ")
+--accepting rule at line 42 ("typedef")
+Next token is token TYPEDEF ()
+Shifting token TYPEDEF ()
+Entering state 2
+Reducing stack by rule 87 (line 188):
+   $1 = token TYPEDEF ()
+-> $$ = nterm storage_class_specifier ()
+Stack now 0 34
+Entering state 25
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 37 ("signed")
+Next token is token SIGNED ()
+Shifting token SIGNED ()
+Entering state 11
+Reducing stack by rule 99 (line 203):
+   $1 = token SIGNED ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25
+Entering state 26
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 33 ("long")
+Next token is token LONG ()
+Shifting token LONG ()
+Entering state 10
+Reducing stack by rule 96 (line 200):
+   $1 = token LONG ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25 26
+Entering state 26
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 33 ("long")
+Next token is token LONG ()
+Shifting token LONG ()
+Entering state 10
+Reducing stack by rule 96 (line 200):
+   $1 = token LONG ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25 26 26
+Entering state 26
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 32 ("int")
+Next token is token INT ()
+Shifting token INT ()
+Entering state 9
+Reducing stack by rule 95 (line 199):
+   $1 = token INT ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25 26 26 26
+Entering state 26
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 49 ("__int64_t")
+Next token is token IDENTIFIER ()
+Shifting token IDENTIFIER ()
+Entering state 49
+Reducing stack by rule 212 (line 425):
+   $1 = token IDENTIFIER ()
+-> $$ = nterm TYPE_NAME ()
+Stack now 0 34 25 26 26 26 26
+Entering state 37
+Reducing stack by rule 103 (line 207):
+   $1 = nterm TYPE_NAME ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25 26 26 26 26
+Entering state 26
+Reading a token: --accepting rule at line 87 (";")
+Next token is token ';' ()
+Reducing stack by rule 79 (line 171):
+   $1 = nterm type_specifier ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25 26 26 26 26
+Entering state 51
+Reducing stack by rule 80 (line 172):
+   $1 = nterm type_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25 26 26 26
+Entering state 51
+Reducing stack by rule 80 (line 172):
+   $1 = nterm type_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25 26 26
+Entering state 51
+Reducing stack by rule 80 (line 172):
+   $1 = nterm type_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25 26
+Entering state 51
+Reducing stack by rule 80 (line 172):
+   $1 = nterm type_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25
+Entering state 50
+Reducing stack by rule 78 (line 170):
+   $1 = nterm storage_class_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34
+Entering state 24
+Next token is token ';' ()
+Shifting token ';' ()
+Entering state 45
+Reducing stack by rule 75 (line 164):
+   $1 = nterm declaration_specifiers ()
+   $2 = token ';' ()
+-> $$ = nterm declaration ()
+Stack now 0 34
+Entering state 23
+Reducing stack by rule 207 (line 415):
+   $1 = nterm declaration ()
+-> $$ = nterm external_declaration ()
+Stack now 0 34
+Entering state 64
+Reducing stack by rule 205 (line 410):
+   $1 = nterm translation_unit ()
+   $2 = nterm external_declaration ()
+-> $$ = nterm translation_unit ()
+Stack now 0
+Entering state 34
+Reading a token: --accepting rule at line 85 ("
+ ")
+--accepting rule at line 42 ("typedef")
+Next token is token TYPEDEF ()
+Shifting token TYPEDEF ()
+Entering state 2
+Reducing stack by rule 87 (line 188):
+   $1 = token TYPEDEF ()
+-> $$ = nterm storage_class_specifier ()
+Stack now 0 34
+Entering state 25
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 44 ("unsigned")
+Next token is token UNSIGNED ()
+Shifting token UNSIGNED ()
+Entering state 12
+Reducing stack by rule 100 (line 204):
+   $1 = token UNSIGNED ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25
+Entering state 26
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 33 ("long")
+Next token is token LONG ()
+Shifting token LONG ()
+Entering state 10
+Reducing stack by rule 96 (line 200):
+   $1 = token LONG ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25 26
+Entering state 26
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 33 ("long")
+Next token is token LONG ()
+Shifting token LONG ()
+Entering state 10
+Reducing stack by rule 96 (line 200):
+   $1 = token LONG ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25 26 26
+Entering state 26
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 32 ("int")
+Next token is token INT ()
+Shifting token INT ()
+Entering state 9
+Reducing stack by rule 95 (line 199):
+   $1 = token INT ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25 26 26 26
+Entering state 26
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 49 ("__uint64_t")
+Next token is token IDENTIFIER ()
+Shifting token IDENTIFIER ()
+Entering state 49
+Reducing stack by rule 212 (line 425):
+   $1 = token IDENTIFIER ()
+-> $$ = nterm TYPE_NAME ()
+Stack now 0 34 25 26 26 26 26
+Entering state 37
+Reducing stack by rule 103 (line 207):
+   $1 = nterm TYPE_NAME ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25 26 26 26 26
+Entering state 26
+Reading a token: --accepting rule at line 87 (";")
+Next token is token ';' ()
+Reducing stack by rule 79 (line 171):
+   $1 = nterm type_specifier ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25 26 26 26 26
+Entering state 51
+Reducing stack by rule 80 (line 172):
+   $1 = nterm type_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25 26 26 26
+Entering state 51
+Reducing stack by rule 80 (line 172):
+   $1 = nterm type_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25 26 26
+Entering state 51
+Reducing stack by rule 80 (line 172):
+   $1 = nterm type_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25 26
+Entering state 51
+Reducing stack by rule 80 (line 172):
+   $1 = nterm type_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25
+Entering state 50
+Reducing stack by rule 78 (line 170):
+   $1 = nterm storage_class_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34
+Entering state 24
+Next token is token ';' ()
+Shifting token ';' ()
+Entering state 45
+Reducing stack by rule 75 (line 164):
+   $1 = nterm declaration_specifiers ()
+   $2 = token ';' ()
+-> $$ = nterm declaration ()
+Stack now 0 34
+Entering state 23
+Reducing stack by rule 207 (line 415):
+   $1 = nterm declaration ()
+-> $$ = nterm external_declaration ()
+Stack now 0 34
+Entering state 64
+Reducing stack by rule 205 (line 410):
+   $1 = nterm translation_unit ()
+   $2 = nterm external_declaration ()
+-> $$ = nterm translation_unit ()
+Stack now 0
+Entering state 34
+Reading a token: --accepting rule at line 85 ("
+
+
+
+
+
+
+
+ ")
+--accepting rule at line 42 ("typedef")
+Next token is token TYPEDEF ()
+Shifting token TYPEDEF ()
+Entering state 2
+Reducing stack by rule 87 (line 188):
+   $1 = token TYPEDEF ()
+-> $$ = nterm storage_class_specifier ()
+Stack now 0 34
+Entering state 25
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 33 ("long")
+Next token is token LONG ()
+Shifting token LONG ()
+Entering state 10
+Reducing stack by rule 96 (line 200):
+   $1 = token LONG ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25
+Entering state 26
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 33 ("long")
+Next token is token LONG ()
+Shifting token LONG ()
+Entering state 10
+Reducing stack by rule 96 (line 200):
+   $1 = token LONG ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25 26
+Entering state 26
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 32 ("int")
+Next token is token INT ()
+Shifting token INT ()
+Entering state 9
+Reducing stack by rule 95 (line 199):
+   $1 = token INT ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25 26 26
+Entering state 26
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 49 ("__quad_t")
+Next token is token IDENTIFIER ()
+Shifting token IDENTIFIER ()
+Entering state 49
+Reducing stack by rule 212 (line 425):
+   $1 = token IDENTIFIER ()
+-> $$ = nterm TYPE_NAME ()
+Stack now 0 34 25 26 26 26
+Entering state 37
+Reducing stack by rule 103 (line 207):
+   $1 = nterm TYPE_NAME ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25 26 26 26
+Entering state 26
+Reading a token: --accepting rule at line 87 (";")
+Next token is token ';' ()
+Reducing stack by rule 79 (line 171):
+   $1 = nterm type_specifier ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25 26 26 26
+Entering state 51
+Reducing stack by rule 80 (line 172):
+   $1 = nterm type_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25 26 26
+Entering state 51
+Reducing stack by rule 80 (line 172):
+   $1 = nterm type_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25 26
+Entering state 51
+Reducing stack by rule 80 (line 172):
+   $1 = nterm type_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25
+Entering state 50
+Reducing stack by rule 78 (line 170):
+   $1 = nterm storage_class_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34
+Entering state 24
+Next token is token ';' ()
+Shifting token ';' ()
+Entering state 45
+Reducing stack by rule 75 (line 164):
+   $1 = nterm declaration_specifiers ()
+   $2 = token ';' ()
+-> $$ = nterm declaration ()
+Stack now 0 34
+Entering state 23
+Reducing stack by rule 207 (line 415):
+   $1 = nterm declaration ()
+-> $$ = nterm external_declaration ()
+Stack now 0 34
+Entering state 64
+Reducing stack by rule 205 (line 410):
+   $1 = nterm translation_unit ()
+   $2 = nterm external_declaration ()
+-> $$ = nterm translation_unit ()
+Stack now 0
+Entering state 34
+Reading a token: --accepting rule at line 85 ("
+ ")
+--accepting rule at line 42 ("typedef")
+Next token is token TYPEDEF ()
+Shifting token TYPEDEF ()
+Entering state 2
+Reducing stack by rule 87 (line 188):
+   $1 = token TYPEDEF ()
+-> $$ = nterm storage_class_specifier ()
+Stack now 0 34
+Entering state 25
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 44 ("unsigned")
+Next token is token UNSIGNED ()
+Shifting token UNSIGNED ()
+Entering state 12
+Reducing stack by rule 100 (line 204):
+   $1 = token UNSIGNED ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25
+Entering state 26
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 33 ("long")
+Next token is token LONG ()
+Shifting token LONG ()
+Entering state 10
+Reducing stack by rule 96 (line 200):
+   $1 = token LONG ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25 26
+Entering state 26
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 33 ("long")
+Next token is token LONG ()
+Shifting token LONG ()
+Entering state 10
+Reducing stack by rule 96 (line 200):
+   $1 = token LONG ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25 26 26
+Entering state 26
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 32 ("int")
+Next token is token INT ()
+Shifting token INT ()
+Entering state 9
+Reducing stack by rule 95 (line 199):
+   $1 = token INT ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25 26 26 26
+Entering state 26
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 49 ("__u_quad_t")
+Next token is token IDENTIFIER ()
+Shifting token IDENTIFIER ()
+Entering state 49
+Reducing stack by rule 212 (line 425):
+   $1 = token IDENTIFIER ()
+-> $$ = nterm TYPE_NAME ()
+Stack now 0 34 25 26 26 26 26
+Entering state 37
+Reducing stack by rule 103 (line 207):
+   $1 = nterm TYPE_NAME ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25 26 26 26 26
+Entering state 26
+Reading a token: --accepting rule at line 87 (";")
+Next token is token ';' ()
+Reducing stack by rule 79 (line 171):
+   $1 = nterm type_specifier ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25 26 26 26 26
+Entering state 51
+Reducing stack by rule 80 (line 172):
+   $1 = nterm type_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25 26 26 26
+Entering state 51
+Reducing stack by rule 80 (line 172):
+   $1 = nterm type_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25 26 26
+Entering state 51
+Reducing stack by rule 80 (line 172):
+   $1 = nterm type_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25 26
+Entering state 51
+Reducing stack by rule 80 (line 172):
+   $1 = nterm type_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25
+Entering state 50
+Reducing stack by rule 78 (line 170):
+   $1 = nterm storage_class_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34
+Entering state 24
+Next token is token ';' ()
+Shifting token ';' ()
+Entering state 45
+Reducing stack by rule 75 (line 164):
+   $1 = nterm declaration_specifiers ()
+   $2 = token ';' ()
+-> $$ = nterm declaration ()
+Stack now 0 34
+Entering state 23
+Reducing stack by rule 207 (line 415):
+   $1 = nterm declaration ()
+-> $$ = nterm external_declaration ()
+Stack now 0 34
+Entering state 64
+Reducing stack by rule 205 (line 410):
+   $1 = nterm translation_unit ()
+   $2 = nterm external_declaration ()
+-> $$ = nterm translation_unit ()
+Stack now 0
+Entering state 34
+Reading a token: --accepting rule at line 85 ("
+
+
+
+
+
+
+ ")
+--accepting rule at line 42 ("typedef")
+Next token is token TYPEDEF ()
+Shifting token TYPEDEF ()
+Entering state 2
+Reducing stack by rule 87 (line 188):
+   $1 = token TYPEDEF ()
+-> $$ = nterm storage_class_specifier ()
+Stack now 0 34
+Entering state 25
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 49 ("__u_quad_t")
+Next token is token IDENTIFIER ()
+Shifting token IDENTIFIER ()
+Entering state 49
+Reducing stack by rule 212 (line 425):
+   $1 = token IDENTIFIER ()
+-> $$ = nterm TYPE_NAME ()
+Stack now 0 34 25
+Entering state 37
+Reducing stack by rule 103 (line 207):
+   $1 = nterm TYPE_NAME ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25
+Entering state 26
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 49 ("__dev_t")
+Next token is token IDENTIFIER ()
+Shifting token IDENTIFIER ()
+Entering state 49
+Reducing stack by rule 212 (line 425):
+   $1 = token IDENTIFIER ()
+-> $$ = nterm TYPE_NAME ()
+Stack now 0 34 25 26
+Entering state 37
+Reducing stack by rule 103 (line 207):
+   $1 = nterm TYPE_NAME ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25 26
+Entering state 26
+Reading a token: --accepting rule at line 87 (";")
+Next token is token ';' ()
+Reducing stack by rule 79 (line 171):
+   $1 = nterm type_specifier ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25 26
+Entering state 51
+Reducing stack by rule 80 (line 172):
+   $1 = nterm type_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25
+Entering state 50
+Reducing stack by rule 78 (line 170):
+   $1 = nterm storage_class_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34
+Entering state 24
+Next token is token ';' ()
+Shifting token ';' ()
+Entering state 45
+Reducing stack by rule 75 (line 164):
+   $1 = nterm declaration_specifiers ()
+   $2 = token ';' ()
+-> $$ = nterm declaration ()
+Stack now 0 34
+Entering state 23
+Reducing stack by rule 207 (line 415):
+   $1 = nterm declaration ()
+-> $$ = nterm external_declaration ()
+Stack now 0 34
+Entering state 64
+Reducing stack by rule 205 (line 410):
+   $1 = nterm translation_unit ()
+   $2 = nterm external_declaration ()
+-> $$ = nterm translation_unit ()
+Stack now 0
+Entering state 34
+Reading a token: --accepting rule at line 85 ("
+ ")
+--accepting rule at line 42 ("typedef")
+Next token is token TYPEDEF ()
+Shifting token TYPEDEF ()
+Entering state 2
+Reducing stack by rule 87 (line 188):
+   $1 = token TYPEDEF ()
+-> $$ = nterm storage_class_specifier ()
+Stack now 0 34
+Entering state 25
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 44 ("unsigned")
+Next token is token UNSIGNED ()
+Shifting token UNSIGNED ()
+Entering state 12
+Reducing stack by rule 100 (line 204):
+   $1 = token UNSIGNED ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25
+Entering state 26
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 32 ("int")
+Next token is token INT ()
+Shifting token INT ()
+Entering state 9
+Reducing stack by rule 95 (line 199):
+   $1 = token INT ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25 26
+Entering state 26
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 49 ("__uid_t")
+Next token is token IDENTIFIER ()
+Shifting token IDENTIFIER ()
+Entering state 49
+Reducing stack by rule 212 (line 425):
+   $1 = token IDENTIFIER ()
+-> $$ = nterm TYPE_NAME ()
+Stack now 0 34 25 26 26
+Entering state 37
+Reducing stack by rule 103 (line 207):
+   $1 = nterm TYPE_NAME ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25 26 26
+Entering state 26
+Reading a token: --accepting rule at line 87 (";")
+Next token is token ';' ()
+Reducing stack by rule 79 (line 171):
+   $1 = nterm type_specifier ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25 26 26
+Entering state 51
+Reducing stack by rule 80 (line 172):
+   $1 = nterm type_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25 26
+Entering state 51
+Reducing stack by rule 80 (line 172):
+   $1 = nterm type_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25
+Entering state 50
+Reducing stack by rule 78 (line 170):
+   $1 = nterm storage_class_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34
+Entering state 24
+Next token is token ';' ()
+Shifting token ';' ()
+Entering state 45
+Reducing stack by rule 75 (line 164):
+   $1 = nterm declaration_specifiers ()
+   $2 = token ';' ()
+-> $$ = nterm declaration ()
+Stack now 0 34
+Entering state 23
+Reducing stack by rule 207 (line 415):
+   $1 = nterm declaration ()
+-> $$ = nterm external_declaration ()
+Stack now 0 34
+Entering state 64
+Reducing stack by rule 205 (line 410):
+   $1 = nterm translation_unit ()
+   $2 = nterm external_declaration ()
+-> $$ = nterm translation_unit ()
+Stack now 0
+Entering state 34
+Reading a token: --accepting rule at line 85 ("
+ ")
+--accepting rule at line 42 ("typedef")
+Next token is token TYPEDEF ()
+Shifting token TYPEDEF ()
+Entering state 2
+Reducing stack by rule 87 (line 188):
+   $1 = token TYPEDEF ()
+-> $$ = nterm storage_class_specifier ()
+Stack now 0 34
+Entering state 25
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 44 ("unsigned")
+Next token is token UNSIGNED ()
+Shifting token UNSIGNED ()
+Entering state 12
+Reducing stack by rule 100 (line 204):
+   $1 = token UNSIGNED ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25
+Entering state 26
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 32 ("int")
+Next token is token INT ()
+Shifting token INT ()
+Entering state 9
+Reducing stack by rule 95 (line 199):
+   $1 = token INT ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25 26
+Entering state 26
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 49 ("__gid_t")
+Next token is token IDENTIFIER ()
+Shifting token IDENTIFIER ()
+Entering state 49
+Reducing stack by rule 212 (line 425):
+   $1 = token IDENTIFIER ()
+-> $$ = nterm TYPE_NAME ()
+Stack now 0 34 25 26 26
+Entering state 37
+Reducing stack by rule 103 (line 207):
+   $1 = nterm TYPE_NAME ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25 26 26
+Entering state 26
+Reading a token: --accepting rule at line 87 (";")
+Next token is token ';' ()
+Reducing stack by rule 79 (line 171):
+   $1 = nterm type_specifier ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25 26 26
+Entering state 51
+Reducing stack by rule 80 (line 172):
+   $1 = nterm type_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25 26
+Entering state 51
+Reducing stack by rule 80 (line 172):
+   $1 = nterm type_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25
+Entering state 50
+Reducing stack by rule 78 (line 170):
+   $1 = nterm storage_class_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34
+Entering state 24
+Next token is token ';' ()
+Shifting token ';' ()
+Entering state 45
+Reducing stack by rule 75 (line 164):
+   $1 = nterm declaration_specifiers ()
+   $2 = token ';' ()
+-> $$ = nterm declaration ()
+Stack now 0 34
+Entering state 23
+Reducing stack by rule 207 (line 415):
+   $1 = nterm declaration ()
+-> $$ = nterm external_declaration ()
+Stack now 0 34
+Entering state 64
+Reducing stack by rule 205 (line 410):
+   $1 = nterm translation_unit ()
+   $2 = nterm external_declaration ()
+-> $$ = nterm translation_unit ()
+Stack now 0
+Entering state 34
+Reading a token: --accepting rule at line 85 ("
+ ")
+--accepting rule at line 42 ("typedef")
+Next token is token TYPEDEF ()
+Shifting token TYPEDEF ()
+Entering state 2
+Reducing stack by rule 87 (line 188):
+   $1 = token TYPEDEF ()
+-> $$ = nterm storage_class_specifier ()
+Stack now 0 34
+Entering state 25
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 44 ("unsigned")
+Next token is token UNSIGNED ()
+Shifting token UNSIGNED ()
+Entering state 12
+Reducing stack by rule 100 (line 204):
+   $1 = token UNSIGNED ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25
+Entering state 26
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 33 ("long")
+Next token is token LONG ()
+Shifting token LONG ()
+Entering state 10
+Reducing stack by rule 96 (line 200):
+   $1 = token LONG ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25 26
+Entering state 26
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 32 ("int")
+Next token is token INT ()
+Shifting token INT ()
+Entering state 9
+Reducing stack by rule 95 (line 199):
+   $1 = token INT ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25 26 26
+Entering state 26
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 49 ("__ino_t")
+Next token is token IDENTIFIER ()
+Shifting token IDENTIFIER ()
+Entering state 49
+Reducing stack by rule 212 (line 425):
+   $1 = token IDENTIFIER ()
+-> $$ = nterm TYPE_NAME ()
+Stack now 0 34 25 26 26 26
+Entering state 37
+Reducing stack by rule 103 (line 207):
+   $1 = nterm TYPE_NAME ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25 26 26 26
+Entering state 26
+Reading a token: --accepting rule at line 87 (";")
+Next token is token ';' ()
+Reducing stack by rule 79 (line 171):
+   $1 = nterm type_specifier ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25 26 26 26
+Entering state 51
+Reducing stack by rule 80 (line 172):
+   $1 = nterm type_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25 26 26
+Entering state 51
+Reducing stack by rule 80 (line 172):
+   $1 = nterm type_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25 26
+Entering state 51
+Reducing stack by rule 80 (line 172):
+   $1 = nterm type_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25
+Entering state 50
+Reducing stack by rule 78 (line 170):
+   $1 = nterm storage_class_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34
+Entering state 24
+Next token is token ';' ()
+Shifting token ';' ()
+Entering state 45
+Reducing stack by rule 75 (line 164):
+   $1 = nterm declaration_specifiers ()
+   $2 = token ';' ()
+-> $$ = nterm declaration ()
+Stack now 0 34
+Entering state 23
+Reducing stack by rule 207 (line 415):
+   $1 = nterm declaration ()
+-> $$ = nterm external_declaration ()
+Stack now 0 34
+Entering state 64
+Reducing stack by rule 205 (line 410):
+   $1 = nterm translation_unit ()
+   $2 = nterm external_declaration ()
+-> $$ = nterm translation_unit ()
+Stack now 0
+Entering state 34
+Reading a token: --accepting rule at line 85 ("
+ ")
+--accepting rule at line 42 ("typedef")
+Next token is token TYPEDEF ()
+Shifting token TYPEDEF ()
+Entering state 2
+Reducing stack by rule 87 (line 188):
+   $1 = token TYPEDEF ()
+-> $$ = nterm storage_class_specifier ()
+Stack now 0 34
+Entering state 25
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 49 ("__u_quad_t")
+Next token is token IDENTIFIER ()
+Shifting token IDENTIFIER ()
+Entering state 49
+Reducing stack by rule 212 (line 425):
+   $1 = token IDENTIFIER ()
+-> $$ = nterm TYPE_NAME ()
+Stack now 0 34 25
+Entering state 37
+Reducing stack by rule 103 (line 207):
+   $1 = nterm TYPE_NAME ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25
+Entering state 26
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 49 ("__ino64_t")
+Next token is token IDENTIFIER ()
+Shifting token IDENTIFIER ()
+Entering state 49
+Reducing stack by rule 212 (line 425):
+   $1 = token IDENTIFIER ()
+-> $$ = nterm TYPE_NAME ()
+Stack now 0 34 25 26
+Entering state 37
+Reducing stack by rule 103 (line 207):
+   $1 = nterm TYPE_NAME ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25 26
+Entering state 26
+Reading a token: --accepting rule at line 87 (";")
+Next token is token ';' ()
+Reducing stack by rule 79 (line 171):
+   $1 = nterm type_specifier ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25 26
+Entering state 51
+Reducing stack by rule 80 (line 172):
+   $1 = nterm type_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25
+Entering state 50
+Reducing stack by rule 78 (line 170):
+   $1 = nterm storage_class_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34
+Entering state 24
+Next token is token ';' ()
+Shifting token ';' ()
+Entering state 45
+Reducing stack by rule 75 (line 164):
+   $1 = nterm declaration_specifiers ()
+   $2 = token ';' ()
+-> $$ = nterm declaration ()
+Stack now 0 34
+Entering state 23
+Reducing stack by rule 207 (line 415):
+   $1 = nterm declaration ()
+-> $$ = nterm external_declaration ()
+Stack now 0 34
+Entering state 64
+Reducing stack by rule 205 (line 410):
+   $1 = nterm translation_unit ()
+   $2 = nterm external_declaration ()
+-> $$ = nterm translation_unit ()
+Stack now 0
+Entering state 34
+Reading a token: --accepting rule at line 85 ("
+ ")
+--accepting rule at line 42 ("typedef")
+Next token is token TYPEDEF ()
+Shifting token TYPEDEF ()
+Entering state 2
+Reducing stack by rule 87 (line 188):
+   $1 = token TYPEDEF ()
+-> $$ = nterm storage_class_specifier ()
+Stack now 0 34
+Entering state 25
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 44 ("unsigned")
+Next token is token UNSIGNED ()
+Shifting token UNSIGNED ()
+Entering state 12
+Reducing stack by rule 100 (line 204):
+   $1 = token UNSIGNED ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25
+Entering state 26
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 32 ("int")
+Next token is token INT ()
+Shifting token INT ()
+Entering state 9
+Reducing stack by rule 95 (line 199):
+   $1 = token INT ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25 26
+Entering state 26
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 49 ("__mode_t")
+Next token is token IDENTIFIER ()
+Shifting token IDENTIFIER ()
+Entering state 49
+Reducing stack by rule 212 (line 425):
+   $1 = token IDENTIFIER ()
+-> $$ = nterm TYPE_NAME ()
+Stack now 0 34 25 26 26
+Entering state 37
+Reducing stack by rule 103 (line 207):
+   $1 = nterm TYPE_NAME ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25 26 26
+Entering state 26
+Reading a token: --accepting rule at line 87 (";")
+Next token is token ';' ()
+Reducing stack by rule 79 (line 171):
+   $1 = nterm type_specifier ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25 26 26
+Entering state 51
+Reducing stack by rule 80 (line 172):
+   $1 = nterm type_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25 26
+Entering state 51
+Reducing stack by rule 80 (line 172):
+   $1 = nterm type_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25
+Entering state 50
+Reducing stack by rule 78 (line 170):
+   $1 = nterm storage_class_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34
+Entering state 24
+Next token is token ';' ()
+Shifting token ';' ()
+Entering state 45
+Reducing stack by rule 75 (line 164):
+   $1 = nterm declaration_specifiers ()
+   $2 = token ';' ()
+-> $$ = nterm declaration ()
+Stack now 0 34
+Entering state 23
+Reducing stack by rule 207 (line 415):
+   $1 = nterm declaration ()
+-> $$ = nterm external_declaration ()
+Stack now 0 34
+Entering state 64
+Reducing stack by rule 205 (line 410):
+   $1 = nterm translation_unit ()
+   $2 = nterm external_declaration ()
+-> $$ = nterm translation_unit ()
+Stack now 0
+Entering state 34
+Reading a token: --accepting rule at line 85 ("
+ ")
+--accepting rule at line 42 ("typedef")
+Next token is token TYPEDEF ()
+Shifting token TYPEDEF ()
+Entering state 2
+Reducing stack by rule 87 (line 188):
+   $1 = token TYPEDEF ()
+-> $$ = nterm storage_class_specifier ()
+Stack now 0 34
+Entering state 25
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 44 ("unsigned")
+Next token is token UNSIGNED ()
+Shifting token UNSIGNED ()
+Entering state 12
+Reducing stack by rule 100 (line 204):
+   $1 = token UNSIGNED ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25
+Entering state 26
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 32 ("int")
+Next token is token INT ()
+Shifting token INT ()
+Entering state 9
+Reducing stack by rule 95 (line 199):
+   $1 = token INT ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25 26
+Entering state 26
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 49 ("__nlink_t")
+Next token is token IDENTIFIER ()
+Shifting token IDENTIFIER ()
+Entering state 49
+Reducing stack by rule 212 (line 425):
+   $1 = token IDENTIFIER ()
+-> $$ = nterm TYPE_NAME ()
+Stack now 0 34 25 26 26
+Entering state 37
+Reducing stack by rule 103 (line 207):
+   $1 = nterm TYPE_NAME ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25 26 26
+Entering state 26
+Reading a token: --accepting rule at line 87 (";")
+Next token is token ';' ()
+Reducing stack by rule 79 (line 171):
+   $1 = nterm type_specifier ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25 26 26
+Entering state 51
+Reducing stack by rule 80 (line 172):
+   $1 = nterm type_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25 26
+Entering state 51
+Reducing stack by rule 80 (line 172):
+   $1 = nterm type_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25
+Entering state 50
+Reducing stack by rule 78 (line 170):
+   $1 = nterm storage_class_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34
+Entering state 24
+Next token is token ';' ()
+Shifting token ';' ()
+Entering state 45
+Reducing stack by rule 75 (line 164):
+   $1 = nterm declaration_specifiers ()
+   $2 = token ';' ()
+-> $$ = nterm declaration ()
+Stack now 0 34
+Entering state 23
+Reducing stack by rule 207 (line 415):
+   $1 = nterm declaration ()
+-> $$ = nterm external_declaration ()
+Stack now 0 34
+Entering state 64
+Reducing stack by rule 205 (line 410):
+   $1 = nterm translation_unit ()
+   $2 = nterm external_declaration ()
+-> $$ = nterm translation_unit ()
+Stack now 0
+Entering state 34
+Reading a token: --accepting rule at line 85 ("
+ ")
+--accepting rule at line 42 ("typedef")
+Next token is token TYPEDEF ()
+Shifting token TYPEDEF ()
+Entering state 2
+Reducing stack by rule 87 (line 188):
+   $1 = token TYPEDEF ()
+-> $$ = nterm storage_class_specifier ()
+Stack now 0 34
+Entering state 25
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 33 ("long")
+Next token is token LONG ()
+Shifting token LONG ()
+Entering state 10
+Reducing stack by rule 96 (line 200):
+   $1 = token LONG ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25
+Entering state 26
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 32 ("int")
+Next token is token INT ()
+Shifting token INT ()
+Entering state 9
+Reducing stack by rule 95 (line 199):
+   $1 = token INT ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25 26
+Entering state 26
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 49 ("__off_t")
+Next token is token IDENTIFIER ()
+Shifting token IDENTIFIER ()
+Entering state 49
+Reducing stack by rule 212 (line 425):
+   $1 = token IDENTIFIER ()
+-> $$ = nterm TYPE_NAME ()
+Stack now 0 34 25 26 26
+Entering state 37
+Reducing stack by rule 103 (line 207):
+   $1 = nterm TYPE_NAME ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25 26 26
+Entering state 26
+Reading a token: --accepting rule at line 87 (";")
+Next token is token ';' ()
+Reducing stack by rule 79 (line 171):
+   $1 = nterm type_specifier ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25 26 26
+Entering state 51
+Reducing stack by rule 80 (line 172):
+   $1 = nterm type_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25 26
+Entering state 51
+Reducing stack by rule 80 (line 172):
+   $1 = nterm type_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25
+Entering state 50
+Reducing stack by rule 78 (line 170):
+   $1 = nterm storage_class_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34
+Entering state 24
+Next token is token ';' ()
+Shifting token ';' ()
+Entering state 45
+Reducing stack by rule 75 (line 164):
+   $1 = nterm declaration_specifiers ()
+   $2 = token ';' ()
+-> $$ = nterm declaration ()
+Stack now 0 34
+Entering state 23
+Reducing stack by rule 207 (line 415):
+   $1 = nterm declaration ()
+-> $$ = nterm external_declaration ()
+Stack now 0 34
+Entering state 64
+Reducing stack by rule 205 (line 410):
+   $1 = nterm translation_unit ()
+   $2 = nterm external_declaration ()
+-> $$ = nterm translation_unit ()
+Stack now 0
+Entering state 34
+Reading a token: --accepting rule at line 85 ("
+ ")
+--accepting rule at line 42 ("typedef")
+Next token is token TYPEDEF ()
+Shifting token TYPEDEF ()
+Entering state 2
+Reducing stack by rule 87 (line 188):
+   $1 = token TYPEDEF ()
+-> $$ = nterm storage_class_specifier ()
+Stack now 0 34
+Entering state 25
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 49 ("__quad_t")
+Next token is token IDENTIFIER ()
+Shifting token IDENTIFIER ()
+Entering state 49
+Reducing stack by rule 212 (line 425):
+   $1 = token IDENTIFIER ()
+-> $$ = nterm TYPE_NAME ()
+Stack now 0 34 25
+Entering state 37
+Reducing stack by rule 103 (line 207):
+   $1 = nterm TYPE_NAME ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25
+Entering state 26
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 49 ("__off64_t")
+Next token is token IDENTIFIER ()
+Shifting token IDENTIFIER ()
+Entering state 49
+Reducing stack by rule 212 (line 425):
+   $1 = token IDENTIFIER ()
+-> $$ = nterm TYPE_NAME ()
+Stack now 0 34 25 26
+Entering state 37
+Reducing stack by rule 103 (line 207):
+   $1 = nterm TYPE_NAME ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25 26
+Entering state 26
+Reading a token: --accepting rule at line 87 (";")
+Next token is token ';' ()
+Reducing stack by rule 79 (line 171):
+   $1 = nterm type_specifier ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25 26
+Entering state 51
+Reducing stack by rule 80 (line 172):
+   $1 = nterm type_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25
+Entering state 50
+Reducing stack by rule 78 (line 170):
+   $1 = nterm storage_class_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34
+Entering state 24
+Next token is token ';' ()
+Shifting token ';' ()
+Entering state 45
+Reducing stack by rule 75 (line 164):
+   $1 = nterm declaration_specifiers ()
+   $2 = token ';' ()
+-> $$ = nterm declaration ()
+Stack now 0 34
+Entering state 23
+Reducing stack by rule 207 (line 415):
+   $1 = nterm declaration ()
+-> $$ = nterm external_declaration ()
+Stack now 0 34
+Entering state 64
+Reducing stack by rule 205 (line 410):
+   $1 = nterm translation_unit ()
+   $2 = nterm external_declaration ()
+-> $$ = nterm translation_unit ()
+Stack now 0
+Entering state 34
+Reading a token: --accepting rule at line 85 ("
+ ")
+--accepting rule at line 42 ("typedef")
+Next token is token TYPEDEF ()
+Shifting token TYPEDEF ()
+Entering state 2
+Reducing stack by rule 87 (line 188):
+   $1 = token TYPEDEF ()
+-> $$ = nterm storage_class_specifier ()
+Stack now 0 34
+Entering state 25
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 32 ("int")
+Next token is token INT ()
+Shifting token INT ()
+Entering state 9
+Reducing stack by rule 95 (line 199):
+   $1 = token INT ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25
+Entering state 26
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 49 ("__pid_t")
+Next token is token IDENTIFIER ()
+Shifting token IDENTIFIER ()
+Entering state 49
+Reducing stack by rule 212 (line 425):
+   $1 = token IDENTIFIER ()
+-> $$ = nterm TYPE_NAME ()
+Stack now 0 34 25 26
+Entering state 37
+Reducing stack by rule 103 (line 207):
+   $1 = nterm TYPE_NAME ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25 26
+Entering state 26
+Reading a token: --accepting rule at line 87 (";")
+Next token is token ';' ()
+Reducing stack by rule 79 (line 171):
+   $1 = nterm type_specifier ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25 26
+Entering state 51
+Reducing stack by rule 80 (line 172):
+   $1 = nterm type_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34 25
+Entering state 50
+Reducing stack by rule 78 (line 170):
+   $1 = nterm storage_class_specifier ()
+   $2 = nterm declaration_specifiers ()
+-> $$ = nterm declaration_specifiers ()
+Stack now 0 34
+Entering state 24
+Next token is token ';' ()
+Shifting token ';' ()
+Entering state 45
+Reducing stack by rule 75 (line 164):
+   $1 = nterm declaration_specifiers ()
+   $2 = token ';' ()
+-> $$ = nterm declaration ()
+Stack now 0 34
+Entering state 23
+Reducing stack by rule 207 (line 415):
+   $1 = nterm declaration ()
+-> $$ = nterm external_declaration ()
+Stack now 0 34
+Entering state 64
+Reducing stack by rule 205 (line 410):
+   $1 = nterm translation_unit ()
+   $2 = nterm external_declaration ()
+-> $$ = nterm translation_unit ()
+Stack now 0
+Entering state 34
+Reading a token: --accepting rule at line 85 ("
+ ")
+--accepting rule at line 42 ("typedef")
+Next token is token TYPEDEF ()
+Shifting token TYPEDEF ()
+Entering state 2
+Reducing stack by rule 87 (line 188):
+   $1 = token TYPEDEF ()
+-> $$ = nterm storage_class_specifier ()
+Stack now 0 34
+Entering state 25
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 40 ("struct")
+Next token is token STRUCT ()
+Shifting token STRUCT ()
+Entering state 18
+Reducing stack by rule 107 (line 217):
+   $1 = token STRUCT ()
+-> $$ = nterm struct_or_union ()
+Stack now 0 34 25
+Entering state 28
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 87 ("{")
+Next token is token '{' ()
+Shifting token '{' ()
+Entering state 53
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 32 ("int")
+Next token is token INT ()
+Shifting token INT ()
+Entering state 9
+Reducing stack by rule 95 (line 199):
+   $1 = token INT ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25 28 53
+Entering state 78
+Reading a token: --accepting rule at line 85 (" ")
+--accepting rule at line 49 ("__val")
+Next token is token IDENTIFIER ()
+Shifting token IDENTIFIER ()
+Entering state 49
+Reducing stack by rule 212 (line 425):
+   $1 = token IDENTIFIER ()
+-> $$ = nterm TYPE_NAME ()
+Stack now 0 34 25 28 53 78
+Entering state 37
+Reducing stack by rule 103 (line 207):
+   $1 = nterm TYPE_NAME ()
+-> $$ = nterm type_specifier ()
+Stack now 0 34 25 28 53 78
+Entering state 78
+Reading a token: --accepting rule at line 87 ("[")
+Next token is token '[' ()
+Reducing stack by rule 113 (line 232):
+   $1 = nterm type_specifier ()
+-> $$ = nterm specifier_qualifier_list ()
+Stack now 0 34 25 28 53 78
+Entering state 161
+Reducing stack by rule 112 (line 231):
+   $1 = nterm type_specifier ()
+   $2 = nterm specifier_qualifier_list ()
+-> $$ = nterm specifier_qualifier_list ()
+Stack now 0 34 25 28 53
+Entering state 81
+Next token is token '[' ()
+syntax error: Success
+Error: popping nterm specifier_qualifier_list ()
+Stack now 0 34 25 28 53
+Error: popping token '{' ()
+Stack now 0 34 25 28
+Error: popping nterm struct_or_union ()
+Stack now 0 34 25
+Error: popping nterm storage_class_specifier ()
+Stack now 0 34
+Error: popping nterm translation_unit ()
+Stack now 0
+Cleanup: discarding lookahead token '[' ()
+Stack now 0

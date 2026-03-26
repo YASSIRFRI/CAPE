@@ -1,0 +1,100 @@
+% Execution Environment Routine Transformation Rules.
+% Patricia REINOSO, 29 09 2017
+% 
+% Revision history:
+% 1.0 Initial revision - 29 09 2017
+%
+% Set of rules that handles the execution environment routines.
+% Routines considered:
+% - Set number of nodes.
+% - Get number of nodes.
+% - Get id of current node.
+
+% Inclusion of the environment routines 
+% into the reference definition
+% taken from the C Grammar.
+redefine reference
+		...
+	|	[environment_routine]
+end redefine
+
+redefine compound_statement_body
+		...
+	|	[environment_routine];
+end redefine
+
+% Definition of environment_routine as the union
+% of the environment routines included in omp and
+% their transformation into cape.
+define environment_routine
+		[omp_environment_routine]
+	|	[cape_environment_routine]
+end define
+
+% Main rule of the environment routine transformation.
+% Identify the omp environment routine and replace them by
+% the appropriate cape statements.
+rule replaceEnvRoutine 
+	replace [reference]
+		Routine [reference]
+
+	construct NewRoutine [reference]
+		Routine [replaceEnvRoutSetNum]
+				[replaceEnvRoutGetNum]
+				[replaceEnvRoutGetThread]
+				[replaceEnvRoutGetNumStatement]
+				[replaceEnvRoutGetThreadStatement]
+	where not 
+		NewRoutine [= Routine]
+	by 
+		NewRoutine
+end rule
+
+% Handles the set number of nodes routine.
+function replaceEnvRoutSetNum
+	replace [reference]
+		omp_set_num_threads(Exp[reference_id])
+	by
+		cape_set_num_nodes(Exp)
+end function
+
+% Handles the set number of nodes routine.
+% In case it is a statement.
+rule replaceEnvRoutSetNumStatement
+	replace [compound_statement_body]
+		omp_set_num_threads(Exp[reference_id]);
+	by
+		cape_set_num_nodes(Exp) ;
+end rule
+
+rule replaceEnvRoutGetNumStatement
+	replace [compound_statement_body]
+		omp_get_num_threads();
+	by
+		cape_get_num_nodes();
+end rule
+
+rule replaceEnvRoutGetThreadStatement
+	replace [compound_statement_body]
+		omp_get_thread_num();
+	by
+		cape_get_node_num();
+end rule
+
+% Handles the get number of nodes routine.
+function replaceEnvRoutGetNum
+	replace [reference]
+		omp_get_num_threads()
+	by
+		cape_get_num_nodes()
+end function
+
+% Handles the get if of current node routine.
+function replaceEnvRoutGetThread
+	replace [reference]
+		omp_get_thread_num()
+	by
+		cape_get_node_num()
+end function
+
+
