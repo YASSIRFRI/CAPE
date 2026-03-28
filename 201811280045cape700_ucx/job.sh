@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=cape_ucx_bench
-#SBATCH --nodes=4
-#SBATCH --ntasks=4
+#SBATCH --nodes=8
+#SBATCH --ntasks=8
 #SBATCH --ntasks-per-node=1
 #SBATCH --time=00:45:00
 #SBATCH --output=cape_ucx_bench_%j.out
@@ -33,7 +33,7 @@ if ! mkdir -p "${BUILD_DIR}/bin" "${BUILD_DIR}/obj" "${BUILD_DIR}/lib" 2>/dev/nu
     mkdir -p "${BUILD_DIR}/bin" "${BUILD_DIR}/obj" "${BUILD_DIR}/lib"
 fi
 
-N_VALUES_STR="${N_VALUES_STR:-512 1024}"
+N_VALUES_STR="${N_VALUES_STR:-3000}"
 REPS="${REPS:-5}"
 read -r -a N_VALUES <<< "${N_VALUES_STR}"
 
