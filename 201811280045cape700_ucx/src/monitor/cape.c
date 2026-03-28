@@ -31,6 +31,12 @@ static inline double cape_get_ns(void) {
     return (double)_ts.tv_sec * 1e9 + (double)_ts.tv_nsec;
 }
 
+static inline double cape_get_realtime_ns(void) {
+    struct timespec _ts;
+    clock_gettime(CLOCK_REALTIME, &_ts);
+    return (double)_ts.tv_sec * 1e9 + (double)_ts.tv_nsec;
+}
+
 static double prof_ckpt_start_ns      = 0.0;
 static double prof_generate_ckpt_ns   = 0.0;
 static double prof_allreduce_total_ns = 0.0;
@@ -48,6 +54,97 @@ static unsigned long prof_inject_ckpt_count   = 0;
 static unsigned long prof_sendrecv_count      = 0;
 static unsigned long prof_bytes_sent          = 0;
 static unsigned long prof_bytes_received      = 0;
+
+#define CAPE_PROFILE_MAX_STEPS    128
+#define CAPE_PROFILE_MAX_ARRIVALS 64
+
+enum {
+	CAPE_SR_PHASE_NONE = 0,
+	CAPE_SR_PHASE_SIZE = 1,
+	CAPE_SR_PHASE_DATA = 2
+};
+
+static double prof_step_size_call_ns[CAPE_PROFILE_MAX_STEPS];
+static double prof_step_data_call_ns[CAPE_PROFILE_MAX_STEPS];
+static double prof_step_size_recv_wait_ns[CAPE_PROFILE_MAX_STEPS];
+static double prof_step_data_recv_wait_ns[CAPE_PROFILE_MAX_STEPS];
+static double prof_step_size_max_recv_wait_ns[CAPE_PROFILE_MAX_STEPS];
+static double prof_step_data_max_recv_wait_ns[CAPE_PROFILE_MAX_STEPS];
+static uint32_t prof_step_size_max_epoch[CAPE_PROFILE_MAX_STEPS];
+static uint32_t prof_step_data_max_epoch[CAPE_PROFILE_MAX_STEPS];
+static unsigned long prof_step_size_count[CAPE_PROFILE_MAX_STEPS];
+static unsigned long prof_step_data_count[CAPE_PROFILE_MAX_STEPS];
+static int prof_step_partner[CAPE_PROFILE_MAX_STEPS];
+static unsigned char prof_step_partner_set[CAPE_PROFILE_MAX_STEPS];
+static unsigned int prof_step_max_seen = 0;
+static unsigned long prof_step_overflow = 0;
+
+static int prof_sr_phase = CAPE_SR_PHASE_NONE;
+static int prof_sr_step = -1;
+static int prof_sr_partner = -1;
+static uint32_t prof_sr_epoch = 0;
+
+static double prof_allreduce_arrival_first_rt_ns = 0.0;
+static double prof_allreduce_arrival_last_rt_ns = 0.0;
+static double prof_allreduce_arrival_rt_ns[CAPE_PROFILE_MAX_ARRIVALS];
+static uint32_t prof_allreduce_arrival_epoch[CAPE_PROFILE_MAX_ARRIVALS];
+static unsigned long prof_allreduce_arrival_count = 0;
+
+static inline void cape_prof_set_sendrecv_context(int phase, int step, int partner, uint32_t epoch)
+{
+	prof_sr_phase = phase;
+	prof_sr_step = step;
+	prof_sr_partner = partner;
+	prof_sr_epoch = epoch;
+}
+
+static inline void cape_prof_clear_sendrecv_context(void)
+{
+	prof_sr_phase = CAPE_SR_PHASE_NONE;
+	prof_sr_step = -1;
+	prof_sr_partner = -1;
+	prof_sr_epoch = 0;
+}
+
+static inline void cape_prof_acc_sendrecv(double call_ns, double recv_wait_ns)
+{
+	unsigned int s;
+
+	if (prof_sr_step < 0)
+		return;
+	if ((unsigned int)prof_sr_step >= CAPE_PROFILE_MAX_STEPS) {
+		prof_step_overflow++;
+		return;
+	}
+
+	s = (unsigned int)prof_sr_step;
+	if (!prof_step_partner_set[s]) {
+		prof_step_partner[s] = prof_sr_partner;
+		prof_step_partner_set[s] = 1;
+	} else if (prof_step_partner[s] != prof_sr_partner) {
+		prof_step_partner[s] = -2; /* mixed partner set for this step index */
+	}
+	if (s + 1 > prof_step_max_seen)
+		prof_step_max_seen = s + 1;
+
+	if (prof_sr_phase == CAPE_SR_PHASE_SIZE) {
+		prof_step_size_call_ns[s] += call_ns;
+		prof_step_size_recv_wait_ns[s] += recv_wait_ns;
+		prof_step_size_count[s]++;
+		if (recv_wait_ns > prof_step_size_max_recv_wait_ns[s]) {
+			prof_step_size_max_recv_wait_ns[s] = recv_wait_ns;
+			prof_step_size_max_epoch[s] = prof_sr_epoch;
+		}
+	} else if (prof_sr_phase == CAPE_SR_PHASE_DATA) {
+		prof_step_data_call_ns[s] += call_ns;
+		prof_step_data_recv_wait_ns[s] += recv_wait_ns;
+		prof_step_data_count[s]++;
+		if (recv_wait_ns > prof_step_data_max_recv_wait_ns[s]) {
+			prof_step_data_max_recv_wait_ns[s] = recv_wait_ns;
+			prof_step_data_max_epoch[s] = prof_sr_epoch;
+		}
+	}
+}
 
 #define PROF_START(var)       double var = cape_get_ns()
 #define PROF_ACC(accum, var)  (accum) += cape_get_ns() - (var)
@@ -237,17 +334,32 @@ static void cape_ucx_sendrecv(
     //         __node__, rreq, sreq);
 
     ucp_tag_t matched_tag = 0;
+    PROF_START(_t_sendrecv);
     PROF_START(_t_recv_wait);
     cape_ucx_wait(rreq, recvlen, 1, &matched_tag);
+#ifdef CAPE_PROFILE
+    double _recv_wait_ns = cape_get_ns() - _t_recv_wait;
+    prof_ucx_recv_wait_ns += _recv_wait_ns;
+#else
     PROF_ACC(prof_ucx_recv_wait_ns, _t_recv_wait);
+#endif
 
     PROF_START(_t_send_wait);
     cape_ucx_wait(sreq, 0, 0, NULL);
+#ifdef CAPE_PROFILE
+    double _send_wait_ns = cape_get_ns() - _t_send_wait;
+    prof_ucx_send_wait_ns += _send_wait_ns;
+    (void)_send_wait_ns;
+#else
     PROF_ACC(prof_ucx_send_wait_ns, _t_send_wait);
+#endif
 
     PROF_INC(prof_sendrecv_count);
     PROF_ADD(prof_bytes_sent, sendlen);
     PROF_ADD(prof_bytes_received, recvlen);
+#ifdef CAPE_PROFILE
+    cape_prof_acc_sendrecv(cape_get_ns() - _t_sendrecv, _recv_wait_ns);
+#endif
 }
 /***********************************************************************/
 
@@ -1575,11 +1687,17 @@ int hypercube_allreduce(unsigned int node, unsigned int num_nodes, char ckpt_fla
 		data_token = ((epoch & 0x0fffU) << 8) | (uint32_t)(((i * 2) + 1) & 0xff);
 
 		/* Exchange message sizes (step tag: i*2) */
+#ifdef CAPE_PROFILE
+		cape_prof_set_sendrecv_context(CAPE_SR_PHASE_SIZE, i, (int)partner, epoch);
+#endif
 		PROF_START(_t_size_xchg);
 		cape_ucx_sendrecv(&send_msg_size, sizeof(unsigned long), partner,
 		                  &recv_msg_size, sizeof(unsigned long), partner,
 		                  size_token);
 		PROF_ACC(prof_allreduce_size_ns, _t_size_xchg);
+#ifdef CAPE_PROFILE
+		cape_prof_clear_sendrecv_context();
+#endif
 
 		// fprintf(stderr, "CAPE DBG node %d step %d: SIZE exchange done"
 		//         " sent=%lu recv=%lu\n",
@@ -1593,11 +1711,17 @@ int hypercube_allreduce(unsigned int node, unsigned int num_nodes, char ckpt_fla
 		}
 
 		/* Exchange checkpoint data (step tag: i*2+1) */
+#ifdef CAPE_PROFILE
+		cape_prof_set_sendrecv_context(CAPE_SR_PHASE_DATA, i, (int)partner, epoch);
+#endif
 		PROF_START(_t_data_xchg);
 		cape_ucx_sendrecv(send_msg, send_msg_size, partner,
 		                  recv_msg, recv_msg_size, partner,
 		                  data_token);
 		PROF_ACC(prof_allreduce_data_ns, _t_data_xchg);
+#ifdef CAPE_PROFILE
+		cape_prof_clear_sendrecv_context();
+#endif
 
 		PROF_START(_t_merge);
 		rc = merge_checkpoint(recv_msg, recv_msg_size, ckpt_flag);
@@ -1638,14 +1762,21 @@ int ring_allreduce(unsigned int node, unsigned int nnodes, char ckpt_flag, uint3
 	send_msg_size = after_ckpt_size;
 
 	for(i = 1; i < nnodes; i++){
+		int step = (int)(i - 1);
 		size_token = ((epoch & 0x0fffU) << 8) | (uint32_t)((i * 2) & 0xff);
 		data_token = ((epoch & 0x0fffU) << 8) | (uint32_t)(((i * 2) + 1) & 0xff);
 		/* Exchange sizes: send to right, receive from left (step tag: i*2) */
+#ifdef CAPE_PROFILE
+		cape_prof_set_sendrecv_context(CAPE_SR_PHASE_SIZE, step, (int)left, epoch);
+#endif
 		PROF_START(_t_size_xchg);
 		cape_ucx_sendrecv(&send_msg_size, sizeof(unsigned int), right,
 		                  &recv_msg_size, sizeof(unsigned int), left,
 		                  size_token);
 		PROF_ACC(prof_allreduce_size_ns, _t_size_xchg);
+#ifdef CAPE_PROFILE
+		cape_prof_clear_sendrecv_context();
+#endif
 
 		recv_msg = malloc(sizeof(char) * recv_msg_size);
 		if (recv_msg == NULL) {
@@ -1657,11 +1788,17 @@ int ring_allreduce(unsigned int node, unsigned int nnodes, char ckpt_flag, uint3
 		}
 
 		/* Exchange data (step tag: i*2+1) */
+#ifdef CAPE_PROFILE
+		cape_prof_set_sendrecv_context(CAPE_SR_PHASE_DATA, step, (int)left, epoch);
+#endif
 		PROF_START(_t_data_xchg);
 		cape_ucx_sendrecv(send_msg, send_msg_size, right,
 		                  recv_msg, recv_msg_size, left,
 		                  data_token);
 		PROF_ACC(prof_allreduce_data_ns, _t_data_xchg);
+#ifdef CAPE_PROFILE
+		cape_prof_clear_sendrecv_context();
+#endif
 
 		PROF_START(_t_merge);
 		rc = merge_checkpoint(recv_msg, recv_msg_size, ckpt_flag);
@@ -1701,6 +1838,18 @@ int require_allreduce(char ckpt_flag){
 	epoch = __allreduce_epoch__ & 0x0fffU;
 	if (epoch == 0)
 		epoch = 1;
+#ifdef CAPE_PROFILE
+	double _arrival_rt_ns = cape_get_realtime_ns();
+	if (prof_allreduce_arrival_count == 0)
+		prof_allreduce_arrival_first_rt_ns = _arrival_rt_ns;
+	prof_allreduce_arrival_last_rt_ns = _arrival_rt_ns;
+	if (prof_allreduce_arrival_count < CAPE_PROFILE_MAX_ARRIVALS) {
+		unsigned long idx = prof_allreduce_arrival_count;
+		prof_allreduce_arrival_rt_ns[idx] = _arrival_rt_ns;
+		prof_allreduce_arrival_epoch[idx] = epoch;
+	}
+	prof_allreduce_arrival_count++;
+#endif
 	PROF_START(_t_allreduce);
 	int _rc;
 	if (is_power_of_two(__nnodes__))
@@ -2320,8 +2469,16 @@ void cape_init(){
 void cape_finalize(){
 #ifdef CAPE_PROFILE
 	/* ---- Performance profiling summary ---- */
+	unsigned int s;
 	double allreduce_comm_ns = prof_allreduce_size_ns + prof_allreduce_data_ns;
 	double allreduce_other_ns = prof_allreduce_total_ns - allreduce_comm_ns - prof_merge_ckpt_ns;
+	double arrival_span_ms = 0.0;
+	unsigned long shown_arrivals = prof_allreduce_arrival_count;
+	if (shown_arrivals > CAPE_PROFILE_MAX_ARRIVALS)
+		shown_arrivals = CAPE_PROFILE_MAX_ARRIVALS;
+	if (prof_allreduce_arrival_count > 1)
+		arrival_span_ms = (prof_allreduce_arrival_last_rt_ns - prof_allreduce_arrival_first_rt_ns) / 1e6;
+
 	fprintf(stderr,
 	    "\n[CAPE PROFILE] Node %d  (all times in ms, counts in parentheses)\n"
 	    "  ckpt_start   (snapshot vars)  : %10.3f ms  (x%lu)\n"
@@ -2334,6 +2491,7 @@ void cape_finalize(){
 	    "    other (malloc/free/overhead) : %10.3f ms\n"
 	    "  UCX recv wait (network lat)   : %10.3f ms  (x%lu sendrecvs)\n"
 	    "  UCX send wait (send compl)    : %10.3f ms\n"
+	    "  allreduce arrival (realtime)  : first=%13.3f ms  last=%13.3f ms  span=%10.3f ms  (x%lu)\n"
 	    "  Data transferred: sent=%lu B  recv=%lu B\n",
 	    __node__,
 	    prof_ckpt_start_ns    / 1e6, prof_ckpt_start_count,
@@ -2346,7 +2504,47 @@ void cape_finalize(){
 	    allreduce_other_ns      / 1e6,
 	    prof_ucx_recv_wait_ns  / 1e6, prof_sendrecv_count,
 	    prof_ucx_send_wait_ns  / 1e6,
+	    prof_allreduce_arrival_first_rt_ns / 1e6,
+	    prof_allreduce_arrival_last_rt_ns / 1e6,
+	    arrival_span_ms, prof_allreduce_arrival_count,
 	    prof_bytes_sent, prof_bytes_received);
+
+	if (shown_arrivals > 0) {
+		fprintf(stderr, "  allreduce arrivals by epoch (realtime ms):\n");
+		for (s = 0; s < shown_arrivals; s++) {
+			fprintf(stderr, "    #%u epoch=%u  t=%13.3f\n",
+			        s + 1,
+			        prof_allreduce_arrival_epoch[s],
+			        prof_allreduce_arrival_rt_ns[s] / 1e6);
+		}
+		if (prof_allreduce_arrival_count > shown_arrivals) {
+			fprintf(stderr, "    ... %lu more arrivals not shown\n",
+			        prof_allreduce_arrival_count - shown_arrivals);
+		}
+	}
+
+	if (prof_step_max_seen > 0) {
+		fprintf(stderr, "  allreduce step recv-wait breakdown:\n");
+		for (s = 0; s < prof_step_max_seen; s++) {
+			int partner = prof_step_partner_set[s] ? prof_step_partner[s] : -1;
+			fprintf(stderr,
+			    "    step %u partner=%d  size_wait=%10.3f ms / size_total=%10.3f ms (x%lu, max=%10.3f ms @epoch %u)"
+			    "  data_wait=%10.3f ms / data_total=%10.3f ms (x%lu, max=%10.3f ms @epoch %u)\n",
+			    s, partner,
+			    prof_step_size_recv_wait_ns[s] / 1e6,
+			    prof_step_size_call_ns[s] / 1e6,
+			    prof_step_size_count[s],
+			    prof_step_size_max_recv_wait_ns[s] / 1e6, prof_step_size_max_epoch[s],
+			    prof_step_data_recv_wait_ns[s] / 1e6,
+			    prof_step_data_call_ns[s] / 1e6,
+			    prof_step_data_count[s],
+			    prof_step_data_max_recv_wait_ns[s] / 1e6, prof_step_data_max_epoch[s]);
+		}
+		if (prof_step_overflow > 0) {
+			fprintf(stderr, "    ... %lu profiled step events exceeded CAPE_PROFILE_MAX_STEPS=%d\n",
+			        prof_step_overflow, CAPE_PROFILE_MAX_STEPS);
+		}
+	}
 #endif /* CAPE_PROFILE */
 
 	/* Flush and close all endpoints */
