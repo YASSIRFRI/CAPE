@@ -5,7 +5,7 @@
 #include "../../include/cape.h"
 
 #define DEFAULT_N 100
-#define MAX_N 1200
+#define MAX_N 12000
 
 unsigned long get_ms_of_day()
 {
