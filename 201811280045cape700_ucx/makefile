@@ -17,9 +17,17 @@ UCX_LIB     ?= /home/yassir/internship/code/matmul_bench/ucx_libs
 PMIX_FLAGS  ?=
 PMIX_LINK   ?=
 
+# ── Profiling (build with PROFILE=1 to enable, e.g. make cape_mamult PROFILE=1)
+PROFILE ?= 0
+ifeq ($(PROFILE),1)
+PROF_FLAGS = -DCAPE_PROFILE
+else
+PROF_FLAGS =
+endif
+
 # ── Compiler & flags ─────────────────────────────────────────────────────────
 CC      ?= cc
-CFLAGS   = -I./$(I_FOLDER) -I$(UCX_SRC) -I$(UCX_GEN) $(PMIX_FLAGS)
+CFLAGS   = -I./$(I_FOLDER) -I$(UCX_SRC) -I$(UCX_GEN) $(PMIX_FLAGS) $(PROF_FLAGS)
 LDFLAGS  = -L$(UCX_LIB) -lucp -lucs $(PMIX_LINK) -Wl,-rpath,$(UCX_LIB)
 
 # One-shot compile: cape.c + app.c -> binary

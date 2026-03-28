@@ -21,23 +21,25 @@
 #define dprintf(fmt, args...) ;
 #endif
 /* ====================================================================
- * Per-node performance profiling
+ * Per-node performance profiling  (compile with -DCAPE_PROFILE to enable)
  * ==================================================================== */
+#ifdef CAPE_PROFILE
+
 static inline double cape_get_ns(void) {
     struct timespec _ts;
     clock_gettime(CLOCK_MONOTONIC, &_ts);
     return (double)_ts.tv_sec * 1e9 + (double)_ts.tv_nsec;
 }
 
-static double prof_ckpt_start_ns      = 0.0; /* ckpt_start: snapshot variables */
-static double prof_generate_ckpt_ns   = 0.0; /* generate_checkpoint: build delta */
-static double prof_allreduce_total_ns = 0.0; /* require_allreduce: total comm+merge */
-static double prof_allreduce_size_ns  = 0.0; /* allreduce: size-exchange sendrecv */
-static double prof_allreduce_data_ns  = 0.0; /* allreduce: data-exchange sendrecv */
-static double prof_merge_ckpt_ns      = 0.0; /* merge_checkpoint: inside allreduce */
-static double prof_inject_ckpt_ns     = 0.0; /* inject_checkpoint: write to mem */
-static double prof_ucx_recv_wait_ns   = 0.0; /* UCX: waiting for recv to complete */
-static double prof_ucx_send_wait_ns   = 0.0; /* UCX: waiting for send to complete */
+static double prof_ckpt_start_ns      = 0.0;
+static double prof_generate_ckpt_ns   = 0.0;
+static double prof_allreduce_total_ns = 0.0;
+static double prof_allreduce_size_ns  = 0.0;
+static double prof_allreduce_data_ns  = 0.0;
+static double prof_merge_ckpt_ns      = 0.0;
+static double prof_inject_ckpt_ns     = 0.0;
+static double prof_ucx_recv_wait_ns   = 0.0;
+static double prof_ucx_send_wait_ns   = 0.0;
 
 static unsigned long prof_ckpt_start_count    = 0;
 static unsigned long prof_generate_ckpt_count = 0;
@@ -46,6 +48,20 @@ static unsigned long prof_inject_ckpt_count   = 0;
 static unsigned long prof_sendrecv_count      = 0;
 static unsigned long prof_bytes_sent          = 0;
 static unsigned long prof_bytes_received      = 0;
+
+#define PROF_START(var)       double var = cape_get_ns()
+#define PROF_ACC(accum, var)  (accum) += cape_get_ns() - (var)
+#define PROF_INC(counter)     (counter)++
+#define PROF_ADD(counter, v)  (counter) += (v)
+
+#else /* !CAPE_PROFILE */
+
+#define PROF_START(var)       (void)0
+#define PROF_ACC(accum, var)  (void)0
+#define PROF_INC(counter)     (void)0
+#define PROF_ADD(counter, v)  (void)0
+
+#endif /* CAPE_PROFILE */
 /* ==================================================================== */
 
 /**********Local Variables ********************************************/
@@ -221,24 +237,17 @@ static void cape_ucx_sendrecv(
     //         __node__, rreq, sreq);
 
     ucp_tag_t matched_tag = 0;
-    double _t_recv_wait = cape_get_ns();
+    PROF_START(_t_recv_wait);
     cape_ucx_wait(rreq, recvlen, 1, &matched_tag);
-    double _t_send_wait = cape_get_ns();
-    prof_ucx_recv_wait_ns += _t_send_wait - _t_recv_wait;
+    PROF_ACC(prof_ucx_recv_wait_ns, _t_recv_wait);
 
-    // fprintf(stderr, "CAPE DBG node %d: recv buf [%zu bytes] matched_tag=0x%lx:",
-    //         __node__, recvlen, (unsigned long)matched_tag);
-    // for (size_t di = 0; di < (recvlen < 48 ? recvlen : 48); di++)
-    //     fprintf(stderr, " %02x", (unsigned char)((char *)recvbuf)[di]);
-    // fprintf(stderr, "\n");
-
+    PROF_START(_t_send_wait);
     cape_ucx_wait(sreq, 0, 0, NULL);
-    double _t_done = cape_get_ns();
-    prof_ucx_send_wait_ns += _t_done - _t_send_wait;
+    PROF_ACC(prof_ucx_send_wait_ns, _t_send_wait);
 
-    prof_sendrecv_count++;
-    prof_bytes_sent     += sendlen;
-    prof_bytes_received += recvlen;
+    PROF_INC(prof_sendrecv_count);
+    PROF_ADD(prof_bytes_sent, sendlen);
+    PROF_ADD(prof_bytes_received, recvlen);
 }
 /***********************************************************************/
 
@@ -1566,11 +1575,11 @@ int hypercube_allreduce(unsigned int node, unsigned int num_nodes, char ckpt_fla
 		data_token = ((epoch & 0x0fffU) << 8) | (uint32_t)(((i * 2) + 1) & 0xff);
 
 		/* Exchange message sizes (step tag: i*2) */
-		double _t_size_xchg = cape_get_ns();
+		PROF_START(_t_size_xchg);
 		cape_ucx_sendrecv(&send_msg_size, sizeof(unsigned long), partner,
 		                  &recv_msg_size, sizeof(unsigned long), partner,
 		                  size_token);
-		prof_allreduce_size_ns += cape_get_ns() - _t_size_xchg;
+		PROF_ACC(prof_allreduce_size_ns, _t_size_xchg);
 
 		// fprintf(stderr, "CAPE DBG node %d step %d: SIZE exchange done"
 		//         " sent=%lu recv=%lu\n",
@@ -1584,15 +1593,15 @@ int hypercube_allreduce(unsigned int node, unsigned int num_nodes, char ckpt_fla
 		}
 
 		/* Exchange checkpoint data (step tag: i*2+1) */
-		double _t_data_xchg = cape_get_ns();
+		PROF_START(_t_data_xchg);
 		cape_ucx_sendrecv(send_msg, send_msg_size, partner,
 		                  recv_msg, recv_msg_size, partner,
 		                  data_token);
-		prof_allreduce_data_ns += cape_get_ns() - _t_data_xchg;
+		PROF_ACC(prof_allreduce_data_ns, _t_data_xchg);
 
-		double _t_merge = cape_get_ns();
+		PROF_START(_t_merge);
 		rc = merge_checkpoint(recv_msg, recv_msg_size, ckpt_flag);
-		prof_merge_ckpt_ns += cape_get_ns() - _t_merge;
+		PROF_ACC(prof_merge_ckpt_ns, _t_merge);
 
 		free(recv_msg);
 		recv_msg_size = 0;
@@ -1632,11 +1641,11 @@ int ring_allreduce(unsigned int node, unsigned int nnodes, char ckpt_flag, uint3
 		size_token = ((epoch & 0x0fffU) << 8) | (uint32_t)((i * 2) & 0xff);
 		data_token = ((epoch & 0x0fffU) << 8) | (uint32_t)(((i * 2) + 1) & 0xff);
 		/* Exchange sizes: send to right, receive from left (step tag: i*2) */
-		double _t_size_xchg = cape_get_ns();
+		PROF_START(_t_size_xchg);
 		cape_ucx_sendrecv(&send_msg_size, sizeof(unsigned int), right,
 		                  &recv_msg_size, sizeof(unsigned int), left,
 		                  size_token);
-		prof_allreduce_size_ns += cape_get_ns() - _t_size_xchg;
+		PROF_ACC(prof_allreduce_size_ns, _t_size_xchg);
 
 		recv_msg = malloc(sizeof(char) * recv_msg_size);
 		if (recv_msg == NULL) {
@@ -1648,15 +1657,15 @@ int ring_allreduce(unsigned int node, unsigned int nnodes, char ckpt_flag, uint3
 		}
 
 		/* Exchange data (step tag: i*2+1) */
-		double _t_data_xchg = cape_get_ns();
+		PROF_START(_t_data_xchg);
 		cape_ucx_sendrecv(send_msg, send_msg_size, right,
 		                  recv_msg, recv_msg_size, left,
 		                  data_token);
-		prof_allreduce_data_ns += cape_get_ns() - _t_data_xchg;
+		PROF_ACC(prof_allreduce_data_ns, _t_data_xchg);
 
-		double _t_merge = cape_get_ns();
+		PROF_START(_t_merge);
 		rc = merge_checkpoint(recv_msg, recv_msg_size, ckpt_flag);
-		prof_merge_ckpt_ns += cape_get_ns() - _t_merge;
+		PROF_ACC(prof_merge_ckpt_ns, _t_merge);
 		if (owned_send_msg != NULL) {
 			free(owned_send_msg);
 			owned_send_msg = NULL;
@@ -1687,6 +1696,22 @@ int require_allreduce(char ckpt_flag){
 
 	//printf("Node %d:  nnodes = %d - is_power_of2: %d \n", __node__, __nnodes__, is_power_of_two(__nnodes__));
 
+	if (after_ckpt_size == 0) return 0 ;
+	__allreduce_epoch__++;
+	epoch = __allreduce_epoch__ & 0x0fffU;
+	if (epoch == 0)
+		epoch = 1;
+	PROF_START(_t_allreduce);
+	int _rc;
+	if (is_power_of_two(__nnodes__))
+		_rc = hypercube_allreduce(__node__, __nnodes__, ckpt_flag, epoch);
+	else
+		_rc = ring_allreduce(__node__, __nnodes__, ckpt_flag, epoch);
+	PROF_ACC(prof_allreduce_total_ns, _t_allreduce);
+	PROF_INC(prof_allreduce_count);
+	return _rc;
+}
+
 /*
  * ---------------------------------------------------------------------
  * Inject checkpoint into application's memory
@@ -1694,14 +1719,14 @@ int require_allreduce(char ckpt_flag){
  * ---------------------------------------------------------------------
  */
 int inject_checkpoint(char *data_ckpt, size_t file_size){
-	double _t_inject = cape_get_ns();
+	PROF_START(_t_inject);
 	unsigned long len=0, file_pointer = 0;
 	long addr;
 	const unsigned long ckpt_header_size = sizeof(unsigned long) * 3;
 
 	if (file_size <= ckpt_header_size) {
-		prof_inject_ckpt_ns += cape_get_ns() - _t_inject;
-		prof_inject_ckpt_count++;
+		PROF_ACC(prof_inject_ckpt_ns, _t_inject);
+		PROF_INC(prof_inject_ckpt_count);
 		return 0;
 	}
 	//printf("\n Node %d: inject ckpt - file size = %d bytes", __node__, file_size);
@@ -1739,8 +1764,8 @@ int inject_checkpoint(char *data_ckpt, size_t file_size){
 
 		file_pointer += len ;
 	}
-	prof_inject_ckpt_ns += cape_get_ns() - _t_inject;
-	prof_inject_ckpt_count++;
+	PROF_ACC(prof_inject_ckpt_ns, _t_inject);
+	PROF_INC(prof_inject_ckpt_count);
 	return 1;
 }
 
@@ -2293,6 +2318,7 @@ void cape_init(){
  * ---------------------------------------------------------------------
  */
 void cape_finalize(){
+#ifdef CAPE_PROFILE
 	/* ---- Performance profiling summary ---- */
 	double allreduce_comm_ns = prof_allreduce_size_ns + prof_allreduce_data_ns;
 	double allreduce_other_ns = prof_allreduce_total_ns - allreduce_comm_ns - prof_merge_ckpt_ns;
@@ -2321,7 +2347,7 @@ void cape_finalize(){
 	    prof_ucx_recv_wait_ns  / 1e6, prof_sendrecv_count,
 	    prof_ucx_send_wait_ns  / 1e6,
 	    prof_bytes_sent, prof_bytes_received);
-	/* --------------------------------------- */
+#endif /* CAPE_PROFILE */
 
 	/* Flush and close all endpoints */
 	ucp_request_param_t close_param;
@@ -2486,13 +2512,13 @@ void cape_end(unsigned char name_directive, unsigned char ops_flag){
  * ---------------------------------------------------------------------
  */
 int ckpt_start(){
-	double _t_ckpt_start = cape_get_ns();
+	PROF_START(_t_ckpt_start);
 	//openfile
 	ckpt_data_stream = open_memstream(&ckpt_data, &ckpt_data_size);
 	int size;
 	if(__var_list_head == NULL) {
-		prof_ckpt_start_ns += cape_get_ns() - _t_ckpt_start;
-		prof_ckpt_start_count++;
+		PROF_ACC(prof_ckpt_start_ns, _t_ckpt_start);
+		PROF_INC(prof_ckpt_start_count);
 		return 0;
 	}
 		
@@ -2518,8 +2544,8 @@ int ckpt_start(){
 	}
 	
 	//printf("Size of CKPT_DATA_FILE: %ld", ckpt_data_size);
-	prof_ckpt_start_ns += cape_get_ns() - _t_ckpt_start;
-	prof_ckpt_start_count++;
+	PROF_ACC(prof_ckpt_start_ns, _t_ckpt_start);
+	PROF_INC(prof_ckpt_start_count);
 }
 /*
  * --------------------------------------------------------------------
@@ -2641,7 +2667,7 @@ void __exit_func(){
 }
 
 void require_generate_checkpoint(char ops_flag){
-	double _t_gen = cape_get_ns();
+	PROF_START(_t_gen);
 	after_ckpt_stream = generate_checkpoint(__var_list_head,
 								__parallel_level__,		\
 								EXIT_CHECKPOINT,				\
@@ -2655,6 +2681,6 @@ void require_generate_checkpoint(char ops_flag){
 		fclose(after_ckpt_stream);
 		after_ckpt_stream = NULL;
 	}
-	prof_generate_ckpt_ns += cape_get_ns() - _t_gen;
-	prof_generate_ckpt_count++;
+	PROF_ACC(prof_generate_ckpt_ns, _t_gen);
+	PROF_INC(prof_generate_ckpt_count);
 }
