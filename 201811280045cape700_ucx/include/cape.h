@@ -149,7 +149,7 @@
 //    void CAPE_Sigsegv_Handler(int sig, siginfo_t *si, void *unused);
     void cape_flush();
     void cape_barrier();
-    int cape_declare_variable(unsigned long addr, unsigned char dtype, unsigned int n_elements, unsigned char ispointer);
+    int cape_declare_variable(void *addr, unsigned char dtype, unsigned int n_elements, unsigned char ispointer);
     void cape_allocate_memory(unsigned long manager_addr, 
 						unsigned long addr, unsigned long nbytes);
 	void cape_reallocate_memory(unsigned long manager_addr, unsigned long old_addr,
@@ -176,14 +176,14 @@
     
     //Clauses
     void cape_set_default_none();
-    void cape_set_threadprivate(long addr);
-    void cape_set_shared(long addr);
-    void cape_set_private(long addr);
-    void cape_set_firstprivate(long addr);
-    void cape_set_lastprivate(long addr);
-    void cape_set_reduction(long addr, char OP);
-    void cape_set_copyin(long addr);
-    void cape_set_copythread(long addr);
+    void cape_set_threadprivate(void *addr);
+    void cape_set_shared(void *addr);
+    void cape_set_private(void *addr);
+    void cape_set_firstprivate(void *addr);
+    void cape_set_lastprivate(void *addr);
+    void cape_set_reduction(void *addr, char OP);
+    void cape_set_copyin(void *addr);
+    void cape_set_copythread(void *addr);
     
     
     

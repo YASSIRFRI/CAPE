@@ -412,6 +412,7 @@ int add_active_variable(VarList **vlist_head, VarList **vlist_tail, Var v){
 /* Forward declarations */
 int remove_heap_variables(PointerList **hlist_head, PointerList **hlist_tail, unsigned long manager_addr);
 int add_shared_variable(VarList **vlist, VarList **vlist_tail, Var var);
+void require_generate_checkpoint(char ops_flag);
 
 /*
  * Remove all variables with in var.level =  func_level from activate list
@@ -2033,29 +2034,29 @@ void set_threadprivate(VarList *vlist_head, long addr){
 void cape_set_default_none(){
 	set_default_none(__var_list_tail, __parallel_level__);
 }
-void cape_set_threadprivate(long addr){
-	set_threadprivate(__var_list_head, addr);
+void cape_set_threadprivate(void *addr){
+	set_threadprivate(__var_list_head, (long)(uintptr_t)addr);
 }
-void cape_set_shared(long addr){
-	set_data_attribute(__var_list_tail, addr, CAPE_SHARED, __parallel_level__);
+void cape_set_shared(void *addr){
+	set_data_attribute(__var_list_tail, (long)(uintptr_t)addr, CAPE_SHARED, __parallel_level__);
 }
-void cape_set_private(long addr){
-	set_data_attribute(__var_list_tail, addr, CAPE_PRIVATE, __parallel_level__);
+void cape_set_private(void *addr){
+	set_data_attribute(__var_list_tail, (long)(uintptr_t)addr, CAPE_PRIVATE, __parallel_level__);
 }
-void cape_set_firstprivate(long addr){
-	set_data_attribute(__var_list_tail, addr, CAPE_FIRST_PRIVATE, __parallel_level__);
-}    
-void cape_set_lastprivate(long addr){
-	set_data_attribute(__var_list_tail, addr, CAPE_LAST_PRIVATE, __parallel_level__);
+void cape_set_firstprivate(void *addr){
+	set_data_attribute(__var_list_tail, (long)(uintptr_t)addr, CAPE_FIRST_PRIVATE, __parallel_level__);
 }
-void cape_set_reduction(long addr, char op){
-	set_data_attribute(__var_list_tail, addr, op , __parallel_level__);
+void cape_set_lastprivate(void *addr){
+	set_data_attribute(__var_list_tail, (long)(uintptr_t)addr, CAPE_LAST_PRIVATE, __parallel_level__);
 }
-void cape_set_copyin(long addr){
-	set_data_attribute(__var_list_tail, addr, CAPE_COPY_IN, __parallel_level__);
+void cape_set_reduction(void *addr, char op){
+	set_data_attribute(__var_list_tail, (long)(uintptr_t)addr, op , __parallel_level__);
 }
-void cape_set_copythread(long addr){
-	set_data_attribute(__var_list_tail, addr, CAPE_COPY_PRIVATE, __parallel_level__);
+void cape_set_copyin(void *addr){
+	set_data_attribute(__var_list_tail, (long)(uintptr_t)addr, CAPE_COPY_IN, __parallel_level__);
+}
+void cape_set_copythread(void *addr){
+	set_data_attribute(__var_list_tail, (long)(uintptr_t)addr, CAPE_COPY_PRIVATE, __parallel_level__);
 }
 
 
@@ -2144,15 +2145,15 @@ int print_data_in_checkpoint(char *data_ckpt, size_t file_size){
  * 	Save all active and shared variables in __active_variable list
  *  (global and local variable is declared outside #pragma omp parallel)
  */
-int cape_declare_variable(unsigned long addr,
+int cape_declare_variable(void *addr,
 						  unsigned char dtype,
 						  unsigned int n_elements,
 						  unsigned char ispointer){
-							  
+
 	if (__is_inside_parallel_region__) return 0;
-	
+
 	Var v;
-	v.addr = addr;
+	v.addr = (unsigned long)(uintptr_t)addr;
 	v.dtype = dtype;
 	v.n = n_elements;
 	v.pro = CAPE_SHARED;
@@ -2736,7 +2737,7 @@ int ckpt_start(){
 			(tmp->var.pro != CAPE_THREAD_PRIVATE)){
 		
 			fwrite(&tmp->var.addr, sizeof(unsigned long), 1, ckpt_data_stream);
-			fwrite(tmp->var.addr, tmp->var.size, tmp->var.n, ckpt_data_stream);
+			fwrite((void*)(uintptr_t)tmp->var.addr, tmp->var.size, tmp->var.n, ckpt_data_stream);
 			fflush(ckpt_data_stream);	
 			// printf("Write to ckpt data file: Ox%lx - pro: %d  - size : %d \n", tmp->var.addr, tmp->var.pro, \
 										sizeof(unsigned long)  + tmp->var.size * tmp->var.n);
@@ -2776,8 +2777,8 @@ int ckpt_start_2(){
 		if ((tmp->var.pro != CAPE_PRIVATE) &&
 			(tmp->var.pro != CAPE_THREAD_PRIVATE)){			
 			fwrite(&tmp->var.addr, sizeof(unsigned long), 1, __ckpt_data);
-			size = tmp->var.n * tmp->var.size ;			
-			fwrite(tmp->var.addr, tmp->var.size, tmp->var.n, __ckpt_data);
+			size = tmp->var.n * tmp->var.size ;
+			fwrite((void*)(uintptr_t)tmp->var.addr, tmp->var.size, tmp->var.n, __ckpt_data);
 			fflush(__ckpt_data);	
 			__ckpt_data_size += sizeof(unsigned long) \							
 								+ tmp->var.size * tmp->var.n ; 

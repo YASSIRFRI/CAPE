@@ -92,7 +92,7 @@ int main(int argc, char **argv)
 		t0 = get_ms_of_day();
 		matrix_mult(n);
 		t1 = get_ms_of_day();
-		if (cape_get_node_num() == 0)
+		if (cape_get_node() == 0)
 			printf("RESULT n=%d rep=%d ms=%lu\n", n, rep, t1 - t0);
 	}
 
