@@ -190,7 +190,7 @@ static int __cape_token__ = -1;
 static unsigned int __current_session__ = -1;
 static uint32_t __allreduce_epoch__ = 0;
 
-static __is_inside_parallel_region__ = 0;
+static int __is_inside_parallel_region__ = 0;
 
 char buffer[4096];
 char __ckpt_data_file[100];
@@ -409,6 +409,10 @@ int add_active_variable(VarList **vlist_head, VarList **vlist_tail, Var v){
 	*vlist_tail = vl;
 	return 1;	
 }
+/* Forward declarations */
+int remove_heap_variables(PointerList **hlist_head, PointerList **hlist_tail, unsigned long manager_addr);
+int add_shared_variable(VarList **vlist, VarList **vlist_tail, Var var);
+
 /*
  * Remove all variables with in var.level =  func_level from activate list
  * and remove all variables on heap that is managered by these variables
@@ -940,7 +944,7 @@ FILE *generate_checkpoint(VarList *vlist,
 					len = start_addr - start ;
 					fwrite(&start, sizeof(unsigned long), 1, stream);
 					fwrite(&len, sizeof(unsigned int), 1, stream);
-					fwrite(start, len, 1, stream);
+					fwrite((void*)(uintptr_t)start, len, 1, stream);
 				}
 			}
 			else{ //8 bytes			
@@ -961,7 +965,7 @@ FILE *generate_checkpoint(VarList *vlist,
 					len = start_addr - start ;
 					fwrite(&start, sizeof(unsigned long), 1, stream);
 					fwrite(&len, sizeof(unsigned int), 1, stream);
-					fwrite(start, len, 1, stream);
+					fwrite((void*)(uintptr_t)start, len, 1, stream);
 				}
 	}
 		
@@ -982,7 +986,7 @@ FILE *generate_checkpoint(VarList *vlist,
 				len = v->var.size * v->var.n;
 				fwrite(&v->var.addr, sizeof(long), 1, stream);
 				fwrite(&len, sizeof(unsigned int), 1, stream);
-				fwrite(v->var.addr, len, 1, stream);
+				fwrite((void*)(uintptr_t)v->var.addr, len, 1, stream);
 			}
 			v = v->next;
 		}			
@@ -1906,7 +1910,7 @@ int inject_checkpoint(char *data_ckpt, size_t file_size){
 			return -1;
 		}
 
-		memcpy(addr, data_ckpt+file_pointer, len)	;
+		memcpy((void*)(uintptr_t)addr, data_ckpt+file_pointer, len)	;
 
 		//if (__node__ == 0)
 		//	printf("DATA: Node %d: addr = 0x%lx - len = %d bytes - data %d \n",__node__, addr, len, *(int *) (data_ckpt+ file_pointer) );
