@@ -18,7 +18,7 @@ PMIX_FLAGS  ?=
 PMIX_LINK   ?=
 
 # ── Profiling (build with PROFILE=1 to enable, e.g. make cape_mamult PROFILE=1)
-PROFILE ?= 1
+PROFILE ?= 0
 ifeq ($(PROFILE),1)
 PROF_FLAGS = -DCAPE_PROFILE
 else
