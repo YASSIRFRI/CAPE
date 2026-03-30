@@ -39,7 +39,7 @@ read -r -a N_VALUES <<< "${N_VALUES_STR}"
 
 module purge
 module load GCCcore/14.2.0
-module load UCX/1.15.0-GCCcore-14.2.0
+module load UCX/1.18.0-GCCcore-14.2.0
 
 if [ -n "${EBROOTUCX:-}" ]; then
     UCX_INC="${EBROOTUCX}/include"
