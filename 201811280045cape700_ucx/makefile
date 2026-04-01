@@ -90,7 +90,7 @@ apps: cape_mamult cape_mamult2d cape_pi cape_prime cape_prime_number \
       cape_reduction cape_for cape_for_nowait cape_parallel_for \
       cape_vector1 cape_vector2 cape_critical cape_critical2 \
       cape_sections_nowait cape_test_heap
-
+ 
 # ══════════════════════════════════════════════════════════════════════════════
 # DICKPT version (cape_incr.c + dickpt apps)
 #   The monitor (cape_incr.c) is a standalone ptrace-based process.
