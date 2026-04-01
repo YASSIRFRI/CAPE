@@ -30,15 +30,17 @@ CC      ?= cc
 CFLAGS   = -I./$(I_FOLDER) -I$(UCX_SRC) -I$(UCX_GEN) $(PMIX_FLAGS) $(PROF_FLAGS)
 LDFLAGS  = -L$(UCX_LIB) -lucp -lucs $(PMIX_LINK) -Wl,-rpath,$(UCX_LIB)
 
-# ── Timestamp version (cape.c) ───────────────────────────────────────────────
-# cape.c is a library compiled together with the application.
-#   make cape_mamult          — builds bin/cape_mamult
+# ══════════════════════════════════════════════════════════════════════════════
+# TIMESTAMP version (cape.c)
+#   cape.c is a library compiled together with the application into one binary.
+#   make cape_mamult
+# ══════════════════════════════════════════════════════════════════════════════
 COMPILE  = $(CC) -w $(CFLAGS) $(C_FOLDER)/monitor/cape.c
 
 # ── Default target ────────────────────────────────────────────────────────────
 all: cape_mamult cape_reduction
 
-# ── Per-application targets (timestamp version) ─────────────────────────────
+# ── Per-application targets (timestamp) ──────────────────────────────────────
 cape_mamult:
 	$(COMPILE) $(C_FOLDER)/apps/cape_mamult.c -o $(EXE_FOLDER)/cape_mamult $(LDFLAGS)
 
@@ -84,25 +86,42 @@ cape_sections_nowait:
 cape_test_heap:
 	$(COMPILE) $(C_FOLDER)/apps/cape_test_heap.c -o $(EXE_FOLDER)/cape_test_heap $(LDFLAGS)
 
-# ── Build all timestamp applications ─────────────────────────────────────────
 apps: cape_mamult cape_mamult2d cape_pi cape_prime cape_prime_number \
       cape_reduction cape_for cape_for_nowait cape_parallel_for \
       cape_vector1 cape_vector2 cape_critical cape_critical2 \
       cape_sections_nowait cape_test_heap
 
-# ── DICKPT version (cape_incr.c) ─────────────────────────────────────────────
-# cape_incr.c is a standalone ptrace-based monitor with its own main().
-# It forks and traces the application at runtime.
-#   make dickpt               — builds bin/cape_dickpt_monitor
-#   Usage: srun bin/cape_dickpt_monitor <app_binary>
-dickpt:
+# ══════════════════════════════════════════════════════════════════════════════
+# DICKPT version (cape_incr.c + dickpt apps)
+#   The monitor (cape_incr.c) is a standalone ptrace-based process.
+#   Apps use int3 breakpoints via cape_dickpt.h to signal the monitor.
+#   Two-step build:
+#     1. make dickpt_monitor     — builds the monitor binary
+#     2. make dickpt_mul_manual  — builds a dickpt app (plain binary, no UCX)
+#   Usage: srun bin/cape_dickpt_monitor bin/dickpt_mul_manual
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Dickpt apps are plain binaries — no UCX, no cape.c library.
+# They only need the include dir for cape_dickpt.h / cape_signal.h.
+DICKPT_COMPILE = $(CC) -w -I./$(I_FOLDER)
+
+# Monitor (needs UCX for inter-node communication)
+dickpt_monitor:
 	$(CC) -w $(CFLAGS) $(C_FOLDER)/monitor/cape_incr.c -o $(EXE_FOLDER)/cape_dickpt_monitor $(LDFLAGS)
+
+# Dickpt application targets
+dickpt_mul_manual:
+	$(DICKPT_COMPILE) $(C_FOLDER)/apps/cape_mul_manual.c -o $(EXE_FOLDER)/dickpt_mul_manual
+
+# Build monitor + all dickpt apps
+dickpt: dickpt_monitor dickpt_mul_manual
 
 # ── Clean ─────────────────────────────────────────────────────────────────────
 cleanall:
 	rm -f $(EXE_FOLDER)/* $(O_FOLDER)/* $(L_FOLDER)/*
 
-.PHONY: all apps cleanall dickpt \
+.PHONY: all apps cleanall \
+        dickpt dickpt_monitor dickpt_mul_manual \
         cape_mamult cape_mamult2d cape_pi cape_prime cape_prime_number \
         cape_reduction cape_for cape_for_nowait cape_parallel_for \
         cape_vector1 cape_vector2 cape_critical cape_critical2 \
