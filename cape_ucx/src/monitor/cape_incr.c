@@ -265,6 +265,26 @@ static void cape_ucx_recv(void *buf, size_t len, int src, uint32_t token)
 #define TAG_SCATTER_DATA  0x06
 #define TAG_ALLREDUCE_BASE 0x100
 
+static const char *cape_ucx_bootstrap_id(void)
+{
+    const char *jobid = getenv("CAPE_UCX_BOOTSTRAP_ID");
+    if (!jobid || !*jobid)
+        jobid = getenv("SLURM_JOB_ID");
+    if (!jobid || !*jobid)
+        jobid = "local";
+    return jobid;
+}
+
+static const char *cape_ucx_bootstrap_dir(void)
+{
+    const char *sharedir = getenv("CAPE_UCX_BOOTSTRAP_DIR");
+    if (!sharedir || !*sharedir)
+        sharedir = getenv("SLURM_SUBMIT_DIR");
+    if (!sharedir || !*sharedir)
+        sharedir = ".";
+    return sharedir;
+}
+
 #ifndef USE_PMIX
 /* Exchange addresses via shared filesystem (same approach as cape.c) */
 static void ucx_exchange_addresses_via_fs(const char *dir, const char *jobid,
@@ -277,8 +297,16 @@ static void ucx_exchange_addresses_via_fs(const char *dir, const char *jobid,
     snprintf(path, sizeof(path), "%s/cape_ucx_%s_addr_%ld", dir, jobid, node);
     f = fopen(path, "wb");
     if (!f) { perror("CAPE UCX: write addr file"); exit(1); }
-    fwrite(&local_addr_len, sizeof(size_t), 1, f);
-    fwrite(local_addr, local_addr_len, 1, f);
+    if (fwrite(&local_addr_len, sizeof(size_t), 1, f) != 1) {
+        perror("CAPE UCX: write addr length");
+        fclose(f);
+        exit(1);
+    }
+    if (fwrite(local_addr, 1, local_addr_len, f) != local_addr_len) {
+        perror("CAPE UCX: write addr payload");
+        fclose(f);
+        exit(1);
+    }
     fclose(f);
 
     snprintf(path, sizeof(path), "%s/cape_ucx_%s_rdy_%ld", dir, jobid, node);
@@ -299,9 +327,23 @@ static void ucx_exchange_addresses_via_fs(const char *dir, const char *jobid,
         f = fopen(path, "rb");
         if (!f) { perror("CAPE UCX: read peer addr file"); exit(1); }
         size_t peer_len;
-        fread(&peer_len, sizeof(size_t), 1, f);
+        if (fread(&peer_len, sizeof(size_t), 1, f) != 1) {
+            fprintf(stderr, "CAPE UCX: failed to read peer addr length from %s\n", path);
+            fclose(f);
+            exit(1);
+        }
+        if (peer_len == 0 || peer_len > (1U << 20)) {
+            fprintf(stderr, "CAPE UCX: invalid peer addr length %zu in %s\n", peer_len, path);
+            fclose(f);
+            exit(1);
+        }
         ucp_address_t *peer_addr = malloc(peer_len);
-        fread(peer_addr, peer_len, 1, f);
+        if (fread(peer_addr, 1, peer_len, f) != peer_len) {
+            fprintf(stderr, "CAPE UCX: failed to read peer addr payload from %s\n", path);
+            free(peer_addr);
+            fclose(f);
+            exit(1);
+        }
         fclose(f);
 
         ucp_ep_params_t ep_params;
@@ -448,10 +490,8 @@ static void cape_ucx_init(void)
         }
     }
 #else
-    const char *jobid    = getenv("SLURM_JOB_ID");
-    const char *sharedir = getenv("SLURM_SUBMIT_DIR");
-    if (!jobid)    jobid    = "local";
-    if (!sharedir) sharedir = ".";
+    const char *jobid    = cape_ucx_bootstrap_id();
+    const char *sharedir = cape_ucx_bootstrap_dir();
     ucx_exchange_addresses_via_fs(sharedir, jobid, local_addr, local_addr_len);
 #endif
 
@@ -482,10 +522,8 @@ static void cape_ucx_finalize(void)
 #ifdef USE_PMIX
     PMIx_Finalize(NULL, 0);
 #else
-    const char *jobid    = getenv("SLURM_JOB_ID");
-    const char *sharedir = getenv("SLURM_SUBMIT_DIR");
-    if (!jobid)    jobid    = "local";
-    if (!sharedir) sharedir = ".";
+    const char *jobid    = cape_ucx_bootstrap_id();
+    const char *sharedir = cape_ucx_bootstrap_dir();
     char path[512];
     snprintf(path, sizeof(path), "%s/cape_ucx_%s_addr_%ld", sharedir, jobid, node);
     unlink(path);

@@ -34,6 +34,8 @@ if ! mkdir -p "${BUILD_DIR}/bin" "${BUILD_DIR}/obj" "${BUILD_DIR}/lib" 2>/dev/nu
 fi
 
 REPS="${REPS:-5}"
+BOOTSTRAP_ROOT="${BOOTSTRAP_ROOT:-${BUILD_DIR}/ucx_bootstrap}"
+mkdir -p "${BOOTSTRAP_ROOT}"
 
 module purge
 module load GCCcore/14.2.0
@@ -112,8 +114,14 @@ for rep in $(seq 1 "${REPS}"); do
 
     run_log="${BUILD_DIR}/run_dickpt_rep${rep}.log"
     : > "${run_log}"
+    bootstrap_id="${JOB_TAG}_rep${rep}"
+    bootstrap_dir="${BOOTSTRAP_ROOT}/${bootstrap_id}"
+    rm -rf "${bootstrap_dir}"
+    mkdir -p "${bootstrap_dir}"
 
     set +e
+    CAPE_UCX_BOOTSTRAP_ID="${bootstrap_id}" \
+    CAPE_UCX_BOOTSTRAP_DIR="${bootstrap_dir}" \
     srun --mpi=pmix \
          --nodes="${SLURM_JOB_NUM_NODES}" \
          --ntasks="${SLURM_NTASKS}" \
@@ -121,6 +129,7 @@ for rep in $(seq 1 "${REPS}"); do
          "${MONITOR}" "${APP}" 2>&1 | tee -a "${run_log}"
     rc=${PIPESTATUS[0]}
     set -e
+    rm -rf "${bootstrap_dir}"
 
     if [ "${rc}" -ne 0 ]; then
         echo "WARN: dickpt run failed for rep=${rep} (rc=${rc}). See ${run_log}" >&2
