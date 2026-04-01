@@ -17,6 +17,7 @@
 # include <stdio.h>
 # include <signal.h>
 #include <stdlib.h>
+#include <sys/ioctl.h>
 #include <sys/reg.h>
 #include <string.h>
 #include <math.h>
