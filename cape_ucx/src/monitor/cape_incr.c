@@ -503,8 +503,8 @@ int get_long_int_from_child(unsigned long *value);
 int init_jobs_per_node();
 int read_current_stack_start(unsigned int pid, unsigned long src, unsigned long dst, int len);
 int read_current_brk(unsigned int pid, unsigned long src, unsigned long dst, int len);
-int ioctl_read_data(unsigned int pid, unsigned long src, unsigned long dst, int len);
-int ioctl_write_data(unsigned int pid, unsigned long src, unsigned long dst, int len);
+int ioctl_read_data(unsigned int pid, unsigned long src, void *dst, int len);
+int ioctl_write_data(unsigned int pid, const void *src, unsigned long dst, int len);
 int ioctl_clear_write_protect(unsigned int pid, unsigned long dst);
 void tracer_wait ( pid_t pid, int * status, int options, struct user * u );
 int lock_process_memory(unsigned int pid);
@@ -527,6 +527,7 @@ int require_inject_workshare_checkpoint();
 
 int require_allreduce_checkpoint();
 int allreduce_checkpoint();
+void print_data_in_list(struct shared_data *list);
 
 /* ==========================================================================
  * Monitor process
@@ -892,12 +893,12 @@ int read_current_brk(unsigned int pid, unsigned long src, unsigned long dst, int
  * ioctl_read_data(): Read data from memory of the process
  * -----------------------------------------------------
  */
-int ioctl_read_data(unsigned int pid, unsigned long src, unsigned long dst, int len){
+int ioctl_read_data(unsigned int pid, unsigned long src, void *dst, int len){
 	int ret_val;
 	data_change_t data_change;
 	data_change.pid = pid;
 	data_change.src_addr = src;
-	data_change.dst_addr = dst;
+	data_change.dst_addr = (unsigned long)dst;
 	data_change.len = len;
 	ret_val = ioctl(driver_file, IOCTL_READ_DATA, &data_change);
 	return ret_val;
@@ -906,11 +907,11 @@ int ioctl_read_data(unsigned int pid, unsigned long src, unsigned long dst, int 
  * ioctl_write_data(): wite data into memory of the process
  * -----------------------------------------------------
  */
-int ioctl_write_data(unsigned int pid, unsigned long src, unsigned long dst, int len){
+int ioctl_write_data(unsigned int pid, const void *src, unsigned long dst, int len){
 	int ret_val;
 	data_change_t data_change;
 	data_change.pid = pid;
-	data_change.src_addr = src;
+	data_change.src_addr = (unsigned long)src;
 	data_change.dst_addr = dst;
 	data_change.len = len;
 	ret_val = ioctl(driver_file, IOCTL_WRITE_DATA, &data_change);
