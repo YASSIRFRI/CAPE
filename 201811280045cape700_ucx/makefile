@@ -30,13 +30,15 @@ CC      ?= cc
 CFLAGS   = -I./$(I_FOLDER) -I$(UCX_SRC) -I$(UCX_GEN) $(PMIX_FLAGS) $(PROF_FLAGS)
 LDFLAGS  = -L$(UCX_LIB) -lucp -lucs $(PMIX_LINK) -Wl,-rpath,$(UCX_LIB)
 
-# One-shot compile: cape.c + app.c -> binary
+# ── Timestamp version (cape.c) ───────────────────────────────────────────────
+# cape.c is a library compiled together with the application.
+#   make cape_mamult          — builds bin/cape_mamult
 COMPILE  = $(CC) -w $(CFLAGS) $(C_FOLDER)/monitor/cape.c
 
 # ── Default target ────────────────────────────────────────────────────────────
 all: cape_mamult cape_reduction
 
-# ── Per-application targets ───────────────────────────────────────────────────
+# ── Per-application targets (timestamp version) ─────────────────────────────
 cape_mamult:
 	$(COMPILE) $(C_FOLDER)/apps/cape_mamult.c -o $(EXE_FOLDER)/cape_mamult $(LDFLAGS)
 
@@ -82,17 +84,25 @@ cape_sections_nowait:
 cape_test_heap:
 	$(COMPILE) $(C_FOLDER)/apps/cape_test_heap.c -o $(EXE_FOLDER)/cape_test_heap $(LDFLAGS)
 
-# ── Build all applications ────────────────────────────────────────────────────
+# ── Build all timestamp applications ─────────────────────────────────────────
 apps: cape_mamult cape_mamult2d cape_pi cape_prime cape_prime_number \
       cape_reduction cape_for cape_for_nowait cape_parallel_for \
       cape_vector1 cape_vector2 cape_critical cape_critical2 \
       cape_sections_nowait cape_test_heap
 
+# ── DICKPT version (cape_incr.c) ─────────────────────────────────────────────
+# cape_incr.c is a standalone ptrace-based monitor with its own main().
+# It forks and traces the application at runtime.
+#   make dickpt               — builds bin/cape_dickpt_monitor
+#   Usage: srun bin/cape_dickpt_monitor <app_binary>
+dickpt:
+	$(CC) -w $(CFLAGS) $(C_FOLDER)/monitor/cape_incr.c -o $(EXE_FOLDER)/cape_dickpt_monitor $(LDFLAGS)
+
 # ── Clean ─────────────────────────────────────────────────────────────────────
 cleanall:
 	rm -f $(EXE_FOLDER)/* $(O_FOLDER)/* $(L_FOLDER)/*
 
-.PHONY: all apps cleanall \
+.PHONY: all apps cleanall dickpt \
         cape_mamult cape_mamult2d cape_pi cape_prime cape_prime_number \
         cape_reduction cape_for cape_for_nowait cape_parallel_for \
         cape_vector1 cape_vector2 cape_critical cape_critical2 \
