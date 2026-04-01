@@ -103,7 +103,7 @@ unsigned char *before_buffer;
 #if DDEBUG
 #define dprintf(fmt, args...) printf(fmt, ## args);
 #else
-#define dprintf(fmt, args...) ;
+#define dprintf(fmt, args...) do { } while (0)
 #endif
 
 static FILE *open_binary_memstream(unsigned char **bufloc, size_t *sizeloc)
@@ -1370,8 +1370,8 @@ int add_item_to_list_ckpt(struct shared_data_ckpt *p){
 	
 	while(old_node != NULL){				
 		//read the current data of modified page and save to current node
-		rc = ioctl_read_data(child_id, old_node->addr,  
-						(unsigned long) & (current_node->data),
+		rc = ioctl_read_data(child_id, old_node->addr,
+						&(current_node->data),
 						 PAGE_SIZE);		
 						 		
 		//Read and compare 4 bytes of data in a time
@@ -1588,7 +1588,7 @@ int require_generate_checkpoint(){
 											EXIT_CHECKPOINT,
 											timespan);
 	
-	printf("Monitor %ld - generated %d bytes checkpoint \n", node, final_ckpt_size);
+	printf("Monitor %ld - generated %zu bytes checkpoint \n", node, final_ckpt_size);
 	
 	clear_list(list_head);
 	list_head = NULL;	
@@ -1809,7 +1809,7 @@ int require_send_checkpoint(){
 		
 		rc= send_checkpoint(current_node);	
 				
-		if ((current_job % jobs_per_node == 0) || (current_job >= number_of_jobs))
+		if ((current_job % jobs_per_node == 0) || ((unsigned long)current_job >= number_of_jobs))
 		{					
 			ckpt_flag = 0;
 		}		
@@ -2009,7 +2009,7 @@ int inject_checkpoint(FILE *stream, size_t *file_size, struct user_regs_struct *
 // 	final_list_ckpt_head = NULL;
 // 	final_list_ckpt_tail = NULL;
   	
-  	printf("\nNode %ld: After Synchronized: TOTAL CHECKPOINT SIZE = %d", node, total_ckpt_size);
+  	printf("\nNode %ld: After Synchronized: TOTAL CHECKPOINT SIZE = %zu", node, total_ckpt_size);
   	
   	//Inject checkpoint	
 	rc = inject_checkpoint(total_ckpt_stream, &total_ckpt_size, &save_regs); 	
@@ -2218,7 +2218,7 @@ int require_inject_workshare_checkpoint(){
  	
  	rc = merge_checkpoint();
  	
- 	printf("Monitor %ld: After Merged checkpoint: final_ckpt = %d - after_ckpt = %d\n",
+ 	printf("Monitor %ld: After Merged checkpoint: final_ckpt = %zu - after_ckpt = %zu\n",
  		node, final_ckpt_size, after_ckpt_size);
  	
  	if (rc!=0) dprintf ("Monitor: Error on locking the process image\n");
@@ -2508,7 +2508,7 @@ printf("\n EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEee");
 				size_t s_size, 
 				size_t s_position, int fflag ) {
 	
-	int file_pointer = 0;
+	size_t file_pointer = 0;
 	unsigned long current_ckpt_struct;
 	unsigned char *buff;
  	unsigned long addr;
@@ -2517,14 +2517,14 @@ printf("\n EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEee");
 	current_ckpt_struct = SSD; //initial checkpoint struct
 	
 	file_pointer += s_position;
- 	fseek(s_stream, file_pointer, SEEK_SET);
+ 	fseek(s_stream, (long)file_pointer, SEEK_SET);
  	
  	while(file_pointer < s_size)
  	{
  		//read address from after checkpoint
   		fread(&addr, sizeof(unsigned long), 1, s_stream);
   		file_pointer += sizeof(unsigned long);
-  		fseek(s_stream, file_pointer, SEEK_SET);
+ 		fseek(s_stream, (long)file_pointer, SEEK_SET);
   		
   		struct shared_data *pro = NULL;
   		struct shared_data_ckpt *plist = NULL;
@@ -2724,7 +2724,7 @@ int merge_external_checkpoint(FILE *src_ckpt_stream, 		\
  	
  	total_ckpt_stream = open_binary_memstream(&total_ckpt, &total_ckpt_size); 
  	
- 	printf("\nMERGE: Node %ld: total_ckpt = %d; tmp_ckpt = %d ; final_ckpt = %d",node, total_ckpt_size, tmp_size, src_ckpt_size);
+ 	printf("\nMERGE: Node %ld: total_ckpt = %zu; tmp_ckpt = %zu ; final_ckpt = %zu",node, total_ckpt_size, tmp_size, src_ckpt_size);
  	 	
  	if (t1 >= t2)
  	{
@@ -2803,7 +2803,7 @@ int merge_external_checkpoint(FILE *src_ckpt_stream, 		\
  //	final_list_ckpt_head = NULL;
  //	final_list_ckpt_tail = NULL;
  	
- 	dprintf("Monitor %ld: After wait for all checkpoint - final_ckpt_size = %d\n", node, final_ckpt_size);
+ 	dprintf("Monitor %ld: After wait for all checkpoint - final_ckpt_size = %zu\n", node, final_ckpt_size);
  	
  	if (rc!=0) printf("Monitor %ld: Error on require_waitfor_checkpoint\n", node);
  	return rc; 	
@@ -3090,7 +3090,7 @@ int hypercube_allreduce(){
 int require_allreduce_checkpoint(){
 	int rc = 0;
 	//rc = prepare_allreduce_checkpoint();	
-	printf("\nPREPARE ALL REDUCE: Node %ld: TOTAL CHECKPOINT SIZE = %d", node, total_ckpt_size);
+	printf("\nPREPARE ALL REDUCE: Node %ld: TOTAL CHECKPOINT SIZE = %zu", node, total_ckpt_size);
 	final_list_ckpt_head = list_ckpt_head;
 	final_list_ckpt_tail = list_ckpt_tail;
 //	print_data_in_ckpt_list(final_list_ckpt_head);
@@ -3099,7 +3099,7 @@ int require_allreduce_checkpoint(){
 	rc=  merge_external_checkpoint(final_ckpt_stream, final_ckpt, final_ckpt_size);		
 	
 //	print_data_in_ckpt_list(list_ckpt_head);
-	printf("\nBEFORE JOIN: Node %ld: TOTAL CHECKPOINT SIZE = %d", node, total_ckpt_size);
+	printf("\nBEFORE JOIN: Node %ld: TOTAL CHECKPOINT SIZE = %zu", node, total_ckpt_size);
 	
 	join_checkpoint(TOTAL_CHECKPOINT, final_list_ckpt_head);
 	
@@ -3110,7 +3110,7 @@ int require_allreduce_checkpoint(){
 	
 	
 	
-	printf("\nAFTER JOIN: Node %ld: TOTAL CHECKPOINT SIZE = %d", node, total_ckpt_size);
+	printf("\nAFTER JOIN: Node %ld: TOTAL CHECKPOINT SIZE = %zu", node, total_ckpt_size);
 	
 	
 		
