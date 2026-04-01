@@ -948,7 +948,7 @@ int ioctl_write_data(unsigned int pid, const void *src, unsigned long dst, int l
 	current_node = malloc(sizeof(struct page_node));
 	
 	//read the data of modified page frame	
-	ret_val = ioctl_read_data(pid, aligned_addr, (unsigned long) & (current_node->data), PAGE_SIZE);
+	ret_val = ioctl_read_data(pid, aligned_addr, &(current_node->data), PAGE_SIZE);
 	if(ret_val == 0){
 		dprintf("\nMonitor: Error on calling ioctl_read_data: %d\n", ret_val);
 		return 1;
