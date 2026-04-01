@@ -71,7 +71,7 @@ int ckpt_flag = 0; // to save the state of checkpoint that is received
 int number_of_packages; // number of data packages is sent at each slave
 int current_node=1; //current slave is communicating with master 
 int current_job =0; //count the current job
-int number_of_jobs; //save number of step that will be sent from CAPE program
+unsigned long number_of_jobs; //save number of step that will be sent from CAPE program
 int jobs_per_node; //save the number of step that is divided to a node
 
 unsigned long timespan = 1 ; // timespan of checkpoints
@@ -104,6 +104,11 @@ unsigned char *before_buffer;
 #else
 #define dprintf(fmt, args...) ;
 #endif
+
+static FILE *open_binary_memstream(unsigned char **bufloc, size_t *sizeloc)
+{
+	return open_memstream((char **)bufloc, sizeloc);
+}
 
 /* =========================================================================
  * UCX State and Helpers
@@ -1308,7 +1313,7 @@ int add_item_to_list_ckpt(struct shared_data_ckpt *p){
  */
  FILE *generate_checkpoint(int child_id, 
  	struct page_node * list,
- 	unsigned char *ckpt_data,
+ 	unsigned char **ckpt_data,
  	size_t *ckpt_size,
  	unsigned char cflag,
  	unsigned long tsp){	
@@ -1334,7 +1339,7 @@ int add_item_to_list_ckpt(struct shared_data_ckpt *p){
 	//print_data_in_list(data_list_head);
 	
 	//open the stream memory file
-	stream = open_memstream(ckpt_data, ckpt_size);		
+	stream = open_binary_memstream(ckpt_data, ckpt_size);		
 		
 	//get current position of the begin of stack	
 	unsigned long start_stack;
@@ -1626,7 +1631,7 @@ int require_generate_total_checkpoint(){
 int init_generate_workshare_checkpoint(unsigned int ntask){
 	int rc=0;
 	
-	mbefore_ckpt_stream = open_memstream(&mbefore_ckpt, &mbefore_ckpt_size);	
+	mbefore_ckpt_stream = open_binary_memstream(&mbefore_ckpt, &mbefore_ckpt_size);	
 	
 	return rc;
 
@@ -1738,7 +1743,7 @@ int join_checkpoint (int file_name, struct shared_data_ckpt * list){
 		case FINAL_CHECKPOINT:
 			   //Open checkpoint file if it is closed
 				if (final_ckpt_size == 0){
-					final_ckpt_stream = open_memstream(&final_ckpt, &final_ckpt_size);
+					final_ckpt_stream = open_binary_memstream(&final_ckpt, &final_ckpt_size);
 				}
 				else{
 					fseek(final_ckpt_stream, final_ckpt_size,SEEK_SET);
@@ -1827,7 +1832,7 @@ int require_send_checkpoint(){
  * receive_checkpoint(): receive final checkpoint and save into a memory stream file 
  * ----------------------------------------
  */
- FILE * receive_checkpoint(int source, unsigned char *ckpt_data, size_t *ckpt_size) {
+ FILE * receive_checkpoint(int source, unsigned char **ckpt_data, size_t *ckpt_size) {
 	int nbytes;
 	unsigned char *buffer;
 	FILE *stream;
@@ -1839,7 +1844,7 @@ int require_send_checkpoint(){
 	cape_ucx_recv(buffer, nbytes, source, TAG_CKPT_DATA + 1);
 
 	//open the stream memory file
-	stream = open_memstream(ckpt_data, ckpt_size);
+	stream = open_binary_memstream(ckpt_data, ckpt_size);
 	fwrite(buffer, nbytes, 1, stream);
 	fflush(stream);
 	free(buffer);
@@ -2028,7 +2033,7 @@ int require_inject_workshare_checkpoint(){
 	
 	if (current_job >= jobs_per_node) return 1;
 	
-	before_ckpt_stream = open_memstream(&before_ckpt, &before_ckpt_size);
+	before_ckpt_stream = open_binary_memstream(&before_ckpt, &before_ckpt_size);
 		
 	fwrite(before_buffer + (current_job * task_ckpt_size),\
 		   sizeof(char), 		\
@@ -2067,7 +2072,7 @@ int require_inject_workshare_checkpoint(){
  	//IF final_ckpt = NULL
  	if(final_ckpt_size==0)
  	{
- 		final_ckpt_stream = open_memstream(&final_ckpt, &final_ckpt_size);
+ 		final_ckpt_stream = open_binary_memstream(&final_ckpt, &final_ckpt_size);
  		//get the registers
 		ptrace(PTRACE_GETREGS, child_id, NULL, &save_regs);
 	
@@ -2684,7 +2689,7 @@ int merge_external_checkpoint(FILE *src_ckpt_stream, 		\
  	//IF total_ckpt = NULL: Write Source Checkpoint to Total checkpoint
  	if(total_ckpt_size==0)
  	{
- 		total_ckpt_stream = open_memstream(&total_ckpt, &total_ckpt_size); 	 		
+ 		total_ckpt_stream = open_binary_memstream(&total_ckpt, &total_ckpt_size); 	 		
  		fwrite(src_ckpt_data, src_ckpt_size, 1, total_ckpt_stream);
  		fflush(total_ckpt_stream);		
  		
@@ -2698,7 +2703,7 @@ int merge_external_checkpoint(FILE *src_ckpt_stream, 		\
 		
  	
  	//Copy total_ckpt to tmp_ckpt and close total_ckpt
-	tmp_stream = open_memstream(&tmp_ckpt, &tmp_size);
+	tmp_stream = open_binary_memstream(&tmp_ckpt, &tmp_size);
 	fwrite(total_ckpt, total_ckpt_size, 1, tmp_stream);
 	fflush(tmp_stream);
  	
@@ -2715,7 +2720,7 @@ int merge_external_checkpoint(FILE *src_ckpt_stream, 		\
  	fseek(src_ckpt_stream, file_pointer, SEEK_SET);
  	fread(&t2, sizeof(unsigned long), 1, src_ckpt_stream);
  	
- 	total_ckpt_stream = open_memstream(&total_ckpt, &total_ckpt_size); 
+ 	total_ckpt_stream = open_binary_memstream(&total_ckpt, &total_ckpt_size); 
  	
  	printf("\nMERGE: Node %ld: total_ckpt = %d; tmp_ckpt = %d ; final_ckpt = %d",node, total_ckpt_size, tmp_size, src_ckpt_size);
  	 	
@@ -2826,7 +2831,7 @@ int require_broadcast_checkpoint(){
 		buffer_ckpt = malloc(buffer_size);
 		cape_ucx_recv(buffer_ckpt, buffer_size, 0, TAG_BCAST_DATA);
 		//open the stream memory file
-		after_ckpt_stream = open_memstream(&after_ckpt, &after_ckpt_size);
+		after_ckpt_stream = open_binary_memstream(&after_ckpt, &after_ckpt_size);
 		fwrite(buffer_ckpt, buffer_size, 1, after_ckpt_stream);
 		fflush(after_ckpt_stream);
 		free(buffer_ckpt);
@@ -2936,7 +2941,7 @@ int prepare_allreduce_checkpoint(){
 		buffer_ckpt = malloc(buffer_size);
 		cape_ucx_recv(buffer_ckpt, buffer_size, 0, TAG_BCAST_DATA);
 		//write buffer_ckpt to total_ckpt_stream file
-		total_ckpt_stream = open_memstream(&total_ckpt, &total_ckpt_size);
+		total_ckpt_stream = open_binary_memstream(&total_ckpt, &total_ckpt_size);
 		fwrite(buffer_ckpt, buffer_size, 1, total_ckpt_stream);
 		fflush(total_ckpt_stream);
 		free(buffer_ckpt);
@@ -2989,7 +2994,7 @@ int ring_allreduce(){
 						  token_data);
 
 
-		ckpt_stream = open_memstream(&ckpt_data, &ckpt_size);
+		ckpt_stream = open_binary_memstream(&ckpt_data, &ckpt_size);
 		fwrite(recv_buffer, recv_message_size, 1, ckpt_stream);
 		fflush(ckpt_stream);
 
@@ -3055,7 +3060,7 @@ int hypercube_allreduce(){
 						  recv_msg, recv_msg_size, partner,
 						  token_data);
 
-		ckpt_stream = open_memstream(&ckpt_data, &ckpt_size);
+		ckpt_stream = open_binary_memstream(&ckpt_data, &ckpt_size);
 		fwrite(recv_msg, recv_msg_size, 1, ckpt_stream);
 		fflush(ckpt_stream);
 
@@ -3125,5 +3130,3 @@ int require_allreduce_checkpoint(){
 	return rc;
 }
 		
-
-
