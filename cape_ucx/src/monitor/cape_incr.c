@@ -602,8 +602,7 @@ int main(int argc, char * argv[]){
 			execl ( exec_file , exec_file , NULL);			
 			perror (exec_file) ;
 			return 2 ;
-		default :	/* Parent */			
-			ptrace ( PTRACE_ATTACH, child_id, NULL, NULL ) ; //This process is a tracer of child process
+		default :	/* Parent */
 			break;
 	}
 	
@@ -633,7 +632,9 @@ int main(int argc, char * argv[]){
 	//Open driver	
 	driver_file = open("/dev/chardev90", O_RDONLY);
 	if (driver_file < 0) {
-		dprintf ("Monitor %ld: Can't open device file: /dev/chardev90\n", node);
+		fprintf(stderr,
+			"Monitor %ld: can't open device file /dev/chardev90: %s\n",
+			node, strerror(errno));
 		exit(1);
 	}
 	
