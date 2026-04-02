@@ -28,7 +28,7 @@ endif
 # ── Compression (build with COMPRESS=1 to enable, e.g. make cape_mamult COMPRESS=1)
 # Requires zlib (-lz).  Compresses checkpoint data before exchange to reduce
 # communication cost.  Only compresses when the result is smaller than the input.
-COMPRESS ?= 1
+COMPRESS ?= 0
 ifeq ($(COMPRESS),1)
 COMP_FLAGS = -DCAPE_COMPRESS
 COMP_LINK  = -lz
