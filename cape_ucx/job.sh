@@ -96,9 +96,6 @@ MAKE_ARGS=( \
 # Build timestamp app
 make -C "${PROJECT_DIR}" cape_mamult "${MAKE_ARGS[@]}"
 
-# Build dickpt monitor + app
-make -C "${PROJECT_DIR}" dickpt "${MAKE_ARGS[@]}"
-
 CSV="${RESULTS_DIR}/ucx_mamult_${JOB_TAG}.csv"
 echo "impl,n,rep,app_ms,job_id,nodes,ntasks" > "${CSV}"
 
