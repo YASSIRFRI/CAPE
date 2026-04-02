@@ -12,7 +12,13 @@
  * Values sent to the monitor are placed in rax before the breakpoint.
  */
 
+#include <stddef.h>
+
 #include "cape_signal.h"
+
+void dickpt_prepare_tracking(void);
+void dickpt_register_region(void *addr, size_t len);
+void *dickpt_map_region(size_t len);
 
 /* ── Breakpoint helpers (x86-64) ───────────────────────────────────────── */
 
@@ -67,7 +73,11 @@ static inline unsigned long __cape_signal_read(int code)
 /* ── CAPE dickpt API ───────────────────────────────────────────────────── */
 
 /* Memory locking / checkpointing */
-static inline void dickpt_start_ckpt(void)   { __cape_signal(S_LOCK_PROCESS_MEMORY); }
+static inline void dickpt_start_ckpt(void)
+{
+    dickpt_prepare_tracking();
+    __cape_signal(S_LOCK_PROCESS_MEMORY);
+}
 static inline void dickpt_stop_ckpt(void)    { __cape_signal(S_UNLOCK_PROCESS_MEMORY); }
 static inline void dickpt_generate_ckpt(void){ __cape_signal(S_GENERATE_CHECKPOINT); }
 static inline void dickpt_generate_total_ckpt(void) { __cape_signal(S_GENERATE_TOTAL_CHECKPOINT); }

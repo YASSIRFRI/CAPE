@@ -1,21 +1,17 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <sys/mman.h>
+#include <string.h>
 #include "../../include/cape_dickpt.h"
 
 #define  N  10
 
-/* -----------------------------------
- * Global variables
- * -----------------------------------
- */
-
-unsigned long C[N][N],A[N][N],B[N][N];
-int __ckpt_flag__ = 0;
-unsigned long __node__,__num_nodes__;
-extern void*__data_start;
-
-int i, j, k;
+struct mul_state {
+	unsigned long c[N][N];
+	unsigned long a[N][N];
+	unsigned long b[N][N];
+	int i;
+	int j;
+};
 
 /* -----------------------------------------------------------
  * Program
@@ -23,43 +19,52 @@ int i, j, k;
  */
 int main(int argc,char*argv[])
 {
-	unsigned long sum;
+	struct mul_state *state;
+	unsigned long node;
 
-	__node__ = dickpt_read_node();
-	dickpt_send_data_start((unsigned long)&__data_start);
+	state = dickpt_map_region(sizeof(*state));
+	if (state == NULL) {
+		perror("dickpt_map_region");
+		return 1;
+	}
+	memset(state, 0, sizeof(*state));
+
+	node = dickpt_read_node();
 	dickpt_send_num_jobs(N);
 
 	//load data
-	for(i=0;i<N;i++)
-		for(j=0;j<N;j++){
-                       C[i][j]=0;
-                       A[i][j]= 1;
-                       B[i][j]= 1;
-       }
+	for (state->i = 0; state->i < N; state->i++) {
+		for (state->j = 0; state->j < N; state->j++) {
+			state->c[state->i][state->j] = 0;
+			state->a[state->i][state->j] = 1;
+			state->b[state->i][state->j] = 1;
+		}
+	}
 
 
-	if (__node__ == 0) dickpt_start_ckpt();
-	i=0;
-	for(i; i < N  ; i++)
+	if (node == 0)
+		dickpt_start_ckpt();
+
+	for (state->i = 0; state->i < N; state->i++)
 	{
-		if(__node__==0)
+		if (node == 0)
 		{
 			dickpt_generate_ckpt();
 		}
 	}
 
-	if(__node__ == 0)
+	if (node == 0)
 	{
 		dickpt_generate_ckpt();
 		dickpt_stop_ckpt();
 	}
 
 	//Print result
-	for(i=0;i<N;i++){
-		for(j=0;j<N;j++){
-      		printf("%ld\t", C[i][j]);
-	       }
-	       printf("\n");
-	 }
+	for (state->i = 0; state->i < N; state->i++) {
+		for (state->j = 0; state->j < N; state->j++)
+			printf("%ld\t", state->c[state->i][state->j]);
+		printf("\n");
+	}
 
+	return 0;
 }

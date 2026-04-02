@@ -14,6 +14,9 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <time.h>
+#ifdef CAPE_COMPRESS
+#include <zlib.h>
+#endif
 
 #if DDEBUG
 #define dprintf(fmt, args...) printf(fmt, ## args);
@@ -412,6 +415,7 @@ int add_active_variable(VarList **vlist_head, VarList **vlist_tail, Var v){
 /* Forward declarations */
 int remove_heap_variables(PointerList **hlist_head, PointerList **hlist_tail, unsigned long manager_addr);
 int add_shared_variable(VarList **vlist, VarList **vlist_tail, Var var);
+int add_parallel_region(VarList **vlist_head, VarList **vlist_tail, unsigned char level);
 void require_generate_checkpoint(char ops_flag);
 
 /*
@@ -495,8 +499,10 @@ int generate_variable_list_for_parallel_windows(VarList *active_variable_head){
 		}
 	}
 	else{
-		__parallel_level__++;
-		///TODO: Implement multi-level parallel region
+		/* Nested parallel region: copy parent-level variables to the new level.
+		 * __parallel_level__ was already incremented by open_parallel_window()
+		 * before calling this function, so the parent level is __parallel_level__ - 1. */
+		add_parallel_region(&__var_list_head, &__var_list_tail, __parallel_level__);
 		return 0;
 	}	
 }
@@ -758,12 +764,13 @@ void open_parallel_window(){
  * ---------------------------------------------------------------------
  */
 void close_parallel_window(){
-	
+
 	if (__parallel_level__ > 0) {
-		remove_active_variables(&__var_list_head, &__var_list_tail, __parallel_level__);		
+		remove_active_variables(&__var_list_head, &__var_list_tail, __parallel_level__);
 		__parallel_level__--;
 	}
-	__is_inside_parallel_region__= FALSE; //Exit parallel region
+	if (__parallel_level__ == 0)
+		__is_inside_parallel_region__ = FALSE; //Exit parallel region only at outermost level
 
 }
 
@@ -786,11 +793,13 @@ int add_parallel_region(VarList **vlist_head, VarList **vlist_tail, unsigned cha
 	VarList *item = NULL;
 	
 	item = vl_head;
-	while(item->var.level != (level - 1) )
+	while(item != NULL && item->var.level != (level - 1))
 		item = item->next;
-	
-	//Copy items and assigned new level	
-	while(item->var.level == (level -1)){			
+
+	if (item == NULL) return 0; /* no parent-level variables found */
+
+	//Copy items and assigned new level
+	while(item != NULL && item->var.level == (level -1)){
 		copy_item = malloc(sizeof(VarList));		
 		copy_item->var.addr = item->var.addr;
 		copy_item->var.size = item->var.size;
@@ -800,11 +809,12 @@ int add_parallel_region(VarList **vlist_head, VarList **vlist_tail, unsigned cha
 		copy_item->var.level = level; //New level	
 		copy_item->var.ispointer = item->var.ispointer;		
 		copy_item->next = NULL;
-		copy_item->prev = vl_tail_level;		
-		vl_tail_level->next = copy_item;
-		vl_tail_level = copy_item;		
+		copy_item->prev = vl_tail_level;
+		if (vl_tail_level != NULL)
+			vl_tail_level->next = copy_item;
+		vl_tail_level = copy_item;
 		item = item->next;
-	}	
+	}
 	*vlist_tail = vl_tail_level;
 	return 1;
 }
@@ -1667,9 +1677,80 @@ unsigned int nearest_power_of_two(unsigned int n){
 	return 0;
 }
 
+/* ====================================================================
+ * Optional zlib compression for checkpoint exchange.
+ * Compile with -DCAPE_COMPRESS and link with -lz to enable.
+ * Only compresses when the result is actually smaller than the input.
+ * ==================================================================== */
+#ifdef CAPE_COMPRESS
+
+/* Minimum payload size worth trying to compress (bytes) */
+#define CAPE_COMPRESS_THRESHOLD 256
+
+/*
+ * Compress `src` of `src_len` bytes into a newly malloc'd buffer.
+ * Returns compressed buffer in *out, compressed size in *out_len.
+ * If compression doesn't shrink the data, returns NULL (caller should
+ * send uncompressed).  The first 4 bytes of the returned buffer store
+ * the original uncompressed length (uint32_t, little-endian) so the
+ * receiver knows how much to allocate for decompression.
+ */
+static char *cape_compress(const char *src, size_t src_len, size_t *out_len)
+{
+	if (src_len < CAPE_COMPRESS_THRESHOLD) return NULL;
+
+	uLongf bound = compressBound((uLong)src_len);
+	/* Layout: [uint32_t orig_len][compressed bytes] */
+	size_t buf_len = sizeof(uint32_t) + (size_t)bound;
+	char *buf = malloc(buf_len);
+	if (!buf) return NULL;
+
+	uLongf comp_len = bound;
+	int rc = compress2((Bytef *)(buf + sizeof(uint32_t)), &comp_len,
+	                   (const Bytef *)src, (uLong)src_len, Z_DEFAULT_COMPRESSION);
+	if (rc != Z_OK || (sizeof(uint32_t) + comp_len) >= src_len) {
+		free(buf);
+		return NULL; /* compression didn't help */
+	}
+
+	uint32_t orig = (uint32_t)src_len;
+	memcpy(buf, &orig, sizeof(uint32_t));
+	*out_len = sizeof(uint32_t) + (size_t)comp_len;
+	return buf;
+}
+
+/*
+ * Decompress a buffer produced by cape_compress.
+ * Returns newly malloc'd buffer with the original data; sets *out_len.
+ * Returns NULL on error.
+ */
+static char *cape_decompress(const char *src, size_t src_len, size_t *out_len)
+{
+	if (src_len < sizeof(uint32_t)) return NULL;
+
+	uint32_t orig;
+	memcpy(&orig, src, sizeof(uint32_t));
+
+	char *buf = malloc((size_t)orig);
+	if (!buf) return NULL;
+
+	uLongf decomp_len = (uLongf)orig;
+	int rc = uncompress((Bytef *)buf, &decomp_len,
+	                    (const Bytef *)(src + sizeof(uint32_t)),
+	                    (uLong)(src_len - sizeof(uint32_t)));
+	if (rc != Z_OK) {
+		free(buf);
+		return NULL;
+	}
+	*out_len = (size_t)decomp_len;
+	return buf;
+}
+
+#endif /* CAPE_COMPRESS */
+
 /*
  *---------------------------------------------------------------------
- * Send and Receive checkpoint based on hypercube algorithm  
+ * Send and Receive checkpoint based on hypercube algorithm
  *----------------------------------------------------------------------
  */
 int hypercube_allreduce(unsigned int node, unsigned int num_nodes, char ckpt_flag, uint32_t epoch){
@@ -1691,6 +1772,35 @@ int hypercube_allreduce(unsigned int node, unsigned int num_nodes, char ckpt_fla
 		size_token = ((epoch & 0x0fffU) << 8) | (uint32_t)((i * 2) & 0xff);
 		data_token = ((epoch & 0x0fffU) << 8) | (uint32_t)(((i * 2) + 1) & 0xff);
 
+#ifdef CAPE_COMPRESS
+		/* Try to compress the outgoing message */
+		char *comp_buf = NULL;
+		size_t comp_len = 0;
+		unsigned long send_hdr[2]; /* [0]=wire_size, [1]=orig_size (0=uncompressed) */
+		unsigned long recv_hdr[2];
+
+		comp_buf = cape_compress(send_msg, send_msg_size, &comp_len);
+		if (comp_buf) {
+			send_hdr[0] = (unsigned long)comp_len;
+			send_hdr[1] = send_msg_size; /* original size signals "compressed" */
+		} else {
+			send_hdr[0] = send_msg_size;
+			send_hdr[1] = 0; /* 0 = uncompressed */
+		}
+#ifdef CAPE_PROFILE
+		cape_prof_set_sendrecv_context(CAPE_SR_PHASE_SIZE, i, (int)partner, epoch);
+#endif
+		PROF_START(_t_size_xchg);
+		cape_ucx_sendrecv(send_hdr, sizeof(send_hdr), partner,
+		                  recv_hdr, sizeof(recv_hdr), partner,
+		                  size_token);
+		PROF_ACC(prof_allreduce_size_ns, _t_size_xchg);
+#ifdef CAPE_PROFILE
+		cape_prof_clear_sendrecv_context();
+#endif
+		recv_msg_size = recv_hdr[0]; /* wire size */
+		unsigned long recv_orig_size = recv_hdr[1];
+#else /* !CAPE_COMPRESS */
 		/* Exchange message sizes (step tag: i*2) */
 #ifdef CAPE_PROFILE
 		cape_prof_set_sendrecv_context(CAPE_SR_PHASE_SIZE, i, (int)partner, epoch);
@@ -1703,15 +1813,15 @@ int hypercube_allreduce(unsigned int node, unsigned int num_nodes, char ckpt_fla
 #ifdef CAPE_PROFILE
 		cape_prof_clear_sendrecv_context();
 #endif
-
-		// fprintf(stderr, "CAPE DBG node %d step %d: SIZE exchange done"
-		//         " sent=%lu recv=%lu\n",
-		//         node, i, send_msg_size, recv_msg_size);
+#endif /* CAPE_COMPRESS */
 
 		recv_msg = malloc(sizeof(char) * recv_msg_size);
 		if (recv_msg == NULL) {
 			fprintf(stderr, "CAPE hypercube_allreduce: malloc failed (recv_msg_size=%lu)\n",
 			        recv_msg_size);
+#ifdef CAPE_COMPRESS
+			free(comp_buf);
+#endif
 			return -1;
 		}
 
@@ -1720,19 +1830,46 @@ int hypercube_allreduce(unsigned int node, unsigned int num_nodes, char ckpt_fla
 		cape_prof_set_sendrecv_context(CAPE_SR_PHASE_DATA, i, (int)partner, epoch);
 #endif
 		PROF_START(_t_data_xchg);
+#ifdef CAPE_COMPRESS
+		cape_ucx_sendrecv(comp_buf ? comp_buf : send_msg,
+		                  comp_buf ? comp_len : send_msg_size, partner,
+		                  recv_msg, recv_msg_size, partner,
+		                  data_token);
+#else
 		cape_ucx_sendrecv(send_msg, send_msg_size, partner,
 		                  recv_msg, recv_msg_size, partner,
 		                  data_token);
+#endif
 		PROF_ACC(prof_allreduce_data_ns, _t_data_xchg);
 #ifdef CAPE_PROFILE
 		cape_prof_clear_sendrecv_context();
 #endif
 
+#ifdef CAPE_COMPRESS
+		free(comp_buf);
+		comp_buf = NULL;
+
+		/* Decompress if the sender indicated compression */
+		char *merge_buf = recv_msg;
+		size_t merge_len = recv_msg_size;
+		if (recv_orig_size > 0) {
+			merge_buf = cape_decompress(recv_msg, recv_msg_size, &merge_len);
+			free(recv_msg);
+			if (!merge_buf) {
+				fprintf(stderr, "CAPE hypercube_allreduce: decompression failed\n");
+				return -1;
+			}
+		}
+		PROF_START(_t_merge);
+		rc = merge_checkpoint(merge_buf, merge_len, ckpt_flag);
+		PROF_ACC(prof_merge_ckpt_ns, _t_merge);
+		free(merge_buf);
+#else
 		PROF_START(_t_merge);
 		rc = merge_checkpoint(recv_msg, recv_msg_size, ckpt_flag);
 		PROF_ACC(prof_merge_ckpt_ns, _t_merge);
-
 		free(recv_msg);
+#endif
 		recv_msg_size = 0;
 		if (rc < 0)
 			return -1;
@@ -1770,6 +1907,38 @@ int ring_allreduce(unsigned int node, unsigned int nnodes, char ckpt_flag, uint3
 		int step = (int)(i - 1);
 		size_token = ((epoch & 0x0fffU) << 8) | (uint32_t)((i * 2) & 0xff);
 		data_token = ((epoch & 0x0fffU) << 8) | (uint32_t)(((i * 2) + 1) & 0xff);
+
+#ifdef CAPE_COMPRESS
+		char *comp_buf = NULL;
+		size_t comp_len = 0;
+		unsigned int send_hdr[3]; /* [0]=wire_size, [1]=orig_size_lo, [2]=orig_size_hi (0=uncompressed) */
+		unsigned int recv_hdr[3];
+
+		comp_buf = cape_compress(send_msg, send_msg_size, &comp_len);
+		if (comp_buf) {
+			send_hdr[0] = (unsigned int)comp_len;
+			send_hdr[1] = send_msg_size;
+			send_hdr[2] = 1; /* compressed flag */
+		} else {
+			send_hdr[0] = send_msg_size;
+			send_hdr[1] = 0;
+			send_hdr[2] = 0;
+		}
+#ifdef CAPE_PROFILE
+		cape_prof_set_sendrecv_context(CAPE_SR_PHASE_SIZE, step, (int)left, epoch);
+#endif
+		PROF_START(_t_size_xchg);
+		cape_ucx_sendrecv(send_hdr, sizeof(send_hdr), right,
+		                  recv_hdr, sizeof(recv_hdr), left,
+		                  size_token);
+		PROF_ACC(prof_allreduce_size_ns, _t_size_xchg);
+#ifdef CAPE_PROFILE
+		cape_prof_clear_sendrecv_context();
+#endif
+		recv_msg_size = recv_hdr[0];
+		unsigned int recv_orig_size = recv_hdr[1];
+		unsigned int recv_compressed = recv_hdr[2];
+#else /* !CAPE_COMPRESS */
 		/* Exchange sizes: send to right, receive from left (step tag: i*2) */
 #ifdef CAPE_PROFILE
 		cape_prof_set_sendrecv_context(CAPE_SR_PHASE_SIZE, step, (int)left, epoch);
@@ -1782,6 +1951,7 @@ int ring_allreduce(unsigned int node, unsigned int nnodes, char ckpt_flag, uint3
 #ifdef CAPE_PROFILE
 		cape_prof_clear_sendrecv_context();
 #endif
+#endif /* CAPE_COMPRESS */
 
 		recv_msg = malloc(sizeof(char) * recv_msg_size);
 		if (recv_msg == NULL) {
@@ -1789,6 +1959,9 @@ int ring_allreduce(unsigned int node, unsigned int nnodes, char ckpt_flag, uint3
 			        recv_msg_size);
 			if (owned_send_msg != NULL)
 				free(owned_send_msg);
+#ifdef CAPE_COMPRESS
+			free(comp_buf);
+#endif
 			return -1;
 		}
 
@@ -1797,14 +1970,55 @@ int ring_allreduce(unsigned int node, unsigned int nnodes, char ckpt_flag, uint3
 		cape_prof_set_sendrecv_context(CAPE_SR_PHASE_DATA, step, (int)left, epoch);
 #endif
 		PROF_START(_t_data_xchg);
+#ifdef CAPE_COMPRESS
+		cape_ucx_sendrecv(comp_buf ? comp_buf : send_msg,
+		                  comp_buf ? (unsigned int)comp_len : send_msg_size, right,
+		                  recv_msg, recv_msg_size, left,
+		                  data_token);
+#else
 		cape_ucx_sendrecv(send_msg, send_msg_size, right,
 		                  recv_msg, recv_msg_size, left,
 		                  data_token);
+#endif
 		PROF_ACC(prof_allreduce_data_ns, _t_data_xchg);
 #ifdef CAPE_PROFILE
 		cape_prof_clear_sendrecv_context();
 #endif
 
+#ifdef CAPE_COMPRESS
+		free(comp_buf);
+		comp_buf = NULL;
+
+		char *merge_buf = recv_msg;
+		size_t merge_len = recv_msg_size;
+		if (recv_compressed && recv_orig_size > 0) {
+			merge_buf = cape_decompress(recv_msg, recv_msg_size, &merge_len);
+			free(recv_msg);
+			recv_msg = NULL;
+			if (!merge_buf) {
+				fprintf(stderr, "CAPE ring_allreduce: decompression failed\n");
+				if (owned_send_msg != NULL)
+					free(owned_send_msg);
+				return -1;
+			}
+		}
+
+		PROF_START(_t_merge);
+		rc = merge_checkpoint(merge_buf, merge_len, ckpt_flag);
+		PROF_ACC(prof_merge_ckpt_ns, _t_merge);
+		if (owned_send_msg != NULL) {
+			free(owned_send_msg);
+			owned_send_msg = NULL;
+		}
+		if (rc < 0) {
+			free(merge_buf);
+			return -1;
+		}
+
+		owned_send_msg = merge_buf;
+		send_msg      = owned_send_msg;
+		send_msg_size = (unsigned int)merge_len;
+#else
 		PROF_START(_t_merge);
 		rc = merge_checkpoint(recv_msg, recv_msg_size, ckpt_flag);
 		PROF_ACC(prof_merge_ckpt_ns, _t_merge);
@@ -1820,6 +2034,7 @@ int ring_allreduce(unsigned int node, unsigned int nnodes, char ckpt_flag, uint3
 		owned_send_msg = recv_msg;
 		send_msg      = owned_send_msg;
 		send_msg_size = recv_msg_size;
+#endif
 		recv_msg_size = 0;
 	}
 	if (owned_send_msg != NULL)

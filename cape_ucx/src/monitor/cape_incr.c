@@ -1,3 +1,5 @@
+#define _GNU_SOURCE
+
 /*
  *	CAPE Monitor: version 5.0 (UCX)
  *		Using Discontinuous incremental checkpointer.
@@ -19,12 +21,15 @@
 #include <stdlib.h>
 #include <sys/ioctl.h>
 #include <sys/reg.h>
+#include <sys/uio.h>
 #include <string.h>
 #include <math.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <poll.h>
 #include <fcntl.h>
 #include <linux/sched.h>
+#include <linux/userfaultfd.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -34,8 +39,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "../include/chardev9.h"
 #include "../include/cape_monitor.h"
+#include "../include/cape_dickpt_uffd.h"
 #include "../include/cape_signal.h"
 
 #include <ucp/api/ucp.h>
@@ -59,7 +64,12 @@ struct shared_data_ckpt * final_list_ckpt_tail = NULL;
 
 int process_state = 0; //to follow the state of process
 int child_id, parent_id;
-int driver_file;
+int control_fd = -1;
+int userfault_fd = -1;
+
+struct cape_dickpt_range *tracked_ranges = NULL;
+size_t tracked_range_count = 0;
+int tracking_is_enabled = 0;
 
 unsigned long old_brk = 0, new_brk = 0, heap_top, child_data_start;
 
@@ -109,6 +119,303 @@ unsigned char *before_buffer;
 static FILE *open_binary_memstream(unsigned char **bufloc, size_t *sizeloc)
 {
 	return open_memstream((char **)bufloc, sizeloc);
+}
+
+static int read_remote_memory(pid_t pid, unsigned long remote_addr, void *local_buf,
+			      size_t len)
+{
+	size_t done = 0;
+
+	while (done < len) {
+		struct iovec local = {
+			.iov_base = (char *)local_buf + done,
+			.iov_len = len - done
+		};
+		struct iovec remote = {
+			.iov_base = (void *)(remote_addr + done),
+			.iov_len = len - done
+		};
+		ssize_t rc = process_vm_readv(pid, &local, 1, &remote, 1, 0);
+
+		if (rc <= 0)
+			return -1;
+		done += (size_t)rc;
+	}
+
+	return 0;
+}
+
+static int write_remote_memory(pid_t pid, const void *local_buf,
+			       unsigned long remote_addr, size_t len)
+{
+	size_t done = 0;
+
+	while (done < len) {
+		struct iovec local = {
+			.iov_base = (void *)((const char *)local_buf + done),
+			.iov_len = len - done
+		};
+		struct iovec remote = {
+			.iov_base = (void *)(remote_addr + done),
+			.iov_len = len - done
+		};
+		ssize_t rc = process_vm_writev(pid, &local, 1, &remote, 1, 0);
+
+		if (rc <= 0)
+			return -1;
+		done += (size_t)rc;
+	}
+
+	return 0;
+}
+
+static int cape_userfault_writeprotect(unsigned long start, unsigned long len, int enable)
+{
+	struct uffdio_writeprotect wp;
+
+	if (userfault_fd < 0)
+		return -1;
+
+	memset(&wp, 0, sizeof(wp));
+	wp.range.start = start;
+	wp.range.len = len;
+	wp.mode = enable ? UFFDIO_WRITEPROTECT_MODE_WP : 0;
+
+	return ioctl(userfault_fd, UFFDIO_WRITEPROTECT, &wp);
+}
+
+static int cape_capture_dirty_page(unsigned int pid, unsigned long fault_addr)
+{
+	unsigned long aligned_addr;
+	struct page_node *temp_node, *current_node;
+
+	aligned_addr = fault_addr & ~(PAGE_SIZE - 1);
+	temp_node = list_head;
+	while (temp_node != NULL && temp_node->addr < aligned_addr)
+		temp_node = temp_node->next;
+	if (temp_node != NULL && temp_node->addr == aligned_addr)
+		return 0;
+
+	current_node = malloc(sizeof(struct page_node));
+	if (current_node == NULL)
+		return 1;
+	memset(current_node, 0, sizeof(*current_node));
+
+	if (read_remote_memory(pid, aligned_addr, &(current_node->data), PAGE_SIZE) != 0) {
+		free(current_node);
+		return 1;
+	}
+
+	current_node->addr = aligned_addr;
+
+	if (list_head == NULL) {
+		list_head = current_node;
+		list_end = current_node;
+		return 0;
+	}
+
+	if (aligned_addr > list_end->addr) {
+		current_node->before = list_end;
+		list_end->next = current_node;
+		list_end = current_node;
+		return 0;
+	}
+
+	if (aligned_addr < list_head->addr) {
+		current_node->next = list_head;
+		list_head->before = current_node;
+		list_head = current_node;
+		return 0;
+	}
+
+	current_node->next = temp_node;
+	current_node->before = temp_node->before;
+	temp_node->before->next = current_node;
+	temp_node->before = current_node;
+	return 0;
+}
+
+static int cape_handle_userfault_event(void)
+{
+	struct uffd_msg msg;
+	ssize_t nread;
+	unsigned long page_addr;
+
+	nread = read(userfault_fd, &msg, sizeof(msg));
+	if (nread == -1) {
+		if (errno == EAGAIN || errno == EINTR)
+			return 0;
+		perror("read(userfaultfd)");
+		return -1;
+	}
+	if (nread == 0)
+		return -1;
+	if ((size_t)nread < sizeof(msg))
+		return -1;
+	if (msg.event != UFFD_EVENT_PAGEFAULT)
+		return 0;
+	if ((msg.arg.pagefault.flags & UFFD_PAGEFAULT_FLAG_WP) == 0)
+		return 0;
+
+	page_addr = msg.arg.pagefault.address & ~(PAGE_SIZE - 1);
+	if (cape_capture_dirty_page(child_id, page_addr) != 0) {
+		fprintf(stderr, "Monitor %ld: failed to snapshot page 0x%lx\n",
+		        node, page_addr);
+		return -1;
+	}
+	if (cape_userfault_writeprotect(page_addr, PAGE_SIZE, 0) == -1) {
+		perror("ioctl(UFFDIO_WRITEPROTECT clear)");
+		return -1;
+	}
+
+	return 0;
+}
+
+int cape_drain_userfaultfd(void)
+{
+	struct pollfd pfd;
+
+	if (userfault_fd < 0 || !tracking_is_enabled)
+		return 0;
+
+	memset(&pfd, 0, sizeof(pfd));
+	pfd.fd = userfault_fd;
+	pfd.events = POLLIN;
+
+	while (poll(&pfd, 1, 0) > 0) {
+		if ((pfd.revents & POLLIN) == 0)
+			break;
+		if (cape_handle_userfault_event() != 0)
+			return -1;
+		pfd.revents = 0;
+	}
+
+	return 0;
+}
+
+int cape_wait_for_child_event(pid_t pid, int *status)
+{
+	if (userfault_fd < 0 || !tracking_is_enabled)
+		return waitpid(pid, status, 0);
+
+	for (;;) {
+		pid_t rc = waitpid(pid, status, WNOHANG);
+
+		if (rc == pid)
+			return rc;
+		if (rc == -1) {
+			if (errno == EINTR)
+				continue;
+			return -1;
+		}
+		if (cape_drain_userfaultfd() != 0)
+			return -1;
+
+		{
+			struct pollfd pfd;
+			int poll_rc;
+
+			memset(&pfd, 0, sizeof(pfd));
+			pfd.fd = userfault_fd;
+			pfd.events = POLLIN;
+			poll_rc = poll(&pfd, 1, 50);
+			if (poll_rc == -1 && errno != EINTR)
+				return -1;
+			if (poll_rc > 0 && (pfd.revents & POLLIN) != 0) {
+				if (cape_handle_userfault_event() != 0)
+					return -1;
+			}
+		}
+	}
+}
+
+int cape_receive_userfaultfd_setup(void)
+{
+	char payload[sizeof(struct cape_dickpt_ctl_header) +
+		     (CAPE_DICKPT_MAX_RANGES * sizeof(struct cape_dickpt_range))];
+	union {
+		struct cmsghdr align;
+		char buf[CMSG_SPACE(sizeof(int))];
+	} control;
+	struct cape_dickpt_ctl_header *header;
+	struct cape_dickpt_range *ranges;
+	struct msghdr msg;
+	struct iovec iov;
+	struct cmsghdr *cmsg;
+	ssize_t rc;
+
+	if (userfault_fd >= 0)
+		return 0;
+
+	memset(&msg, 0, sizeof(msg));
+	memset(&control, 0, sizeof(control));
+	memset(payload, 0, sizeof(payload));
+
+	iov.iov_base = payload;
+	iov.iov_len = sizeof(payload);
+	msg.msg_iov = &iov;
+	msg.msg_iovlen = 1;
+	msg.msg_control = control.buf;
+	msg.msg_controllen = sizeof(control.buf);
+
+	rc = recvmsg(control_fd, &msg, 0);
+	if (rc == -1) {
+		perror("recvmsg(userfaultfd setup)");
+		return 1;
+	}
+	if ((size_t)rc < sizeof(*header))
+		return 1;
+
+	header = (struct cape_dickpt_ctl_header *)payload;
+	if (header->type != CAPE_DICKPT_CTL_UFFD_SETUP)
+		return 1;
+	if (header->count > CAPE_DICKPT_MAX_RANGES)
+		return 1;
+	if ((size_t)rc < sizeof(*header) +
+			 (header->count * sizeof(struct cape_dickpt_range)))
+		return 1;
+
+	free(tracked_ranges);
+	tracked_ranges = NULL;
+	tracked_range_count = 0;
+
+	if (header->count > 0) {
+		tracked_ranges = malloc(header->count * sizeof(*tracked_ranges));
+		if (tracked_ranges == NULL)
+			return 1;
+
+		ranges = (struct cape_dickpt_range *)(payload + sizeof(*header));
+		memcpy(tracked_ranges, ranges, header->count * sizeof(*tracked_ranges));
+		tracked_range_count = header->count;
+	}
+
+	for (cmsg = CMSG_FIRSTHDR(&msg); cmsg != NULL; cmsg = CMSG_NXTHDR(&msg, cmsg)) {
+		if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS) {
+			memcpy(&userfault_fd, CMSG_DATA(cmsg), sizeof(userfault_fd));
+			break;
+		}
+	}
+
+	if (userfault_fd < 0)
+		return 1;
+
+	return 0;
+}
+
+static int cape_writeprotect_tracked_ranges(int enable)
+{
+	size_t i;
+
+	for (i = 0; i < tracked_range_count; ++i) {
+		if (cape_userfault_writeprotect(tracked_ranges[i].start,
+						tracked_ranges[i].len,
+						enable) == -1) {
+			perror("ioctl(UFFDIO_WRITEPROTECT range)");
+			return 1;
+		}
+	}
+
+	return 0;
 }
 
 /* =========================================================================
@@ -567,6 +874,9 @@ int require_inject_workshare_checkpoint();
 int require_allreduce_checkpoint();
 int allreduce_checkpoint();
 void print_data_in_list(struct shared_data *list);
+int cape_receive_userfaultfd_setup(void);
+int cape_wait_for_child_event(pid_t pid, int *status);
+int cape_drain_userfaultfd(void);
 
 /* ==========================================================================
  * Monitor process
@@ -586,10 +896,22 @@ int main(int argc, char * argv[]){
 	struct sigaction sa;
 	int tc = 0, flag_192 = 0, main_flag = 0, opt, reuse = 1;
 	struct user_regs_struct regs, newregs;
+	int control_pair[2];
+	char control_fd_text[32];
+
+	if (argc < 2) {
+		fprintf(stderr, "Usage: %s <app>\n", argv[0]);
+		return 1;
+	}
 	
 	exec_file = argv[1];
 
 	cape_ucx_init();
+
+	if (socketpair(AF_UNIX, SOCK_SEQPACKET, 0, control_pair) == -1) {
+		perror("socketpair");
+		return 1;
+	}
 	
 
 	//fork a process to run CAPE program
@@ -598,11 +920,16 @@ int main(int argc, char * argv[]){
 			perror ( "fork" ) ;
 			return 1 ;
 		case 0 :	/* Child */
+			close(control_pair[0]);
+			snprintf(control_fd_text, sizeof(control_fd_text), "%d", control_pair[1]);
+			setenv(CAPE_DICKPT_ENV_SOCK_FD, control_fd_text, 1);
 			ptrace ( PTRACE_TRACEME, NULL, NULL, NULL ) ; //This process will be traced
 			execl ( exec_file , exec_file , NULL);			
 			perror (exec_file) ;
 			return 2 ;
 		default :	/* Parent */
+			control_fd = control_pair[0];
+			close(control_pair[1]);
 			break;
 	}
 	
@@ -628,19 +955,13 @@ int main(int argc, char * argv[]){
 	}//end for
 
 	ptrace(PTRACE_SYSCALL, child_id, NULL, NULL ) ;						
-
-	//Open driver	
-	driver_file = open("/dev/chardev90", O_RDONLY);
-	if (driver_file < 0) {
-		fprintf(stderr,
-			"Monitor %ld: can't open device file /dev/chardev90: %s\n",
-			node, strerror(errno));
-		exit(1);
-	}
 	
 	//Monitor CAPE program
 	while(1) {
-		waitpid(child_id, &status, 0);		
+		if (cape_wait_for_child_event(child_id, &status) == -1) {
+			perror("waitpid");
+			break;
+		}
 		if(WIFEXITED(status)) break;
 		if (( sys_num = ptrace(PTRACE_PEEKUSER, child_id, 8 * ORIG_RAX, NULL) ) == -1 ) { //catch a signal
 			if(ptrace(PTRACE_GETSIGINFO, child_id, NULL, &child_siginfo)){
@@ -657,7 +978,7 @@ int main(int argc, char * argv[]){
 					case S_LOCK_PROCESS_MEMORY:  //Lock process 		
 						rc = lock_process_memory(child_id);
 						if(process_state == 2) process_state = 3;
-						if(rc < 0){
+						if(rc != 0){
 							printf ("Monitor %ld: Error on locking the process image\n",node);
 							exit(1);
 						}
@@ -726,12 +1047,10 @@ int main(int argc, char * argv[]){
 					
 					case S_START_SHARE_DATA:												
 						read_shared_data();						
-						print_data_in_list(data_list_head);																
 						break;
 						
 					case S_END_SHARE_DATA:
 						end_shared_data();
-						//print_data_in_list(data_list_head);
 						break;
 
 
@@ -792,21 +1111,11 @@ int main(int argc, char * argv[]){
 			}//SIGTRAP
 			
 			if(child_siginfo.si_signo == SIGSEGV){
-				unsigned long err_addr;
-				err_addr = 	(unsigned long)child_siginfo.si_addr;							
-				//dprintf("\nMonitor: Signal SIGSEGV caught, address = 0x%lx",(unsigned long)err_addr) ;
-				//clear write protect of one page and read the data of this page
-				
-			//	printf("\nMonitor %ld: Signal SIGSEGV caught at %lx, edx = 0x%lx, child-id = %d\n", \
-						node, err_addr,regs.rdx, child_id);
-				rc = ioctl_clear_write_protect(child_id, (unsigned long) child_siginfo.si_addr);
-				
-				if(rc != 0){
-					printf("\nMonitor: ioctl_clear_write_protect return rc = %d", rc);
-					close(driver_file);
-					kill(child_id, SIGKILL);
-					return 1;
-				}				
+				fprintf(stderr,
+					"Monitor %ld: child received SIGSEGV at 0x%lx\n",
+					node, (unsigned long)child_siginfo.si_addr);
+				kill(child_id, SIGKILL);
+				return 1;
 			}//SIGSEGV
 		}
 		else{  //a system call
@@ -821,7 +1130,11 @@ int main(int argc, char * argv[]){
 		}
 		ptrace(PTRACE_SYSCALL, child_id, NULL, NULL ) ;
 	}
-	close(driver_file);
+	if (userfault_fd >= 0)
+		close(userfault_fd);
+	if (control_fd >= 0)
+		close(control_fd);
+	free(tracked_ranges);
 	cape_ucx_finalize();
 	printf("Monitor %ld: parent finish!\n", node);
 	return 0;
@@ -843,6 +1156,7 @@ int clear_list(struct page_node *list){
 		free(temp_node);
 	}
 	list_head = NULL;
+	list_end = NULL;
 	return 0;
 }
 /* ----------------------------------------------------------------
@@ -906,56 +1220,70 @@ int init_jobs_per_node(){
  * ---------------------------------------------------
  */
 int read_current_stack_start(unsigned int pid, unsigned long src, unsigned long dst, int len){
-	int ret_val;
-	data_change_t data_change;
-	data_change.pid = pid;
-	data_change.src_addr = src;
-	data_change.dst_addr = dst;
-	data_change.len = len;
-	ret_val = ioctl(driver_file, IOCTL_READ_STACK_START, &data_change);
-	return ret_val;
+	char maps_path[64];
+	FILE *maps;
+	char line[512];
+	unsigned long long start, end;
+	char perms[5];
+
+	snprintf(maps_path, sizeof(maps_path), "/proc/%u/maps", pid);
+	maps = fopen(maps_path, "r");
+	if (maps == NULL)
+		return 0;
+
+	while (fgets(line, sizeof(line), maps) != NULL) {
+		if (sscanf(line, "%llx-%llx %4s", &start, &end, perms) != 3)
+			continue;
+		if (strstr(line, "[stack]") == NULL)
+			continue;
+		fclose(maps);
+		return (int)start;
+	}
+
+	fclose(maps);
+	return 0;
 }
 /* ---------------------------------------------------
  * read_current_brk(): read the top address of heap
  * ---------------------------------------------------
  */
 int read_current_brk(unsigned int pid, unsigned long src, unsigned long dst, int len){
-	int ret_val;
-	data_change_t data_change;
-	data_change.pid = pid;
-	data_change.src_addr = src;
-	data_change.dst_addr = dst;
-	data_change.len = len;
-	ret_val = ioctl(driver_file, IOCTL_READ_BRK, &data_change);
-	return ret_val;
+	char maps_path[64];
+	FILE *maps;
+	char line[512];
+	unsigned long long start, end;
+	char perms[5];
+
+	snprintf(maps_path, sizeof(maps_path), "/proc/%u/maps", pid);
+	maps = fopen(maps_path, "r");
+	if (maps == NULL)
+		return 0;
+
+	while (fgets(line, sizeof(line), maps) != NULL) {
+		if (sscanf(line, "%llx-%llx %4s", &start, &end, perms) != 3)
+			continue;
+		if (strstr(line, "[heap]") == NULL)
+			continue;
+		fclose(maps);
+		return (int)end;
+	}
+
+	fclose(maps);
+	return 0;
 }
 /* -----------------------------------------------------
  * ioctl_read_data(): Read data from memory of the process
  * -----------------------------------------------------
  */
 int ioctl_read_data(unsigned int pid, unsigned long src, void *dst, int len){
-	int ret_val;
-	data_change_t data_change;
-	data_change.pid = pid;
-	data_change.src_addr = src;
-	data_change.dst_addr = (unsigned long)dst;
-	data_change.len = len;
-	ret_val = ioctl(driver_file, IOCTL_READ_DATA, &data_change);
-	return ret_val;
+	return read_remote_memory(pid, src, dst, (size_t)len) == 0 ? 1 : 0;
 }
 /* -----------------------------------------------------
  * ioctl_write_data(): wite data into memory of the process
  * -----------------------------------------------------
  */
 int ioctl_write_data(unsigned int pid, const void *src, unsigned long dst, int len){
-	int ret_val;
-	data_change_t data_change;
-	data_change.pid = pid;
-	data_change.src_addr = (unsigned long)src;
-	data_change.dst_addr = dst;
-	data_change.len = len;
-	ret_val = ioctl(driver_file, IOCTL_WRITE_DATA, &data_change);
-	return ret_val;
+	return write_remote_memory(pid, src, dst, (size_t)len);
 }
 /* -----------------------------------------------------------------
  * iotcl_clear_write_protect(): Version 2.0
@@ -966,68 +1294,10 @@ int ioctl_write_data(unsigned int pid, const void *src, unsigned long dst, int l
  * -----------------------------------------------------------------
  */
  int ioctl_clear_write_protect(unsigned int pid, unsigned long dst){
-	int ret_val;
-	data_change_t data_change;
-	unsigned long aligned_addr;
-	struct page_node *temp_node, *current_node;
-	
-	data_change.pid = pid;
-	data_change.src_addr = 0;
-	data_change.dst_addr = dst;
-	data_change.len = 0;
-
-	//call the driver to clear the write protection
-	ret_val = ioctl(driver_file, IOCTL_CLEAR_WRITE_PROTECT, &data_change);
-	if(ret_val != 0){		
-		dprintf("\nMonitor: Error on calling ioctl_clear_write_protect: %d, at %ld\n", ret_val, dst);		
+	if (cape_capture_dirty_page(pid, dst) != 0)
 		return 1;
-	}		
-	//find the begin address of the page
-	aligned_addr = dst & ~(PAGE_SIZE -1); 
-	
-	current_node = malloc(sizeof(struct page_node));
-	
-	//read the data of modified page frame	
-	ret_val = ioctl_read_data(pid, aligned_addr, &(current_node->data), PAGE_SIZE);
-	if(ret_val == 0){
-		dprintf("\nMonitor: Error on calling ioctl_read_data: %d\n", ret_val);
+	if (cape_userfault_writeprotect(dst & ~(PAGE_SIZE - 1), PAGE_SIZE, 0) == -1)
 		return 1;
-	}
-	current_node->before = NULL;
-	current_node->next = NULL;
-	current_node->addr = aligned_addr;
-
-	//save read data to the list
-	if(list_head == NULL){ //there is not any node in the list
-		list_head = current_node;
-		list_end = current_node;
-		return 0;
-	}
-
-	if(current_node->addr > list_end->addr){ //insert current_node at the end of list
-		current_node->before = list_end;
-		list_end->next = current_node;
-		list_end = current_node;
-		return 0;
-	} 	
-	if(current_node->addr < list_head->addr){ //insert at the begin of list
-		current_node->next = list_head;
-		list_head->before = current_node;
-		list_head = current_node;
-		return 0;
-	}
-	//insert into the list in ordre increasing
-	temp_node = list_head;
-
-	//find the position to insert
-	while(temp_node && temp_node->addr < current_node->addr) 
-		temp_node = temp_node->next;
-
-	//insert current_node between 2 nodes temp_node->before and temp_node
-	current_node->next = temp_node;
-	current_node->before = temp_node->before;
-	temp_node->before->next = current_node;
-	temp_node->before = current_node;
 	return 0;
 }
 
@@ -1037,15 +1307,7 @@ int ioctl_write_data(unsigned int pid, const void *src, unsigned long dst, int l
  * ---------------------------------------------------------------
  */
  int ioctl_set_write_protect(unsigned int pid, unsigned long dst){
-	int ret_val;
-	data_change_t data_change;
-	data_change.pid = pid;
-	data_change.src_addr = 0;
-	data_change.dst_addr = dst;
-	data_change.len = 0;
-	ret_val = ioctl(driver_file, IOCTL_SET_WRITE_PROTECT, &data_change);
-	old_brk = ret_val;
-	return ret_val;
+	return cape_userfault_writeprotect(dst & ~(PAGE_SIZE - 1), PAGE_SIZE, 1);
 }
 
 /*------------------------------------------------------------------
@@ -1070,15 +1332,10 @@ void tracer_wait ( pid_t pid, int * status, int options, struct user * u ){
  * ------------------------------------------------------------------ 
  */
 int lock_process_memory(unsigned int pid){
-	int ret_val;
-	data_change_t data_change;
-	data_change.pid = pid;
-	data_change.src_addr = 0;
-	data_change.dst_addr = 0;
-	data_change.len = 0;
-	ret_val = ioctl(driver_file, IOCTL_LOCK_PROCESS_MEMORY, &data_change);
-	old_brk = ret_val;
-	return ret_val;
+	if (cape_receive_userfaultfd_setup() != 0)
+		return 1;
+	tracking_is_enabled = 1;
+	return cape_writeprotect_tracked_ranges(1);
 }
 /* -----------------------------------------------------------------------
  * unlock_process_memory(): version 2.0
@@ -1086,14 +1343,11 @@ int lock_process_memory(unsigned int pid){
  * -----------------------------------------------------------------------
  */
 int unlock_process_memory(unsigned int pid){
-	int ret_val;
-	data_change_t data_change;	
-	data_change.pid = pid;
-	data_change.src_addr = 0;
-	data_change.dst_addr = 0;
-	data_change.len = 0;
-	ret_val = ioctl(driver_file, IOCTL_UNLOCK_PROCESS_MEMORY, &data_change);
-	return ret_val;
+	int rc;
+
+	rc = cape_writeprotect_tracked_ranges(0);
+	tracking_is_enabled = 0;
+	return rc;
 }
 
 /* -------------------------------------------------------------
@@ -1103,40 +1357,8 @@ int unlock_process_memory(unsigned int pid){
  * -------------------------------------------------------------
  */
 int read_shared_data(){
-	int read_size;
-	struct shared_data *dp;
-	int level;
-	//get the current level
-	if (data_list_head == NULL)
-		level = 1;
-	else
-		level = data_list_tail->level + 1;
-	
-	
-	read_size = sizeof(struct shared_data);		
-	do{
-		dp = malloc(sizeof(struct shared_data));
-		read_size = read(driver_file, dp, read_size);		
-		dp->prev = NULL;
-		dp->next = NULL;
-		dp->level = level;	
-							
-		if(read_size >0){
-			if(data_list_head == NULL){				
-				data_list_head = dp;
-				data_list_tail = dp;				
-			}
-			else{	//insert dp at the end of list				
-				
-					dp->prev = data_list_tail;
-					data_list_tail->next = dp;
-					data_list_tail = dp;
-			}	
-		}				
-		
-								
-	}while (read_size > 0);	
-	
+	dprintf("Monitor %ld: shared-data metadata stream is not implemented in the userfaultfd backend\n",
+		node);
 	return 0;
 }
 /* ---------------------------------------------------------------------
@@ -1382,13 +1604,6 @@ int add_item_to_list_ckpt(struct shared_data_ckpt *p){
 	//open the stream memory file
 	stream = open_binary_memstream(ckpt_data, ckpt_size);		
 		
-	//get current position of the begin of stack	
-	unsigned long start_stack;
-	start_stack = read_current_stack_start(child_id, 0, 0, 0);	
-
-	//get the position of the top of head
-	heap_top = read_current_brk(child_id, 0, 0, 0);
-		
 	//get the registers
 	ptrace(PTRACE_GETREGS, child_id, NULL, &save_regs);
 	
@@ -1438,7 +1653,6 @@ int add_item_to_list_ckpt(struct shared_data_ckpt *p){
 			if(offset > start){
 				len = (offset - start) * CAPE_WORD; //len in bytes 
 				addr = (old_node->addr + (start * CAPE_WORD)); //begin address of block data have been change			
-				if((addr < child_data_start) || (addr >= heap_top && addr < start_stack)) continue;	
 				
 				//printf("\nNode %ld: ENTER S1 PART -  0x%lx is IN list - len = %d \n", node, old_node->addr + (offset * 4), len);
 				
@@ -1619,6 +1833,10 @@ int add_item_to_list_ckpt(struct shared_data_ckpt *p){
 int require_generate_checkpoint(){
 	int rc=0;
 
+	rc = cape_drain_userfaultfd();
+	if (rc != 0)
+		return rc;
+
 	//generate new check point	
     final_ckpt_stream = generate_checkpoint(child_id,
 											list_head,
@@ -1648,6 +1866,10 @@ int require_generate_checkpoint(){
  */
 int require_generate_total_checkpoint(){
 	int rc=0;
+
+	rc = cape_drain_userfaultfd();
+	if (rc != 0)
+		return rc;
 
 	//generate new check point
 	total_ckpt_stream = generate_checkpoint(child_id,
@@ -1697,6 +1919,10 @@ int require_generate_workshare_checkpoint(){
 
 	
 	if(node==0){		
+		rc = cape_drain_userfaultfd();
+		if (rc != 0)
+			return rc;
+
 		//generate checkpoints
 		before_ckpt_stream =  generate_checkpoint(child_id,
 			list_head, 

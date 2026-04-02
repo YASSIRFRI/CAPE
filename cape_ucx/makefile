@@ -25,10 +25,22 @@ else
 PROF_FLAGS =
 endif
 
+# ── Compression (build with COMPRESS=1 to enable, e.g. make cape_mamult COMPRESS=1)
+# Requires zlib (-lz).  Compresses checkpoint data before exchange to reduce
+# communication cost.  Only compresses when the result is smaller than the input.
+COMPRESS ?= 1
+ifeq ($(COMPRESS),1)
+COMP_FLAGS = -DCAPE_COMPRESS
+COMP_LINK  = -lz
+else
+COMP_FLAGS =
+COMP_LINK  =
+endif
+
 # ── Compiler & flags ─────────────────────────────────────────────────────────
 CC      ?= cc
-CFLAGS   = -I./$(I_FOLDER) -I$(UCX_SRC) -I$(UCX_GEN) $(PMIX_FLAGS) $(PROF_FLAGS)
-LDFLAGS  = -L$(UCX_LIB) -lucp -lucs $(PMIX_LINK) -Wl,-rpath,$(UCX_LIB)
+CFLAGS   = -I./$(I_FOLDER) -I$(UCX_SRC) -I$(UCX_GEN) $(PMIX_FLAGS) $(PROF_FLAGS) $(COMP_FLAGS)
+LDFLAGS  = -L$(UCX_LIB) -lucp -lucs $(PMIX_LINK) $(COMP_LINK) -Wl,-rpath,$(UCX_LIB)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TIMESTAMP version (cape.c)
@@ -104,6 +116,7 @@ apps: cape_mamult cape_mamult2d cape_pi cape_prime cape_prime_number \
 # Dickpt apps are plain binaries — no UCX, no cape.c library.
 # They only need the include dir for cape_dickpt.h / cape_signal.h.
 DICKPT_COMPILE = $(CC) -w -I./$(I_FOLDER)
+DICKPT_RUNTIME = $(C_FOLDER)/apps/cape_dickpt_runtime.c
 
 # Monitor (needs UCX for inter-node communication)
 dickpt_monitor:
@@ -111,7 +124,7 @@ dickpt_monitor:
 
 # Dickpt application targets
 dickpt_mul_manual:
-	$(DICKPT_COMPILE) $(C_FOLDER)/apps/cape_mul_manual.c -o $(EXE_FOLDER)/dickpt_mul_manual
+	$(DICKPT_COMPILE) $(C_FOLDER)/apps/cape_mul_manual.c $(DICKPT_RUNTIME) -o $(EXE_FOLDER)/dickpt_mul_manual
 
 # Build monitor + all dickpt apps
 dickpt: dickpt_monitor dickpt_mul_manual

@@ -111,19 +111,7 @@ echo "Build dir: ${BUILD_DIR}"
 echo "CSV: ${CSV}"
 echo "MPI launch mode: ${SRUN_MPI_MODE}"
 
-echo "Checking DICKPT prerequisites on all tasks"
-set +e
-srun --mpi="${SRUN_MPI_MODE}" \
-     --nodes="${SLURM_JOB_NUM_NODES}" \
-     --ntasks="${SLURM_NTASKS}" \
-     --ntasks-per-node=1 \
-     bash -lc 'test -r /dev/chardev90'
-rc=${PIPESTATUS[0]}
-set -e
-if [ "${rc}" -ne 0 ]; then
-    echo "ERROR: /dev/chardev90 is not accessible on all tasks. DICKPT monitor cannot run without the kernel driver." >&2
-    exit 1
-fi
+echo "DICKPT now uses standard Linux syscalls (`userfaultfd` + `process_vm_*`) and does not require /dev/chardev90."
 
 for rep in $(seq 1 "${REPS}"); do
     echo ""
