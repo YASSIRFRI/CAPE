@@ -33,7 +33,7 @@ if ! mkdir -p "${BUILD_DIR}/bin" "${BUILD_DIR}/obj" "${BUILD_DIR}/lib" 2>/dev/nu
     mkdir -p "${BUILD_DIR}/bin" "${BUILD_DIR}/obj" "${BUILD_DIR}/lib"
 fi
 
-N_VALUES_STR="${N_VALUES_STR:-6400}"
+N_VALUES_STR="${N_VALUES_STR:-3000}"
 REPS="${REPS:-5}"
 read -r -a N_VALUES <<< "${N_VALUES_STR}"
 
