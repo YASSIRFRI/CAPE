@@ -179,6 +179,11 @@ VarList *__active_variable_tail = NULL;
 VarList *__var_list_head = NULL;
 VarList *__var_list_tail = NULL;
 
+/* Hash table heads for O(1) lookups */
+static VarList *__var_list_hash = NULL;         /* hash by (addr,level) for shared vars */
+static VarList *__active_var_hash = NULL;       /* hash by (addr,level) for active vars */
+static PointerList *__heap_hash_mgr = NULL;     /* hash by manager_addr */
+
 FILE *ckpt_data_stream;
 FILE *before_ckpt_stream, *after_ckpt_stream, *final_ckpt_stream;
 char *ckpt_data, *before_ckpt, *after_ckpt, *final_ckpt;
@@ -382,9 +387,10 @@ unsigned long __pc__;
   * Add active variables in __active_variable list
   * 	Insert at the end of list (LIFO)
   */
-int add_active_variable(VarList **vlist_head, VarList **vlist_tail, Var v){	
-	VarList *vl;	
+int add_active_variable(VarList **vlist_head, VarList **vlist_tail, Var v){
+	VarList *vl;
 	vl = malloc(sizeof(struct VarList));
+	memset(vl, 0, sizeof(struct VarList));
 	vl->next = NULL;
 	vl->prev = NULL;
 	vl->var.addr = v.addr;
@@ -393,14 +399,17 @@ int add_active_variable(VarList **vlist_head, VarList **vlist_tail, Var v){
 	vl->var.pro = v.pro;
 	vl->var.level = v.level;
 	vl->var.dtype = v.dtype;
-	vl->var.ispointer = v.ispointer;	
+	vl->var.ispointer = v.ispointer;
+	vl->hash_key.addr = v.addr;
+	vl->hash_key.level = v.level;
 	if (*vlist_head == NULL){
 		*vlist_head = vl ;
 		*vlist_tail = vl;
+		HASH_ADD(hh, __active_var_hash, hash_key, sizeof(VarHashKey), vl);
 		return 1;
-	}	
+	}
 	VarList *tmp2;
-	tmp2 = *vlist_tail;	
+	tmp2 = *vlist_tail;
 	//if variable exists in list
 	if (tmp2->var.addr == vl->var.addr){
 		free(vl);
@@ -410,7 +419,8 @@ int add_active_variable(VarList **vlist_head, VarList **vlist_tail, Var v){
 	vl->prev = tmp2;
 	tmp2->next = vl;
 	*vlist_tail = vl;
-	return 1;	
+	HASH_ADD(hh, __active_var_hash, hash_key, sizeof(VarHashKey), vl);
+	return 1;
 }
 /* Forward declarations */
 int remove_heap_variables(PointerList **hlist_head, PointerList **hlist_tail, unsigned long manager_addr);
@@ -423,16 +433,20 @@ void require_generate_checkpoint(char ops_flag);
  * and remove all variables on heap that is managered by these variables
  */
 int remove_active_variables(VarList **vlist_head, VarList **vlist_tail, unsigned char func_level){
-	
-	if (*vlist_head == NULL) 
+
+	if (*vlist_head == NULL)
 		return 0 ;
-	
+
+	/* Determine which hash table this list uses */
+	VarList **hash_head = (vlist_head == &__active_variable_head)
+		? &__active_var_hash : &__var_list_hash;
+
 	VarList *tmp1, *tmp2;
 	tmp1 = *vlist_head;
-	tmp2 = *vlist_tail;	
+	tmp2 = *vlist_tail;
 	while((tmp2 != tmp1) && (tmp2->var.level == func_level)){
 		VarList *tmp;
-		tmp = tmp2;		
+		tmp = tmp2;
 		tmp2= tmp2->prev;
 		tmp2->next = NULL;
 		*vlist_tail = tmp2;
@@ -440,8 +454,9 @@ int remove_active_variables(VarList **vlist_head, VarList **vlist_tail, unsigned
 			remove_heap_variables(&__var_heap_list_head,
 								&__var_heap_list_tail,
 								tmp->var.addr);
+		HASH_DELETE(hh, *hash_head, tmp);
 		free(tmp);
-	}	
+	}
 	if ((tmp1 == tmp2) && (tmp1->var.level == func_level)){
 		*vlist_head = NULL;
 		*vlist_tail = NULL;
@@ -450,6 +465,7 @@ int remove_active_variables(VarList **vlist_head, VarList **vlist_tail, unsigned
 			remove_heap_variables(&__var_heap_list_head,
 								&__var_heap_list_tail,
 								tmp1->var.addr);
+		HASH_DELETE(hh, *hash_head, tmp1);
 		free(tmp1);
 		return 0;
 	}
@@ -512,8 +528,19 @@ int generate_variable_list_for_parallel_windows(VarList *active_variable_head){
  */
 int add_shared_variable(VarList **vlist, VarList **vlist_tail, Var var){
 	VarList *vl;
-	if (var.addr <= 0) return 0;		
+	if (var.addr <= 0) return 0;
+
+	/* O(1) duplicate check via hash table */
+	VarHashKey key;
+	memset(&key, 0, sizeof(key));
+	key.addr = var.addr;
+	key.level = var.level;
+	VarList *existing = NULL;
+	HASH_FIND(hh, __var_list_hash, &key, sizeof(VarHashKey), existing);
+	if (existing != NULL) return 2;
+
 	vl = malloc(sizeof(struct VarList));
+	memset(vl, 0, sizeof(struct VarList));
 	vl->next = NULL;
 	vl->prev = NULL;
 	vl->var.addr = var.addr ;
@@ -521,14 +548,20 @@ int add_shared_variable(VarList **vlist, VarList **vlist_tail, Var var){
 	vl->var.n = var.n;
 	vl->var.pro = var.pro;
 	vl->var.level=var.level;
-	vl->var.dtype =var.dtype;	
+	vl->var.dtype =var.dtype;
 	vl->var.ispointer = var.ispointer ;
+	vl->hash_key.addr = var.addr;
+	vl->hash_key.level = var.level;
+
+	/* Add to hash table */
+	HASH_ADD(hh, __var_list_hash, hash_key, sizeof(VarHashKey), vl);
+
 	if (*vlist == NULL ) {
 		*vlist = vl;
 		*vlist_tail = vl;
 		return 1;
 	}
-		
+
 	VarList *tmp,*tmp2;
 	tmp = *vlist;
 	tmp2 = *vlist_tail;
@@ -538,12 +571,7 @@ int add_shared_variable(VarList **vlist, VarList **vlist_tail, Var var){
 		vl->next = tmp;
 		*vlist = vl ;
 		return 1;
-	}	
-	//Mofify the variable properties
-	if (tmp->var.addr == vl->var.addr) {		
-		free(vl);
-		return 2;
-	}	
+	}
 	//Insert at the end of list
 	if(tmp2->var.addr < vl->var.addr){
 		tmp2->next = vl;
@@ -551,16 +579,11 @@ int add_shared_variable(VarList **vlist, VarList **vlist_tail, Var var){
 		*vlist_tail = vl;
 		return 1;
 	}
-	//Insert at the end of list
-	if(tmp2->var.addr == vl->var.addr){
-		free(vl);
-		return 2;
-	}
-	
-	//Find the position to insert or modify
+
+	//Find the position to insert
 	while ((tmp->next != NULL) && (tmp->var.addr < vl->var.addr )){
 		tmp = tmp->next;
-	}	
+	}
 	//Insert before tmp
 	if (tmp->var.addr > vl->var.addr){
 		vl->next = tmp;
@@ -569,11 +592,8 @@ int add_shared_variable(VarList **vlist, VarList **vlist_tail, Var var){
 		tmp->prev = vl ;
 		return 1;
 	}
-	//Exist in list
-	if (tmp->var.addr == vl->var.addr){
-		free(vl);
-		return 2;
-	}	
+	/* Should not reach here since we checked duplicates above */
+	return 2;
 } 
 
 /*
@@ -583,24 +603,28 @@ int add_shared_variable(VarList **vlist, VarList **vlist_tail, Var var){
  * 	[addr, addr+len] is not exists in heaplist
  * --------------------------------------------------------------------
  */
-int addnew_pointer(PointerList **hlist_head, 
-		PointerList **hlist_tail, 
+int addnew_pointer(PointerList **hlist_head,
+		PointerList **hlist_tail,
 		Pointer pt){
-	
+
 	PointerList *item;
 	item = malloc(sizeof(PointerList));
+	memset(item, 0, sizeof(PointerList));
 	item->pointer.manager_addr = pt.manager_addr;
 	item->pointer.addr = pt.addr;
 	item->pointer.len = pt.len ;
 	item->next = NULL;
 	item->prev = NULL;
-	
+
+	/* Add to hash table by manager_addr */
+	HASH_ADD(hh_mgr, __heap_hash_mgr, pointer.manager_addr, sizeof(unsigned long), item);
+
 	if (*hlist_head == NULL){
 		*hlist_head = item ;
 		*hlist_tail = item ;
 		return 1 ;
 	}
-	
+
 	PointerList *tmp_head, *tmp_tail;
 	tmp_head = *hlist_head;
 	tmp_tail = *hlist_tail;
@@ -618,17 +642,17 @@ int addnew_pointer(PointerList **hlist_head,
 		*hlist_tail = item ;
 		return 1;
 	}
-	
+
 	//find location to insert
 	while((tmp_head !=NULL) && (tmp_head->pointer.addr < item->pointer.addr))
 		tmp_head = tmp_head->next;
-	
+
 	//insert before tmp_head
 	item->next = tmp_head;
 	item->prev = tmp_head->prev;
 	tmp_head->prev->next = item ;
 	tmp_head->prev = item;
-	return 1;	
+	return 1;
 }
 /*
  * --------------------------------------------------------------------
@@ -640,55 +664,43 @@ int addnew_pointer(PointerList **hlist_head,
  * -------------------------------------------------------------------
  */
 
-int remove_heap_variables(PointerList **hlist_head, 
+int remove_heap_variables(PointerList **hlist_head,
 		PointerList **hlist_tail,
-		unsigned long manager_addr){	
+		unsigned long manager_addr){
 
 	if (*hlist_head == NULL) return 0;
-	
-	PointerList *tmp_head;
-	PointerList *tmp_tail;
-	PointerList *tmp;
-	
-	tmp_head = *hlist_head;
-	tmp_tail = *hlist_tail;
-	
-	if ((tmp_head == tmp_tail) && (tmp_head->pointer.manager_addr == manager_addr)){
+
+	/* O(1) lookup via hash table */
+	PointerList *tmp = NULL;
+	HASH_FIND(hh_mgr, __heap_hash_mgr, &manager_addr, sizeof(unsigned long), tmp);
+	if (tmp == NULL) return 0;
+
+	/* Remove from hash table */
+	HASH_DELETE(hh_mgr, __heap_hash_mgr, tmp);
+
+	/* Remove from linked list */
+	if (tmp == *hlist_head && tmp == *hlist_tail) {
 		*hlist_head = NULL;
 		*hlist_tail = NULL;
-		free(tmp_head);
+		free(tmp);
 		return 1;
-	}	
-	tmp= tmp_head;
-	while(tmp != NULL){
-		if ((tmp->pointer.manager_addr == manager_addr) && (tmp==tmp_head)){
-			tmp_head = tmp->next;
-			tmp->next = NULL;
-			tmp_head->prev = NULL;
-			free(tmp);
-			*hlist_head = tmp_head;
-			return 1;
-		}
-		if ((tmp->pointer.manager_addr == manager_addr) && (tmp==tmp_tail)){
-			tmp_tail = tmp->prev;
-			tmp->prev = NULL;
-			tmp_tail->next = NULL;
-			free(tmp);
-			*hlist_tail = tmp_tail;
-			return 1;
-		}
-		if (tmp->pointer.manager_addr == manager_addr){
-			tmp->prev->next = tmp->next;
-			tmp->next->prev = tmp->prev;
-			tmp->prev = NULL;
-			tmp->next = NULL;
-			free(tmp);
-			return 2;
-		}		
-		tmp = tmp->next;
 	}
-	
-	
+	if (tmp == *hlist_head) {
+		*hlist_head = tmp->next;
+		tmp->next->prev = NULL;
+		free(tmp);
+		return 1;
+	}
+	if (tmp == *hlist_tail) {
+		*hlist_tail = tmp->prev;
+		tmp->prev->next = NULL;
+		free(tmp);
+		return 1;
+	}
+	tmp->prev->next = tmp->next;
+	tmp->next->prev = tmp->prev;
+	free(tmp);
+	return 2;
 }
 
 /*
@@ -696,53 +708,45 @@ int remove_heap_variables(PointerList **hlist_head,
  * Remove item contain manager_addr or addr in heaplist
  * ---------------------------------------------------------------------
  */
-int remove_exists_item(PointerList **hlist_head, 
-		PointerList **hlist_tail, 
-		Pointer pt){	
-	if (*hlist_head == NULL) return 0;
-	PointerList *tmp_head;
-	PointerList *tmp_tail;
-	PointerList *tmp;
-	
-	tmp_head = * hlist_head;
-	tmp_tail = * hlist_tail;
-	
-	while (tmp_head != *hlist_tail){
-		if ((tmp_head->pointer.manager_addr == pt.manager_addr) ||
-				((tmp_head->pointer.addr >=pt.addr) 
-						&& (tmp_head->pointer.addr <= pt.addr + pt.len) ) ||
-				((tmp_head->pointer.addr+tmp_head->pointer.len >= pt.addr) 
-						&& (tmp_head->pointer.addr+tmp_head->pointer.len <= pt.addr +pt.len ) )
-			){
-			tmp = tmp_head ;
-			if (tmp_head = *hlist_head){					
-				tmp_head = tmp_head->next;
-				*hlist_head = tmp_head;							
-			}else {
-				tmp_head->prev->next = tmp->next;
-				tmp_head->next->prev = tmp->prev ;
-				tmp_head = tmp->next ;	
-			}
-			free(tmp);			
-		} else{
-		
-			tmp_head = tmp_head->next;
-		}
-	}
-	
-	// Last node
-	if ((tmp_head->pointer.manager_addr == pt.manager_addr) ||
-				((tmp_head->pointer.addr >=pt.addr) 
-						&& (tmp_head->pointer.addr <= pt.addr + pt.len) ) ||
-				((tmp_head->pointer.addr+tmp_head->pointer.len >= pt.addr) 
-						&& (tmp_head->pointer.addr+tmp_head->pointer.len <= pt.addr +pt.len ) )
-			){
-	
+/* Helper: unlink a PointerList node from linked list and hash, then free */
+static void remove_pointer_node(PointerList **hlist_head, PointerList **hlist_tail, PointerList *node) {
+	HASH_DELETE(hh_mgr, __heap_hash_mgr, node);
+	if (node == *hlist_head && node == *hlist_tail) {
 		*hlist_head = NULL;
 		*hlist_tail = NULL;
-		free (tmp_head) ;
+	} else if (node == *hlist_head) {
+		*hlist_head = node->next;
+		node->next->prev = NULL;
+	} else if (node == *hlist_tail) {
+		*hlist_tail = node->prev;
+		node->prev->next = NULL;
+	} else {
+		node->prev->next = node->next;
+		node->next->prev = node->prev;
 	}
-	return 1 ;	
+	free(node);
+}
+
+int remove_exists_item(PointerList **hlist_head,
+		PointerList **hlist_tail,
+		Pointer pt){
+	if (*hlist_head == NULL) return 0;
+
+	PointerList *cur, *next_node;
+	cur = *hlist_head;
+	while (cur != NULL) {
+		next_node = cur->next;
+		if ((cur->pointer.manager_addr == pt.manager_addr) ||
+				((cur->pointer.addr >= pt.addr)
+						&& (cur->pointer.addr <= pt.addr + pt.len) ) ||
+				((cur->pointer.addr + cur->pointer.len >= pt.addr)
+						&& (cur->pointer.addr + cur->pointer.len <= pt.addr + pt.len) )
+			){
+			remove_pointer_node(hlist_head, hlist_tail, cur);
+		}
+		cur = next_node;
+	}
+	return 1 ;
 }
 
 
@@ -800,19 +804,23 @@ int add_parallel_region(VarList **vlist_head, VarList **vlist_tail, unsigned cha
 
 	//Copy items and assigned new level
 	while(item != NULL && item->var.level == (level -1)){
-		copy_item = malloc(sizeof(VarList));		
+		copy_item = malloc(sizeof(VarList));
+		memset(copy_item, 0, sizeof(VarList));
 		copy_item->var.addr = item->var.addr;
 		copy_item->var.size = item->var.size;
 		copy_item->var.n = item->var.n;
 		copy_item->var.dtype = item->var.dtype;
-		copy_item->var.pro = item->var.pro; 
-		copy_item->var.level = level; //New level	
-		copy_item->var.ispointer = item->var.ispointer;		
+		copy_item->var.pro = item->var.pro;
+		copy_item->var.level = level; //New level
+		copy_item->var.ispointer = item->var.ispointer;
+		copy_item->hash_key.addr = item->var.addr;
+		copy_item->hash_key.level = level;
 		copy_item->next = NULL;
 		copy_item->prev = vl_tail_level;
 		if (vl_tail_level != NULL)
 			vl_tail_level->next = copy_item;
 		vl_tail_level = copy_item;
+		HASH_ADD(hh, __var_list_hash, hash_key, sizeof(VarHashKey), copy_item);
 		item = item->next;
 	}
 	*vlist_tail = vl_tail_level;
@@ -835,17 +843,20 @@ int remove_parellel_region(unsigned char level){
  * ---------------------------------------------------------------------
  */
 VarList * find_variable_by_addr(VarList *vlist, long addr, char level){
-	VarList *vl = NULL;
-	vl = vlist;	
-	if (vl == NULL) return vl;
-	while (vl != NULL) {
-		if ((vl->var.addr == addr) && (vl->var.level == level ) ){				 
-			break;
-		}
-		//printf("Checking: Ox%lx is in VarList: [Ox%lx - Ox%lx) - Level: %d \n" , addr, vl->var.addr, vl->var.addr + (vl->var.n * vl->var.size), vl->var.level);
-		vl = vl->next;		
+	/* O(1) lookup via hash table */
+	VarHashKey key;
+	memset(&key, 0, sizeof(key));
+	key.addr = (unsigned long)addr;
+	key.level = (unsigned char)level;
+
+	/* Determine which hash table to search based on the list head */
+	VarList *result = NULL;
+	if (vlist == __active_variable_head) {
+		HASH_FIND(hh, __active_var_hash, &key, sizeof(VarHashKey), result);
+	} else {
+		HASH_FIND(hh, __var_list_hash, &key, sizeof(VarHashKey), result);
 	}
-	return vl;	
+	return result;
 }
 
 /*
@@ -2214,14 +2225,15 @@ void set_default_none(VarList *vlist_tail, char level){
  * ---------------------------------------------------------------------
  */
 void set_data_attribute(VarList *vlist_tail, long addr, char pro, char level){
-	VarList *vtail;
-	vtail = vlist_tail;
-	while ((vtail != NULL ) && (vtail->var.level == level) ){
-		if (vtail->var.addr == addr) {
-			vtail->var.pro = pro;
-			break;		
-		}
-		vtail = vtail->prev;
+	/* O(1) lookup via hash table */
+	VarHashKey key;
+	memset(&key, 0, sizeof(key));
+	key.addr = (unsigned long)addr;
+	key.level = (unsigned char)level;
+	VarList *found = NULL;
+	HASH_FIND(hh, __var_list_hash, &key, sizeof(VarHashKey), found);
+	if (found != NULL) {
+		found->var.pro = pro;
 	}
 }
 
@@ -2231,12 +2243,13 @@ void set_data_attribute(VarList *vlist_tail, long addr, char pro, char level){
  * ---------------------------------------------------------------------
  */
 void set_threadprivate(VarList *vlist_head, long addr){
+	/* Search across all levels in the hash — threadprivate applies globally */
 	VarList *vhead;
 	vhead = vlist_head;
 	while (vhead != NULL ){
 		if (vhead->var.addr == addr) {
 			vhead->var.pro = CAPE_PRIVATE;
-			break;		
+			break;
 		}
 		vhead = vhead->next;
 	}

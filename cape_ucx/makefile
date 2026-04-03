@@ -95,13 +95,16 @@ cape_critical2:
 cape_sections_nowait:
 	$(COMPILE) $(C_FOLDER)/apps/cape_sections_nowait.c -o $(EXE_FOLDER)/cape_sections_nowait $(LDFLAGS)
 
+cape_nested_parallel_sections:
+	$(COMPILE) $(C_FOLDER)/apps/cape_nested_parallel_sections.c -o $(EXE_FOLDER)/cape_nested_parallel_sections $(LDFLAGS)
+
 cape_test_heap:
 	$(COMPILE) $(C_FOLDER)/apps/cape_test_heap.c -o $(EXE_FOLDER)/cape_test_heap $(LDFLAGS)
 
 apps: cape_mamult cape_mamult2d cape_pi cape_prime cape_prime_number \
       cape_reduction cape_for cape_for_nowait cape_parallel_for \
       cape_vector1 cape_vector2 cape_critical cape_critical2 \
-      cape_sections_nowait cape_test_heap
+      cape_sections_nowait cape_nested_parallel_sections cape_test_heap
  
 # ══════════════════════════════════════════════════════════════════════════════
 # DICKPT version (cape_incr.c + dickpt apps)
@@ -138,4 +141,4 @@ cleanall:
         cape_mamult cape_mamult2d cape_pi cape_prime cape_prime_number \
         cape_reduction cape_for cape_for_nowait cape_parallel_for \
         cape_vector1 cape_vector2 cape_critical cape_critical2 \
-        cape_sections_nowait cape_test_heap
+        cape_sections_nowait cape_nested_parallel_sections cape_test_heap

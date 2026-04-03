@@ -2,6 +2,7 @@
 #define CAPE_H
 
 	#include <signal.h>
+	#include "uthash.h"
 	/*Status of page */
 	#define PAGE_WRITE_PROTECTED 1
 	#define PAGE_WRITABLE 2
@@ -82,20 +83,30 @@
 		unsigned char ispointer;
 	} Var;	
 	
+	/* Composite hash key for VarList: (addr, level) */
+	typedef struct VarHashKey{
+		unsigned long addr;
+		unsigned char level;
+	} VarHashKey;
+
 	typedef struct VarList{
 		struct Var var;
 		struct VarList *next, *prev ;
-	} VarList;	
-	
+		VarHashKey hash_key;       /* key for hash table lookup */
+		UT_hash_handle hh;         /* uthash handle */
+	} VarList;
+
 	typedef struct Pointer{
 		unsigned long manager_addr;
 		unsigned long addr;
 		unsigned int len;
-	} Pointer;	
-	
+	} Pointer;
+
 	typedef struct PointerList{
 		struct Pointer pointer;
 		struct PointerList *next, *prev ;
+		UT_hash_handle hh_mgr;     /* hash by manager_addr */
+		UT_hash_handle hh_addr;    /* hash by addr */
 	} PointerList;
 	
 	
