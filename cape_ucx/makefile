@@ -50,7 +50,7 @@ LDFLAGS  = -L$(UCX_LIB) -lucp -lucs $(PMIX_LINK) $(COMP_LINK) -Wl,-rpath,$(UCX_L
 COMPILE  = $(CC) -w $(CFLAGS) $(C_FOLDER)/monitor/cape.c
 
 # ── Default target ────────────────────────────────────────────────────────────
-all: cape_mamult cape_reduction
+all: cape_mamult cape_reduction cape_nested_parallel_sections 
 
 # ── Per-application targets (timestamp) ──────────────────────────────────────
 cape_mamult:
