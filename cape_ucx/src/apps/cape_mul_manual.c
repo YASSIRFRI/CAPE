@@ -11,6 +11,7 @@ struct mul_state {
 	unsigned long b[N][N];
 	int i;
 	int j;
+	int k;
 };
 
 /* -----------------------------------------------------------
@@ -21,6 +22,7 @@ int main(int argc,char*argv[])
 {
 	struct mul_state *state;
 	unsigned long node;
+	unsigned long sum;
 
 	state = dickpt_map_region(sizeof(*state));
 	if (state == NULL) {
@@ -45,10 +47,15 @@ int main(int argc,char*argv[])
 	if (node == 0)
 		dickpt_start_ckpt();
 
-	for (state->i = 0; state->i < N; state->i++)
-	{
-		if (node == 0)
-		{
+	for (state->i = 0; state->i < N; state->i++) {
+		for (state->j = 0; state->j < N; state->j++) {
+			sum = 0;
+			for (state->k = 0; state->k < N; state->k++)
+				sum += state->a[state->i][state->k] * state->b[state->k][state->j];
+			state->c[state->i][state->j] = sum;
+		}
+
+		if (node == 0) {
 			dickpt_generate_ckpt();
 		}
 	}
