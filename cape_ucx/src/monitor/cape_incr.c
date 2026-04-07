@@ -846,15 +846,10 @@ static void cape_ucx_finalize(void)
 
 #ifdef USE_PMIX
     PMIx_Finalize(NULL, 0);
-#else
-    const char *jobid    = cape_ucx_bootstrap_id();
-    const char *sharedir = cape_ucx_bootstrap_dir();
-    char path[512];
-    snprintf(path, sizeof(path), "%s/cape_ucx_%s_addr_%ld", sharedir, jobid, node);
-    unlink(path);
-    snprintf(path, sizeof(path), "%s/cape_ucx_%s_rdy_%ld",  sharedir, jobid, node);
-    unlink(path);
 #endif
+    /* Non-PMIx bootstrap files are cleaned up by the launch script
+       (rm -rf bootstrap_dir).  Do NOT unlink them here — other
+       monitors may still be reading them during their exchange. */
 }
 
 /* ---------------------------------------------------------------------------
