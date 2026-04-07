@@ -975,17 +975,29 @@ int main(int argc, char * argv[]){
 	ptrace(PTRACE_SYSCALL, child_id, NULL, NULL ) ;						
 	
 	//Monitor CAPE program
+	printf("Monitor %ld: entering main loop, child_id=%d\n", node, child_id);
+	fflush(stdout);
 	while(1) {
 		if (cape_wait_for_child_event(child_id, &status) == -1) {
 			perror("waitpid");
 			break;
+		}
+		if(WIFSTOPPED(status) && WSTOPSIG(status) != SIGTRAP) {
+			printf("Monitor %ld: child stopped by signal %d (not SIGTRAP)\n", node, WSTOPSIG(status));
+			fflush(stdout);
 		}
 		if(WIFEXITED(status)) {
 			printf("Monitor %ld: child exited with code %d\n", node, WEXITSTATUS(status));
 			fflush(stdout);
 			break;
 		}
-		if (( sys_num = ptrace(PTRACE_PEEKUSER, child_id, 8 * ORIG_RAX, NULL) ) == -1 ) { //catch a signal
+		if(WIFSIGNALED(status)) {
+			printf("Monitor %ld: child killed by signal %d\n", node, WTERMSIG(status));
+			fflush(stdout);
+			break;
+		}
+		sys_num = ptrace(PTRACE_PEEKUSER, child_id, 8 * ORIG_RAX, NULL);
+		if ( sys_num == -1 ) { //catch a signal
 			if(ptrace(PTRACE_GETSIGINFO, child_id, NULL, &child_siginfo)){
 				perror("PTRACE_GETSIGINFO");
 				break;
