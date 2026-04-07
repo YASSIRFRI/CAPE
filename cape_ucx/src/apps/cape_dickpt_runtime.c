@@ -151,6 +151,8 @@ static int cape_create_userfaultfd(void)
 
 	uffd = (int)syscall(SYS_userfaultfd, O_CLOEXEC | O_NONBLOCK | UFFD_USER_MODE_ONLY);
 	if (uffd < 0)
+		uffd = (int)syscall(SYS_userfaultfd, O_CLOEXEC | O_NONBLOCK);
+	if (uffd < 0)
 		cape_die_errno("userfaultfd");
 
 	memset(&api, 0, sizeof(api));
