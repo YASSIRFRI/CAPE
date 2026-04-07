@@ -813,19 +813,35 @@ static void cape_ucx_finalize(void)
     close_param.op_attr_mask = UCP_OP_ATTR_FIELD_FLAGS;
     close_param.flags        = UCP_EP_CLOSE_FLAG_FORCE;
     for (int i = 0; i < num_nodes; i++) {
+        printf("Monitor %ld: closing ep %d\n", node, i);
+        fflush(stdout);
         void *req = ucp_ep_close_nbx(ucp_endpoints[i], &close_param);
-        if (UCS_PTR_IS_ERR(req))
+        if (UCS_PTR_IS_ERR(req)) {
+            printf("Monitor %ld: ep %d close error\n", node, i);
+            fflush(stdout);
             continue;
-        if (req == NULL)
+        }
+        if (req == NULL) {
+            printf("Monitor %ld: ep %d closed immediately\n", node, i);
+            fflush(stdout);
             continue;
+        }
+        printf("Monitor %ld: ep %d waiting for close\n", node, i);
+        fflush(stdout);
         while (ucp_request_check_status(req) == UCS_INPROGRESS)
             ucp_worker_progress(ucp_worker);
         ucp_request_free(req);
+        printf("Monitor %ld: ep %d closed\n", node, i);
+        fflush(stdout);
     }
     free(ucp_endpoints);
     ucp_endpoints = NULL;
 
+    printf("Monitor %ld: destroying worker\n", node);
+    fflush(stdout);
     ucp_worker_destroy(ucp_worker);
+    printf("Monitor %ld: cleaning up context\n", node);
+    fflush(stdout);
     ucp_cleanup(ucp_context);
 
 #ifdef USE_PMIX
@@ -964,7 +980,11 @@ int main(int argc, char * argv[]){
 			perror("waitpid");
 			break;
 		}
-		if(WIFEXITED(status)) break;
+		if(WIFEXITED(status)) {
+			printf("Monitor %ld: child exited with code %d\n", node, WEXITSTATUS(status));
+			fflush(stdout);
+			break;
+		}
 		if (( sys_num = ptrace(PTRACE_PEEKUSER, child_id, 8 * ORIG_RAX, NULL) ) == -1 ) { //catch a signal
 			if(ptrace(PTRACE_GETSIGINFO, child_id, NULL, &child_siginfo)){
 				perror("PTRACE_GETSIGINFO");
@@ -1132,11 +1152,15 @@ int main(int argc, char * argv[]){
 		}
 		ptrace(PTRACE_SYSCALL, child_id, NULL, NULL ) ;
 	}
+	printf("Monitor %ld: exited main loop, status=0x%x\n", node, status);
+	fflush(stdout);
 	if (userfault_fd >= 0)
 		close(userfault_fd);
 	if (control_fd >= 0)
 		close(control_fd);
 	free(tracked_ranges);
+	printf("Monitor %ld: calling cape_ucx_finalize\n", node);
+	fflush(stdout);
 	cape_ucx_finalize();
 	printf("Monitor %ld: parent finish!\n", node);
 	return 0;
