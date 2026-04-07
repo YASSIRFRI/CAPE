@@ -810,6 +810,8 @@ static void cape_ucx_finalize(void)
 {
     ucp_request_param_t close_param;
     memset(&close_param, 0, sizeof(close_param));
+    close_param.op_attr_mask = UCP_OP_ATTR_FIELD_FLAGS;
+    close_param.flags        = UCP_EP_CLOSE_FLAG_FORCE;
     for (int i = 0; i < num_nodes; i++) {
         void *req = ucp_ep_close_nbx(ucp_endpoints[i], &close_param);
         if (UCS_PTR_IS_ERR(req))
