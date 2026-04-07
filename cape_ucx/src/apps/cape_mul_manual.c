@@ -3,7 +3,7 @@
 #include <string.h>
 #include "../../include/cape_dickpt.h"
 
-#define  N  10
+#define  N  8
 
 struct mul_state {
 	unsigned long c[N][N];
