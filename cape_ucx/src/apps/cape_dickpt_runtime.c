@@ -18,6 +18,10 @@
 
 #include "../../include/cape_dickpt_uffd.h"
 
+#ifndef UFFD_USER_MODE_ONLY
+#define UFFD_USER_MODE_ONLY 1
+#endif
+
 static struct cape_dickpt_range cape_ranges[CAPE_DICKPT_MAX_RANGES];
 static size_t cape_range_count;
 static int cape_tracking_ready;
