@@ -813,35 +813,19 @@ static void cape_ucx_finalize(void)
     close_param.op_attr_mask = UCP_OP_ATTR_FIELD_FLAGS;
     close_param.flags        = UCP_EP_CLOSE_FLAG_FORCE;
     for (int i = 0; i < num_nodes; i++) {
-        printf("Monitor %ld: closing ep %d\n", node, i);
-        fflush(stdout);
         void *req = ucp_ep_close_nbx(ucp_endpoints[i], &close_param);
-        if (UCS_PTR_IS_ERR(req)) {
-            printf("Monitor %ld: ep %d close error\n", node, i);
-            fflush(stdout);
+        if (UCS_PTR_IS_ERR(req))
             continue;
-        }
-        if (req == NULL) {
-            printf("Monitor %ld: ep %d closed immediately\n", node, i);
-            fflush(stdout);
+        if (req == NULL)
             continue;
-        }
-        printf("Monitor %ld: ep %d waiting for close\n", node, i);
-        fflush(stdout);
         while (ucp_request_check_status(req) == UCS_INPROGRESS)
             ucp_worker_progress(ucp_worker);
         ucp_request_free(req);
-        printf("Monitor %ld: ep %d closed\n", node, i);
-        fflush(stdout);
     }
     free(ucp_endpoints);
     ucp_endpoints = NULL;
 
-    printf("Monitor %ld: destroying worker\n", node);
-    fflush(stdout);
     ucp_worker_destroy(ucp_worker);
-    printf("Monitor %ld: cleaning up context\n", node);
-    fflush(stdout);
     ucp_cleanup(ucp_context);
 
 #ifdef USE_PMIX
@@ -967,41 +951,23 @@ int main(int argc, char * argv[]){
 		}//end switch
 	}//end for
 
-	ptrace(PTRACE_SYSCALL, child_id, NULL, NULL ) ;						
-	
+	ptrace(PTRACE_CONT, child_id, NULL, NULL ) ;
+
 	//Monitor CAPE program
-	printf("Monitor %ld: entering main loop, child_id=%d\n", node, child_id);
-	fflush(stdout);
 	while(1) {
 		if (cape_wait_for_child_event(child_id, &status) == -1) {
 			perror("waitpid");
 			break;
 		}
-		if(WIFSTOPPED(status) && WSTOPSIG(status) != SIGTRAP) {
-			printf("Monitor %ld: child stopped by signal %d (not SIGTRAP)\n", node, WSTOPSIG(status));
-			fflush(stdout);
-		}
 		if(WIFEXITED(status)) {
-			printf("Monitor %ld: child exited with code %d\n", node, WEXITSTATUS(status));
-			fflush(stdout);
 			break;
 		}
 		if(WIFSIGNALED(status)) {
-			printf("Monitor %ld: child killed by signal %d\n", node, WTERMSIG(status));
-			fflush(stdout);
 			break;
 		}
-		sys_num = ptrace(PTRACE_PEEKUSER, child_id, 8 * ORIG_RAX, NULL);
-		if ( sys_num == -1 ) { //catch a signal
-			if(ptrace(PTRACE_GETSIGINFO, child_id, NULL, &child_siginfo)){
-				perror("PTRACE_GETSIGINFO");
-				break;
-			}
-			if(child_siginfo.si_signo == SIGTRAP){  //SIGTRAP: this is Debuging signal 
+		if(WIFSTOPPED(status) && WSTOPSIG(status) == SIGTRAP) {
 				int dx = 0;
 				ptrace(PTRACE_GETREGS, child_id, NULL, &regs);
-				dprintf("Monitor %ld: Signal SIGTRAP caught, edx = 0x%lx, child-id = %d \n", 
-					node, regs.rdx, child_id);		
 				dx = regs.rdx;
 				switch(dx){
 					case S_LOCK_PROCESS_MEMORY:  //Lock process 		
@@ -1138,38 +1104,25 @@ int main(int argc, char * argv[]){
 						exit(1);
 				}
 			}//SIGTRAP
-			
-			if(child_siginfo.si_signo == SIGSEGV){
+		} else if(WIFSTOPPED(status)) {
+			int sig = WSTOPSIG(status);
+			if (sig == SIGSEGV) {
 				fprintf(stderr,
-					"Monitor %ld: child received SIGSEGV at 0x%lx\n",
-					node, (unsigned long)child_siginfo.si_addr);
+					"Monitor %ld: child received SIGSEGV\n", node);
 				kill(child_id, SIGKILL);
 				return 1;
-			}//SIGSEGV
-		}
-		else{  //a system call
-			dprintf(" \nMonitor %ld: System call number %d \n", node, sys_num ) ;
-			if(sys_num == 252){ //child finish
-				printf("\nMonitor %ld: child finish\n", node);
-				break;
 			}
-		}			
-		if(sys_num == 45  && process_state == 3){				
-				dprintf("Monitor %ld: Signal 45, process_state = %d\n", node, process_state);
+			ptrace(PTRACE_CONT, child_id, NULL, (void *)(long)sig);
+			continue;
 		}
-		ptrace(PTRACE_SYSCALL, child_id, NULL, NULL ) ;
+		ptrace(PTRACE_CONT, child_id, NULL, NULL);
 	}
-	printf("Monitor %ld: exited main loop, status=0x%x\n", node, status);
-	fflush(stdout);
 	if (userfault_fd >= 0)
 		close(userfault_fd);
 	if (control_fd >= 0)
 		close(control_fd);
 	free(tracked_ranges);
-	printf("Monitor %ld: calling cape_ucx_finalize\n", node);
-	fflush(stdout);
 	cape_ucx_finalize();
-	printf("Monitor %ld: parent finish!\n", node);
 	return 0;
 }
 
@@ -1878,12 +1831,12 @@ int require_generate_checkpoint(){
 											EXIT_CHECKPOINT,
 											timespan);
 	
-	printf("Monitor %ld - generated %zu bytes checkpoint \n", node, final_ckpt_size);
+
 	
 	clear_list(list_head);
 	list_head = NULL;	
 	
-	print_data_in_ckpt_list(list_ckpt_head);
+
 	
 	if(rc!=0) printf("Monitor %ld: Error on requiring generate checkpoint\n", node);	
 	return rc;
@@ -2235,7 +2188,7 @@ int inject_checkpoint(FILE *stream, size_t *file_size, struct user_regs_struct *
 				fseek(stream, file_pointer, SEEK_SET);				
 				current_ckpt_struct = SD;	
 				
-				printf("\nInject: Node %ld: addr = %lx - current_ckpt_struct = SD", node, addr);
+
 				break;
 			case EP:
 				fread(&addr, sizeof(unsigned long), 1, stream);
@@ -2307,7 +2260,7 @@ int inject_checkpoint(FILE *stream, size_t *file_size, struct user_regs_struct *
 // 	final_list_ckpt_head = NULL;
 // 	final_list_ckpt_tail = NULL;
   	
-  	printf("\nNode %ld: After Synchronized: TOTAL CHECKPOINT SIZE = %zu", node, total_ckpt_size);
+
   	
   	//Inject checkpoint	
 	rc = inject_checkpoint(total_ckpt_stream, &total_ckpt_size, &save_regs); 	
@@ -2516,8 +2469,8 @@ int require_inject_workshare_checkpoint(){
  	
  	rc = merge_checkpoint();
  	
- 	printf("Monitor %ld: After Merged checkpoint: final_ckpt = %zu - after_ckpt = %zu\n",
- 		node, final_ckpt_size, after_ckpt_size);
+
+
  	
  	if (rc!=0) dprintf ("Monitor: Error on locking the process image\n");
  	return rc;
@@ -2537,7 +2490,7 @@ int require_inject_workshare_checkpoint(){
 	pt->addr = plist->addr ;
 	memcpy(pt->data, plist->data, CAPE_WORD);
 	
-	printf("\nNode %ld: addr = %lx will be add into list_final_ckpt ", node, pt->addr );
+
 	
 	if(final_list_ckpt_head == NULL){
 		final_list_ckpt_head = pt;
@@ -2582,7 +2535,7 @@ int require_inject_workshare_checkpoint(){
 				memcpy(&f2,pt->data, CAPE_WORD);
 				f = f1 + f2;
 				memcpy(tmp->data, &f, CAPE_WORD);											
-printf("\n ---------- final_list_ckpt: Node %ld - addr = %lx  - Sum = %f + %f = %f", node, tmp->addr, f1, f2, f); 
+
 				return 0;
 			}
 			if((prop->datatype == CAPE_INT) || (prop->properties = CAPE_LONG))
@@ -2786,7 +2739,7 @@ printf("\n ---------- final_list_ckpt: Node %ld - addr = %lx  - Sum = %f + %f = 
 	
 		return 1; //error
 	}//end if tmp->addr = pt->addr	
-printf("\n EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEee");
+
 	pt->next = tmp;
 	pt->prev = tmp->prev;
 	tmp->prev->next = pt;
@@ -3022,7 +2975,7 @@ int merge_external_checkpoint(FILE *src_ckpt_stream, 		\
  	
  	total_ckpt_stream = open_binary_memstream(&total_ckpt, &total_ckpt_size); 
  	
- 	printf("\nMERGE: Node %ld: total_ckpt = %zu; tmp_ckpt = %zu ; final_ckpt = %zu",node, total_ckpt_size, tmp_size, src_ckpt_size);
+
  	 	
  	if (t1 >= t2)
  	{
@@ -3309,7 +3262,7 @@ int ring_allreduce(){
 	}
 	free(recv_buffer);
 
-	printf("\nMonitor %ld: after synchronized - total_ckpt_size = %zu\n", node, total_ckpt_size);
+
 
     return rc;
 }
@@ -3343,7 +3296,7 @@ int hypercube_allreduce(){
 		uint32_t token_data = TAG_ALLREDUCE_BASE + (i * 2) + 1;
 
 		partner = node ^ (1 << i);
-		printf("\nNode %ld - step %d- Total ckpt size = %zu - Send %d bytes to %d", node,i, total_ckpt_size,  send_msg_size, partner);
+
 
 
 		//send size of message
@@ -3351,7 +3304,7 @@ int hypercube_allreduce(){
 						  &recv_msg_size, sizeof(int), partner,
 						  token_size);
 
-		printf("\nNode %ld - step %d - Total ckpt size = %zu - Receive %d bytes from %d", node,i, total_ckpt_size,  recv_msg_size, partner);
+
 
 		recv_msg = malloc(sizeof(char) * recv_msg_size) ;
 
@@ -3388,7 +3341,7 @@ int hypercube_allreduce(){
 int require_allreduce_checkpoint(){
 	int rc = 0;
 	//rc = prepare_allreduce_checkpoint();	
-	printf("\nPREPARE ALL REDUCE: Node %ld: TOTAL CHECKPOINT SIZE = %zu", node, total_ckpt_size);
+
 	final_list_ckpt_head = list_ckpt_head;
 	final_list_ckpt_tail = list_ckpt_tail;
 //	print_data_in_ckpt_list(final_list_ckpt_head);
@@ -3397,7 +3350,7 @@ int require_allreduce_checkpoint(){
 	rc=  merge_external_checkpoint(final_ckpt_stream, final_ckpt, final_ckpt_size);		
 	
 //	print_data_in_ckpt_list(list_ckpt_head);
-	printf("\nBEFORE JOIN: Node %ld: TOTAL CHECKPOINT SIZE = %zu", node, total_ckpt_size);
+
 	
 	join_checkpoint(TOTAL_CHECKPOINT, final_list_ckpt_head);
 	
@@ -3408,7 +3361,7 @@ int require_allreduce_checkpoint(){
 	
 	
 	
-	printf("\nAFTER JOIN: Node %ld: TOTAL CHECKPOINT SIZE = %zu", node, total_ckpt_size);
+
 	
 	
 		
