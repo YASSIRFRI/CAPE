@@ -1104,7 +1104,7 @@ int main(int argc, char * argv[]){
 						exit(1);
 				}
 			}//SIGTRAP
-		} else if(WIFSTOPPED(status)) {
+		 else if(WIFSTOPPED(status)) {
 			int sig = WSTOPSIG(status);
 			if (sig == SIGSEGV) {
 				fprintf(stderr,
