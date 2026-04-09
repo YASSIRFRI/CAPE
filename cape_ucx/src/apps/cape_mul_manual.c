@@ -1,28 +1,48 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/time.h>
 #include "../../include/cape_dickpt.h"
 
-#define  N  8
+#define DEFAULT_N 100
+#define MAX_N 3200
 
 struct mul_state {
-	unsigned long c[N][N];
-	unsigned long a[N][N];
-	unsigned long b[N][N];
+	int c[MAX_N][MAX_N];
+	int a[MAX_N][MAX_N];
+	int b[MAX_N][MAX_N];
 	int i;
 	int j;
 	int k;
 };
 
-/* -----------------------------------------------------------
- * Program
- * -----------------------------------------------------------
- */
-int main(int argc,char*argv[])
+static unsigned long get_ms_of_day(void)
 {
+	struct timeval tv;
+	gettimeofday(&tv, NULL);
+	return (unsigned long)(tv.tv_sec * 1000UL + tv.tv_usec / 1000UL);
+}
+
+int main(int argc, char *argv[])
+{
+	int n = DEFAULT_N;
+	int reps = 1;
+	int rep;
+	unsigned long t0, t1;
 	struct mul_state *state;
 	unsigned long node;
-	unsigned long sum;
+	int sum;
+
+	if (argc > 1)
+		n = atoi(argv[1]);
+	if (argc > 2)
+		reps = atoi(argv[2]);
+	if (n <= 0 || n > MAX_N) {
+		fprintf(stderr, "ERROR: n must be in [1, %d], got %d\n", MAX_N, n);
+		return 1;
+	}
+	if (reps <= 0)
+		reps = 1;
 
 	state = dickpt_map_region(sizeof(*state));
 	if (state == NULL) {
@@ -32,45 +52,51 @@ int main(int argc,char*argv[])
 	memset(state, 0, sizeof(*state));
 
 	node = dickpt_read_node();
-	dickpt_send_num_jobs(N);
+	dickpt_send_num_jobs(n);
 
-	//load data
-	for (state->i = 0; state->i < N; state->i++) {
-		for (state->j = 0; state->j < N; state->j++) {
+	/* Initialize matrices */
+	srand(12345);
+	for (state->i = 0; state->i < n; state->i++) {
+		for (state->j = 0; state->j < n; state->j++) {
+			state->a[state->i][state->j] = rand() % 100;
+			state->b[state->i][state->j] = rand() % 100;
 			state->c[state->i][state->j] = 0;
-			state->a[state->i][state->j] = 1;
-			state->b[state->i][state->j] = 1;
 		}
 	}
 
+	for (rep = 1; rep <= reps; rep++) {
+		/* Reset c */
+		for (state->i = 0; state->i < n; state->i++)
+			for (state->j = 0; state->j < n; state->j++)
+				state->c[state->i][state->j] = 0;
 
-	if (node == 0)
-		dickpt_start_ckpt();
+		t0 = get_ms_of_day();
 
-	for (state->i = 0; state->i < N; state->i++) {
-		for (state->j = 0; state->j < N; state->j++) {
-			sum = 0;
-			for (state->k = 0; state->k < N; state->k++)
-				sum += state->a[state->i][state->k] * state->b[state->k][state->j];
-			state->c[state->i][state->j] = sum;
+		if (node == 0)
+			dickpt_start_ckpt();
+
+		for (state->i = 0; state->i < n; state->i++) {
+			for (state->j = 0; state->j < n; state->j++) {
+				sum = 0;
+				for (state->k = 0; state->k < n; state->k++)
+					sum += state->a[state->i][state->k]
+					     * state->b[state->k][state->j];
+				state->c[state->i][state->j] = sum;
+			}
+
+			if (node == 0)
+				dickpt_generate_ckpt();
 		}
 
 		if (node == 0) {
 			dickpt_generate_ckpt();
+			dickpt_stop_ckpt();
 		}
-	}
 
-	if (node == 0)
-	{
-		dickpt_generate_ckpt();
-		dickpt_stop_ckpt();
-	}
+		t1 = get_ms_of_day();
 
-	//Print result
-	for (state->i = 0; state->i < N; state->i++) {
-		for (state->j = 0; state->j < N; state->j++)
-			printf("%ld\t", state->c[state->i][state->j]);
-		printf("\n");
+		if (node == 0)
+			printf("RESULT n=%d rep=%d ms=%lu\n", n, rep, t1 - t0);
 	}
 
 	return 0;

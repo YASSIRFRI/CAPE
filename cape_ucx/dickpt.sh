@@ -33,7 +33,9 @@ if ! mkdir -p "${BUILD_DIR}/bin" "${BUILD_DIR}/obj" "${BUILD_DIR}/lib" 2>/dev/nu
     mkdir -p "${BUILD_DIR}/bin" "${BUILD_DIR}/obj" "${BUILD_DIR}/lib"
 fi
 
-REPS="${REPS:-1}"
+N_VALUES_STR="${N_VALUES_STR:-3000}"
+REPS="${REPS:-5}"
+read -r -a N_VALUES <<< "${N_VALUES_STR}"
 BOOTSTRAP_ROOT="${BOOTSTRAP_ROOT:-${BUILD_DIR}/ucx_bootstrap}"
 mkdir -p "${BOOTSTRAP_ROOT}"
 
@@ -103,23 +105,24 @@ MONITOR="${BUILD_DIR}/bin/cape_dickpt_monitor"
 APP="${BUILD_DIR}/bin/dickpt_mul_manual"
 
 CSV="${RESULTS_DIR}/dickpt_mamult_${JOB_TAG}.csv"
-echo "impl,rep,app_ms,job_id,nodes,ntasks" > "${CSV}"
+echo "impl,n,rep,app_ms,job_id,nodes,ntasks" > "${CSV}"
 
 echo "Benchmarking DICKPT cape_mul_manual"
-echo "Reps: ${REPS}"
+echo "N values: ${N_VALUES[*]}"
+echo "Reps per N: ${REPS}"
 echo "Build dir: ${BUILD_DIR}"
 echo "CSV: ${CSV}"
 echo "MPI launch mode: ${SRUN_MPI_MODE}"
 
-echo "DICKPT now uses standard Linux syscalls (`userfaultfd` + `process_vm_*`) and does not require /dev/chardev90."
+echo "DICKPT now uses standard Linux syscalls (userfaultfd + process_vm_*) and does not require /dev/chardev90."
 
-for rep in $(seq 1 "${REPS}"); do
+for n in "${N_VALUES[@]}"; do
     echo ""
-    echo "=== DICKPT rep=${rep}/${REPS} ==="
+    echo "=== DICKPT n=${n} reps=${REPS} ==="
 
-    run_log="${BUILD_DIR}/run_dickpt_rep${rep}.log"
+    run_log="${BUILD_DIR}/run_dickpt_n${n}.log"
     : > "${run_log}"
-    bootstrap_id="${JOB_TAG}_rep${rep}"
+    bootstrap_id="${JOB_TAG}_n${n}"
     bootstrap_dir="${BOOTSTRAP_ROOT}/${bootstrap_id}"
     rm -rf "${bootstrap_dir}"
     mkdir -p "${bootstrap_dir}"
@@ -131,29 +134,30 @@ for rep in $(seq 1 "${REPS}"); do
          --nodes="${SLURM_JOB_NUM_NODES}" \
          --ntasks="${SLURM_NTASKS}" \
          --ntasks-per-node=1 \
-         "${MONITOR}" "${APP}" 2>&1 | tee -a "${run_log}"
+         "${MONITOR}" "${APP}" "${n}" "${REPS}" 2>&1 | tee -a "${run_log}"
     rc=${PIPESTATUS[0]}
     set -e
     rm -rf "${bootstrap_dir}"
 
     if [ "${rc}" -ne 0 ]; then
-        echo "WARN: dickpt run failed for rep=${rep} (rc=${rc}). See ${run_log}" >&2
+        echo "WARN: dickpt run failed for n=${n} (rc=${rc}). See ${run_log}" >&2
         continue
     fi
 
     awk -v impl="dickpt" \
-        -v rep="${rep}" \
         -v job="${SLURM_JOB_ID}" \
         -v nodes="${SLURM_JOB_NUM_NODES}" \
         -v tasks="${SLURM_NTASKS}" '
         /^RESULT / {
-            ms="";
+            n=""; rep=""; ms="";
             for (i=1; i<=NF; i++) {
                 split($i, kv, "=");
-                if (kv[1] == "ms") ms = kv[2];
+                if (kv[1] == "n")   n = kv[2];
+                if (kv[1] == "rep") rep = kv[2];
+                if (kv[1] == "ms")  ms = kv[2];
             }
-            if (ms != "")
-                printf "%s,%s,%s,%s,%s,%s\n", impl, rep, ms, job, nodes, tasks;
+            if (n != "" && rep != "" && ms != "")
+                printf "%s,%s,%s,%s,%s,%s,%s\n", impl, n, rep, ms, job, nodes, tasks;
         }' "${run_log}" >> "${CSV}"
 done
 

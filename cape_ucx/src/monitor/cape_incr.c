@@ -913,7 +913,7 @@ int main(int argc, char * argv[]){
 	char control_fd_text[32];
 
 	if (argc < 2) {
-		fprintf(stderr, "Usage: %s <app>\n", argv[0]);
+		fprintf(stderr, "Usage: %s <app> [app-args...]\n", argv[0]);
 		return 1;
 	}
 	
@@ -937,7 +937,7 @@ int main(int argc, char * argv[]){
 			snprintf(control_fd_text, sizeof(control_fd_text), "%d", control_pair[1]);
 			setenv(CAPE_DICKPT_ENV_SOCK_FD, control_fd_text, 1);
 			ptrace ( PTRACE_TRACEME, NULL, NULL, NULL ) ; //This process will be traced
-			execl ( exec_file , exec_file , NULL);			
+			execv ( exec_file , &argv[1] );
 			perror (exec_file) ;
 			return 2 ;
 		default :	/* Parent */
