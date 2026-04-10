@@ -30,8 +30,9 @@ int main(int argc, char *argv[])
 	int rep;
 	unsigned long t0, t1;
 	struct mul_state *state;
-	unsigned long node;
+	unsigned long node, num_nodes;
 	int sum;
+	int row_start, row_end;
 
 	if (argc > 1)
 		n = atoi(argv[1]);
@@ -52,7 +53,12 @@ int main(int argc, char *argv[])
 	memset(state, 0, sizeof(*state));
 
 	node = dickpt_read_node();
+	num_nodes = dickpt_read_num_nodes();
 	dickpt_send_num_jobs(n);
+
+	/* Compute row range for this rank */
+	row_start = (n * node) / num_nodes;
+	row_end = (n * (node + 1)) / num_nodes;
 
 	/* Initialize matrices */
 	srand(12345);
@@ -72,10 +78,9 @@ int main(int argc, char *argv[])
 
 		t0 = get_ms_of_day();
 
-		if (node == 0)
-			dickpt_start_ckpt();
+		dickpt_start_ckpt();
 
-		for (state->i = 0; state->i < n; state->i++) {
+		for (state->i = row_start; state->i < row_end; state->i++) {
 			for (state->j = 0; state->j < n; state->j++) {
 				sum = 0;
 				for (state->k = 0; state->k < n; state->k++)
@@ -84,14 +89,11 @@ int main(int argc, char *argv[])
 				state->c[state->i][state->j] = sum;
 			}
 
-			if (node == 0)
-				dickpt_generate_ckpt();
+			dickpt_generate_ckpt();
 		}
 
-		if (node == 0) {
-			dickpt_generate_ckpt();
-			dickpt_stop_ckpt();
-		}
+		dickpt_generate_ckpt();
+		dickpt_stop_ckpt();
 
 		t1 = get_ms_of_day();
 
