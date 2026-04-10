@@ -34,7 +34,7 @@ if ! mkdir -p "${BUILD_DIR}/bin" "${BUILD_DIR}/obj" "${BUILD_DIR}/lib" 2>/dev/nu
 fi
 
 N_VALUES_STR="${N_VALUES_STR:-3000}"
-REPS="${REPS:-5}"
+REPS="${REPS:-1}"
 read -r -a N_VALUES <<< "${N_VALUES_STR}"
 BOOTSTRAP_ROOT="${BOOTSTRAP_ROOT:-${BUILD_DIR}/ucx_bootstrap}"
 mkdir -p "${BOOTSTRAP_ROOT}"

@@ -38,6 +38,7 @@
 #include <errno.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <time.h>
 
 #include "../include/cape_monitor.h"
 #include "../include/cape_dickpt_uffd.h"
@@ -116,6 +117,221 @@ unsigned char *before_buffer;
 #define dprintf(fmt, args...) do { } while (0)
 #endif
 
+typedef struct {
+	uint64_t monitor_start_ns;
+	uint64_t wait_for_child_ns;
+	uint64_t wait_blocking_ns;
+	uint64_t wait_tracked_ns;
+	uint64_t waitpid_ns;
+	uint64_t waitpid_calls;
+	uint64_t wait_loops;
+	uint64_t poll_ns;
+	uint64_t poll_calls;
+	uint64_t poll_timeouts;
+	uint64_t userfault_handle_ns;
+	uint64_t userfault_events;
+	uint64_t dirty_capture_ns;
+	uint64_t dirty_pages_captured;
+	uint64_t writeprotect_ns;
+	uint64_t writeprotect_calls;
+	uint64_t process_vm_read_ns;
+	uint64_t process_vm_read_calls;
+	uint64_t process_vm_read_bytes;
+	uint64_t process_vm_write_ns;
+	uint64_t process_vm_write_calls;
+	uint64_t process_vm_write_bytes;
+	uint64_t generate_ckpt_ns;
+	uint64_t generate_ckpt_calls;
+	uint64_t sigtrap_dispatch_ns;
+	uint64_t sigtrap_count;
+	uint64_t trap_lock_ns;
+	uint64_t trap_unlock_ns;
+	uint64_t trap_generate_ns;
+	uint64_t trap_send_ns;
+	uint64_t trap_receive_ns;
+	uint64_t trap_waitfor_ns;
+	uint64_t trap_broadcast_ns;
+	uint64_t trap_allreduce_ns;
+	uint64_t trap_other_ns;
+	uint64_t trap_lock_count;
+	uint64_t trap_unlock_count;
+	uint64_t trap_generate_count;
+	uint64_t trap_send_count;
+	uint64_t trap_receive_count;
+	uint64_t trap_waitfor_count;
+	uint64_t trap_broadcast_count;
+	uint64_t trap_allreduce_count;
+	uint64_t trap_other_count;
+	uint64_t ucx_wait_ns;
+	uint64_t ucx_progress_ns;
+	uint64_t ucx_progress_calls;
+	uint64_t ucx_send_ns;
+	uint64_t ucx_send_calls;
+	uint64_t ucx_send_bytes;
+	uint64_t ucx_recv_ns;
+	uint64_t ucx_recv_calls;
+	uint64_t ucx_recv_bytes;
+	uint64_t ucx_sendrecv_ns;
+	uint64_t ucx_sendrecv_calls;
+	uint64_t ucx_bootstrap_wait_ns;
+	uint64_t ucx_bootstrap_wait_iters;
+} cape_profile_t;
+
+static cape_profile_t cape_profile;
+
+static uint64_t cape_now_ns(void)
+{
+	struct timespec ts;
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return ((uint64_t)ts.tv_sec * 1000000000ULL) + (uint64_t)ts.tv_nsec;
+}
+
+static double cape_ns_to_ms(uint64_t ns)
+{
+	return (double)ns / 1000000.0;
+}
+
+static double cape_pct(uint64_t part, uint64_t total)
+{
+	if (total == 0)
+		return 0.0;
+	return ((double)part * 100.0) / (double)total;
+}
+
+static void cape_profile_note_sigtrap(int trap_code, uint64_t elapsed_ns)
+{
+	switch (trap_code) {
+	case S_LOCK_PROCESS_MEMORY:
+		cape_profile.trap_lock_ns += elapsed_ns;
+		cape_profile.trap_lock_count++;
+		break;
+	case S_UNLOCK_PROCESS_MEMORY:
+		cape_profile.trap_unlock_ns += elapsed_ns;
+		cape_profile.trap_unlock_count++;
+		break;
+	case S_GENERATE_CHECKPOINT:
+	case S_GENERATE_TOTAL_CHECKPOINT:
+	case S_GENERATE_WORKSHARE_CHECKPOINT:
+		cape_profile.trap_generate_ns += elapsed_ns;
+		cape_profile.trap_generate_count++;
+		break;
+	case S_SEND_CHECKPOINT:
+		cape_profile.trap_send_ns += elapsed_ns;
+		cape_profile.trap_send_count++;
+		break;
+	case S_RECEIVE_CHECKPOINT:
+		cape_profile.trap_receive_ns += elapsed_ns;
+		cape_profile.trap_receive_count++;
+		break;
+	case S_WAIT_FOR_CHECKPOINT:
+		cape_profile.trap_waitfor_ns += elapsed_ns;
+		cape_profile.trap_waitfor_count++;
+		break;
+	case S_BROADCAST_CHECKPOINT:
+	case S_SCATTER_CHECKPOINT:
+		cape_profile.trap_broadcast_ns += elapsed_ns;
+		cape_profile.trap_broadcast_count++;
+		break;
+	case S_ALL_REDUCE:
+		cape_profile.trap_allreduce_ns += elapsed_ns;
+		cape_profile.trap_allreduce_count++;
+		break;
+	default:
+		cape_profile.trap_other_ns += elapsed_ns;
+		cape_profile.trap_other_count++;
+		break;
+	}
+}
+
+static void cape_profile_report(void)
+{
+	uint64_t total_ns;
+
+	if (cape_profile.monitor_start_ns == 0)
+		return;
+
+	total_ns = cape_now_ns() - cape_profile.monitor_start_ns;
+
+	fprintf(stderr,
+		"PROFILE rank=%lu total_ms=%.3f wait_ms=%.3f trap_ms=%.3f generate_ms=%.3f "
+		"ucx_wait_ms=%.3f userfault_ms=%.3f bootstrap_wait_ms=%.3f\n",
+		node,
+		cape_ns_to_ms(total_ns),
+		cape_ns_to_ms(cape_profile.wait_for_child_ns),
+		cape_ns_to_ms(cape_profile.sigtrap_dispatch_ns),
+		cape_ns_to_ms(cape_profile.generate_ckpt_ns),
+		cape_ns_to_ms(cape_profile.ucx_wait_ns),
+		cape_ns_to_ms(cape_profile.userfault_handle_ns),
+		cape_ns_to_ms(cape_profile.ucx_bootstrap_wait_ns));
+
+	fprintf(stderr,
+		"PROFILE_WAIT rank=%lu tracked_ms=%.3f blocking_ms=%.3f waitpid_ms=%.3f "
+		"poll_ms=%.3f poll_calls=%llu poll_timeouts=%llu loops=%llu\n",
+		node,
+		cape_ns_to_ms(cape_profile.wait_tracked_ns),
+		cape_ns_to_ms(cape_profile.wait_blocking_ns),
+		cape_ns_to_ms(cape_profile.waitpid_ns),
+		cape_ns_to_ms(cape_profile.poll_ns),
+		(unsigned long long)cape_profile.poll_calls,
+		(unsigned long long)cape_profile.poll_timeouts,
+		(unsigned long long)cape_profile.wait_loops);
+
+	fprintf(stderr,
+		"PROFILE_SIGTRAP rank=%lu total=%llu total_ms=%.3f generate_ms=%.3f send_ms=%.3f "
+		"receive_ms=%.3f waitfor_ms=%.3f broadcast_ms=%.3f allreduce_ms=%.3f other_ms=%.3f\n",
+		node,
+		(unsigned long long)cape_profile.sigtrap_count,
+		cape_ns_to_ms(cape_profile.sigtrap_dispatch_ns),
+		cape_ns_to_ms(cape_profile.trap_generate_ns),
+		cape_ns_to_ms(cape_profile.trap_send_ns),
+		cape_ns_to_ms(cape_profile.trap_receive_ns),
+		cape_ns_to_ms(cape_profile.trap_waitfor_ns),
+		cape_ns_to_ms(cape_profile.trap_broadcast_ns),
+		cape_ns_to_ms(cape_profile.trap_allreduce_ns),
+		cape_ns_to_ms(cape_profile.trap_other_ns));
+
+	fprintf(stderr,
+		"PROFILE_UCX rank=%lu send_ms=%.3f recv_ms=%.3f sendrecv_ms=%.3f wait_ms=%.3f "
+		"progress_ms=%.3f send_calls=%llu recv_calls=%llu sendrecv_calls=%llu "
+		"sent_bytes=%llu recv_bytes=%llu progress_calls=%llu\n",
+		node,
+		cape_ns_to_ms(cape_profile.ucx_send_ns),
+		cape_ns_to_ms(cape_profile.ucx_recv_ns),
+		cape_ns_to_ms(cape_profile.ucx_sendrecv_ns),
+		cape_ns_to_ms(cape_profile.ucx_wait_ns),
+		cape_ns_to_ms(cape_profile.ucx_progress_ns),
+		(unsigned long long)cape_profile.ucx_send_calls,
+		(unsigned long long)cape_profile.ucx_recv_calls,
+		(unsigned long long)cape_profile.ucx_sendrecv_calls,
+		(unsigned long long)cape_profile.ucx_send_bytes,
+		(unsigned long long)cape_profile.ucx_recv_bytes,
+		(unsigned long long)cape_profile.ucx_progress_calls);
+
+	fprintf(stderr,
+		"PROFILE_MEM rank=%lu uffd_events=%llu dirty_pages=%llu read_ms=%.3f write_ms=%.3f "
+		"read_bytes=%llu write_bytes=%llu writeprotect_ms=%.3f generate_calls=%llu\n",
+		node,
+		(unsigned long long)cape_profile.userfault_events,
+		(unsigned long long)cape_profile.dirty_pages_captured,
+		cape_ns_to_ms(cape_profile.process_vm_read_ns),
+		cape_ns_to_ms(cape_profile.process_vm_write_ns),
+		(unsigned long long)cape_profile.process_vm_read_bytes,
+		(unsigned long long)cape_profile.process_vm_write_bytes,
+		cape_ns_to_ms(cape_profile.writeprotect_ns),
+		(unsigned long long)cape_profile.generate_ckpt_calls);
+
+	fprintf(stderr,
+		"PROFILE_SHARE rank=%lu wait_pct=%.1f trap_pct=%.1f generate_pct=%.1f "
+		"ucx_wait_pct=%.1f userfault_pct=%.1f\n",
+		node,
+		cape_pct(cape_profile.wait_for_child_ns, total_ns),
+		cape_pct(cape_profile.sigtrap_dispatch_ns, total_ns),
+		cape_pct(cape_profile.generate_ckpt_ns, total_ns),
+		cape_pct(cape_profile.ucx_wait_ns, total_ns),
+		cape_pct(cape_profile.userfault_handle_ns, total_ns));
+}
+
 static FILE *open_binary_memstream(unsigned char **bufloc, size_t *sizeloc)
 {
 	return open_memstream((char **)bufloc, sizeloc);
@@ -125,6 +341,7 @@ static int read_remote_memory(pid_t pid, unsigned long remote_addr, void *local_
 			      size_t len)
 {
 	size_t done = 0;
+	uint64_t start_ns = cape_now_ns();
 
 	while (done < len) {
 		struct iovec local = {
@@ -142,6 +359,10 @@ static int read_remote_memory(pid_t pid, unsigned long remote_addr, void *local_
 		done += (size_t)rc;
 	}
 
+	cape_profile.process_vm_read_ns += cape_now_ns() - start_ns;
+	cape_profile.process_vm_read_calls++;
+	cape_profile.process_vm_read_bytes += (uint64_t)len;
+
 	return 0;
 }
 
@@ -149,6 +370,7 @@ static int write_remote_memory(pid_t pid, const void *local_buf,
 			       unsigned long remote_addr, size_t len)
 {
 	size_t done = 0;
+	uint64_t start_ns = cape_now_ns();
 
 	while (done < len) {
 		struct iovec local = {
@@ -166,12 +388,17 @@ static int write_remote_memory(pid_t pid, const void *local_buf,
 		done += (size_t)rc;
 	}
 
+	cape_profile.process_vm_write_ns += cape_now_ns() - start_ns;
+	cape_profile.process_vm_write_calls++;
+	cape_profile.process_vm_write_bytes += (uint64_t)len;
+
 	return 0;
 }
 
 static int cape_userfault_writeprotect(unsigned long start, unsigned long len, int enable)
 {
 	struct uffdio_writeprotect wp;
+	uint64_t start_ns = cape_now_ns();
 
 	if (userfault_fd < 0)
 		return -1;
@@ -181,13 +408,18 @@ static int cape_userfault_writeprotect(unsigned long start, unsigned long len, i
 	wp.range.len = len;
 	wp.mode = enable ? UFFDIO_WRITEPROTECT_MODE_WP : 0;
 
-	return ioctl(userfault_fd, UFFDIO_WRITEPROTECT, &wp);
+	cape_profile.writeprotect_calls++;
+	if (ioctl(userfault_fd, UFFDIO_WRITEPROTECT, &wp) == -1)
+		return -1;
+	cape_profile.writeprotect_ns += cape_now_ns() - start_ns;
+	return 0;
 }
 
 static int cape_capture_dirty_page(unsigned int pid, unsigned long fault_addr)
 {
 	unsigned long aligned_addr;
 	struct page_node *temp_node, *current_node;
+	uint64_t start_ns = cape_now_ns();
 
 	aligned_addr = fault_addr & ~(PAGE_SIZE - 1);
 	temp_node = list_head;
@@ -211,6 +443,8 @@ static int cape_capture_dirty_page(unsigned int pid, unsigned long fault_addr)
 	if (list_head == NULL) {
 		list_head = current_node;
 		list_end = current_node;
+		cape_profile.dirty_capture_ns += cape_now_ns() - start_ns;
+		cape_profile.dirty_pages_captured++;
 		return 0;
 	}
 
@@ -218,6 +452,8 @@ static int cape_capture_dirty_page(unsigned int pid, unsigned long fault_addr)
 		current_node->before = list_end;
 		list_end->next = current_node;
 		list_end = current_node;
+		cape_profile.dirty_capture_ns += cape_now_ns() - start_ns;
+		cape_profile.dirty_pages_captured++;
 		return 0;
 	}
 
@@ -225,6 +461,8 @@ static int cape_capture_dirty_page(unsigned int pid, unsigned long fault_addr)
 		current_node->next = list_head;
 		list_head->before = current_node;
 		list_head = current_node;
+		cape_profile.dirty_capture_ns += cape_now_ns() - start_ns;
+		cape_profile.dirty_pages_captured++;
 		return 0;
 	}
 
@@ -232,6 +470,8 @@ static int cape_capture_dirty_page(unsigned int pid, unsigned long fault_addr)
 	current_node->before = temp_node->before;
 	temp_node->before->next = current_node;
 	temp_node->before = current_node;
+	cape_profile.dirty_capture_ns += cape_now_ns() - start_ns;
+	cape_profile.dirty_pages_captured++;
 	return 0;
 }
 
@@ -240,6 +480,7 @@ static int cape_handle_userfault_event(void)
 	struct uffd_msg msg;
 	ssize_t nread;
 	unsigned long page_addr;
+	uint64_t start_ns = cape_now_ns();
 
 	nread = read(userfault_fd, &msg, sizeof(msg));
 	if (nread == -1) {
@@ -257,6 +498,7 @@ static int cape_handle_userfault_event(void)
 	if ((msg.arg.pagefault.flags & UFFD_PAGEFAULT_FLAG_WP) == 0)
 		return 0;
 
+	cape_profile.userfault_events++;
 	page_addr = msg.arg.pagefault.address & ~(PAGE_SIZE - 1);
 	if (cape_capture_dirty_page(child_id, page_addr) != 0) {
 		fprintf(stderr, "Monitor %ld: failed to snapshot page 0x%lx\n",
@@ -268,6 +510,7 @@ static int cape_handle_userfault_event(void)
 		return -1;
 	}
 
+	cape_profile.userfault_handle_ns += cape_now_ns() - start_ns;
 	return 0;
 }
 
@@ -295,14 +538,39 @@ int cape_drain_userfaultfd(void)
 
 int cape_wait_for_child_event(pid_t pid, int *status)
 {
+	uint64_t total_start_ns = cape_now_ns();
+
 	if (userfault_fd < 0 || !tracking_is_enabled)
-		return waitpid(pid, status, 0);
+	{
+		uint64_t wait_start_ns = cape_now_ns();
+		pid_t rc = waitpid(pid, status, 0);
+		uint64_t elapsed_ns = cape_now_ns() - wait_start_ns;
+
+		cape_profile.wait_for_child_ns += elapsed_ns;
+		cape_profile.wait_blocking_ns += elapsed_ns;
+		cape_profile.waitpid_ns += elapsed_ns;
+		cape_profile.waitpid_calls++;
+		return rc;
+	}
 
 	for (;;) {
-		pid_t rc = waitpid(pid, status, WNOHANG);
+		uint64_t waitpid_start_ns;
+		pid_t rc;
+		uint64_t waitpid_elapsed_ns;
 
-		if (rc == pid)
+		cape_profile.wait_loops++;
+		waitpid_start_ns = cape_now_ns();
+		rc = waitpid(pid, status, WNOHANG);
+		waitpid_elapsed_ns = cape_now_ns() - waitpid_start_ns;
+		cape_profile.waitpid_ns += waitpid_elapsed_ns;
+		cape_profile.waitpid_calls++;
+
+		if (rc == pid) {
+			uint64_t total_elapsed_ns = cape_now_ns() - total_start_ns;
+			cape_profile.wait_for_child_ns += total_elapsed_ns;
+			cape_profile.wait_tracked_ns += total_elapsed_ns;
 			return rc;
+		}
 		if (rc == -1) {
 			if (errno == EINTR)
 				continue;
@@ -314,11 +582,19 @@ int cape_wait_for_child_event(pid_t pid, int *status)
 		{
 			struct pollfd pfd;
 			int poll_rc;
+			uint64_t poll_start_ns;
+			uint64_t poll_elapsed_ns;
 
 			memset(&pfd, 0, sizeof(pfd));
 			pfd.fd = userfault_fd;
 			pfd.events = POLLIN;
+			poll_start_ns = cape_now_ns();
 			poll_rc = poll(&pfd, 1, 50);
+			poll_elapsed_ns = cape_now_ns() - poll_start_ns;
+			cape_profile.poll_ns += poll_elapsed_ns;
+			cape_profile.poll_calls++;
+			if (poll_rc == 0)
+				cape_profile.poll_timeouts++;
 			if (poll_rc == -1 && errno != EINTR)
 				return -1;
 			if (poll_rc > 0 && (pfd.revents & POLLIN) != 0) {
@@ -468,6 +744,8 @@ static void cape_recv_cb(void *request, ucs_status_t status,
 static void cape_ucx_wait(void *req, size_t expect_len, int check_len,
                           ucp_tag_t *out_tag)
 {
+	uint64_t wait_start_ns = cape_now_ns();
+
     if (out_tag) *out_tag = 0;
     if (req == NULL)
         return;
@@ -477,8 +755,13 @@ static void cape_ucx_wait(void *req, size_t expect_len, int check_len,
         exit(1);
     }
     cape_ucx_req_t *r = (cape_ucx_req_t *)req;
-    while (!r->completed)
+    while (!r->completed) {
+        uint64_t progress_start_ns = cape_now_ns();
         ucp_worker_progress(ucp_worker);
+        cape_profile.ucx_progress_ns += cape_now_ns() - progress_start_ns;
+        cape_profile.ucx_progress_calls++;
+    }
+    cape_profile.ucx_wait_ns += cape_now_ns() - wait_start_ns;
     if (out_tag)
         *out_tag = r->sender_tag;
     if (r->status != UCS_OK) {
@@ -514,6 +797,7 @@ static void cape_ucx_sendrecv(
         void       *recvbuf, size_t recvlen, int src,
         uint32_t    token)
 {
+    uint64_t start_ns = cape_now_ns();
     ucp_tag_t send_tag = CAPE_UCX_TAG(node, token);
     ucp_tag_t recv_tag = CAPE_UCX_TAG(src,  token);
 
@@ -535,11 +819,16 @@ static void cape_ucx_sendrecv(
 
     cape_ucx_wait(rreq, recvlen, 1, NULL);
     cape_ucx_wait(sreq, 0, 0, NULL);
+    cape_profile.ucx_sendrecv_ns += cape_now_ns() - start_ns;
+    cape_profile.ucx_sendrecv_calls++;
+    cape_profile.ucx_send_bytes += (uint64_t)sendlen;
+    cape_profile.ucx_recv_bytes += (uint64_t)recvlen;
 }
 
 /* Simple blocking send via UCX tag. */
 static void cape_ucx_send(const void *buf, size_t len, int dest, uint32_t token)
 {
+    uint64_t start_ns = cape_now_ns();
     ucp_tag_t tag = CAPE_UCX_TAG(node, token);
     ucp_request_param_t sp = {
         .op_attr_mask = UCP_OP_ATTR_FIELD_CALLBACK,
@@ -547,11 +836,15 @@ static void cape_ucx_send(const void *buf, size_t len, int dest, uint32_t token)
     };
     void *req = ucp_tag_send_nbx(ucp_endpoints[dest], buf, len, tag, &sp);
     cape_ucx_wait(req, 0, 0, NULL);
+    cape_profile.ucx_send_ns += cape_now_ns() - start_ns;
+    cape_profile.ucx_send_calls++;
+    cape_profile.ucx_send_bytes += (uint64_t)len;
 }
 
 /* Simple blocking recv via UCX tag. */
 static void cape_ucx_recv(void *buf, size_t len, int src, uint32_t token)
 {
+    uint64_t start_ns = cape_now_ns();
     ucp_tag_t tag = CAPE_UCX_TAG(src, token);
     ucp_request_param_t rp = {
         .op_attr_mask = UCP_OP_ATTR_FIELD_CALLBACK
@@ -561,6 +854,9 @@ static void cape_ucx_recv(void *buf, size_t len, int src, uint32_t token)
     };
     void *req = ucp_tag_recv_nbx(ucp_worker, buf, len, tag, CAPE_UCX_TAG_MASK, &rp);
     cape_ucx_wait(req, len, 1, NULL);
+    cape_profile.ucx_recv_ns += cape_now_ns() - start_ns;
+    cape_profile.ucx_recv_calls++;
+    cape_profile.ucx_recv_bytes += (uint64_t)len;
 }
 
 /* Tag tokens for different message types to avoid collisions */
@@ -622,9 +918,14 @@ static void ucx_exchange_addresses_via_fs(const char *dir, const char *jobid,
     fclose(f);
 
     for (int i = 0; i < num_nodes; i++) {
+        uint64_t bootstrap_wait_start_ns;
         snprintf(path, sizeof(path), "%s/cape_ucx_%s_rdy_%d", dir, jobid, i);
-        while (access(path, F_OK) != 0)
+        bootstrap_wait_start_ns = cape_now_ns();
+        while (access(path, F_OK) != 0) {
+            cape_profile.ucx_bootstrap_wait_iters++;
             usleep(10000);
+        }
+        cape_profile.ucx_bootstrap_wait_ns += cape_now_ns() - bootstrap_wait_start_ns;
     }
 
     ucs_status_t st;
@@ -900,6 +1201,8 @@ int main(int argc, char * argv[]){
 		fprintf(stderr, "Usage: %s <app> [app-args...]\n", argv[0]);
 		return 1;
 	}
+
+	cape_profile.monitor_start_ns = cape_now_ns();
 	
 	exec_file = argv[1];
 
@@ -967,8 +1270,12 @@ int main(int argc, char * argv[]){
 		}
 		if(WIFSTOPPED(status) && WSTOPSIG(status) == SIGTRAP) {
 				int dx = 0;
+				uint64_t trap_start_ns;
+				uint64_t trap_elapsed_ns;
 				ptrace(PTRACE_GETREGS, child_id, NULL, &regs);
 				dx = regs.rdx;
+				trap_start_ns = cape_now_ns();
+				cape_profile.sigtrap_count++;
 				switch(dx){
 					case S_LOCK_PROCESS_MEMORY:  //Lock process 		
 						rc = lock_process_memory(child_id);
@@ -1103,6 +1410,9 @@ int main(int argc, char * argv[]){
 						dprintf("\nMonitor %ld: get breakpoint with unkown edx = %d", node, dx);
 						exit(1);
 				}
+				trap_elapsed_ns = cape_now_ns() - trap_start_ns;
+				cape_profile.sigtrap_dispatch_ns += trap_elapsed_ns;
+				cape_profile_note_sigtrap(dx, trap_elapsed_ns);
 			}//SIGTRAP
 		 else if(WIFSTOPPED(status)) {
 			int sig = WSTOPSIG(status);
@@ -1122,6 +1432,7 @@ int main(int argc, char * argv[]){
 	if (control_fd >= 0)
 		close(control_fd);
 	free(tracked_ranges);
+	cape_profile_report();
 	cape_ucx_finalize();
 	return 0;
 }
@@ -1455,16 +1766,10 @@ struct shared_data * check_addr_in_data_list(long int addr, int len,  struct sha
   */
   
 struct shared_data * is_in_share_data_list(unsigned long int addr, struct shared_data *list){
-	struct shared_data *ps = NULL;
-	unsigned long int addr2;
-	ps = list;
-	while(ps!=NULL){
-		addr2 = ps->addr;
-		while(addr2 < (ps->addr + ps->len)){
-			if ( addr == addr2 ){
-				return ps;
-			}
-			addr2 = addr2 + CAPE_WORD;
+	struct shared_data *ps = list;
+	while(ps != NULL){
+		if (addr >= ps->addr && addr < (ps->addr + ps->len)){
+			return ps;
 		}
 		ps = ps->next;
 	}
@@ -1579,6 +1884,7 @@ int add_item_to_list_ckpt(struct shared_data_ckpt *p){
 	int * buff[PAGE_SIZE_DIV_4];
 	int shared_flag = 0;
 	unsigned long current_ckpt_struct, new_ckpt_struct;
+	uint64_t profile_start_ns = cape_now_ns();
 	current_ckpt_struct = NA; //Init current checkpoint structure
 	
 	
@@ -1596,13 +1902,16 @@ int add_item_to_list_ckpt(struct shared_data_ckpt *p){
 	//write timespan into checkpoint
 	_timespan = tsp;
 	fwrite(&_timespan, sizeof(unsigned long), 1, stream);
-	fflush(stream);
-	
+
 	//save register to file
 	fwrite(&save_regs,sizeof(struct user_regs_struct),1, stream);
-	fflush(stream);
-	
-	if (list == NULL) return stream;
+
+	if (list == NULL) {
+		fflush(stream);
+		cape_profile.generate_ckpt_ns += cape_now_ns() - profile_start_ns;
+		cape_profile.generate_ckpt_calls++;
+		return stream;
+	}
 
 	//find the different data and save to checkpoint file
 	old_node = list;
@@ -1652,39 +1961,31 @@ int add_item_to_list_ckpt(struct shared_data_ckpt *p){
 				//Write ckpt_struct into ckpt file if it is changed
 				if (current_ckpt_struct != new_ckpt_struct){
 					current_ckpt_struct = new_ckpt_struct;
-					fseek(stream, *ckpt_size,SEEK_SET);
 					fwrite(&current_ckpt_struct, sizeof(unsigned long), 1, stream);
-					fflush(stream);									
-				}				
+				}
 				//save data into checkpoint file; depends on current_ckpt_struct
 				switch(current_ckpt_struct){
 					case SSD:
-						fseek(stream, *ckpt_size,SEEK_SET);
 						//save address to file
-						fwrite(&addr,sizeof(unsigned long),1, stream);						
+						fwrite(&addr,sizeof(unsigned long),1, stream);
 						//save len to file
-						fwrite(&len, sizeof(int), 1, stream);							
+						fwrite(&len, sizeof(int), 1, stream);
 						//save data to file
 						fwrite(&(current_node->data[start]), len, 1,stream);
-						fflush(stream);						
 						break;
 					case SD:
-						fseek(stream, *ckpt_size,SEEK_SET);
 						//save address to file
 						fwrite(&addr,sizeof(unsigned long),1, stream);
 						//save data to file
 						fwrite(&(current_node->data[start]), len, 1,stream);
-						fflush(stream);	
 						break;
 					case EP:
-						fseek(stream, *ckpt_size,SEEK_SET);
 						//save address to file
-						fwrite(&addr,sizeof(unsigned long),1, stream);						
+						fwrite(&addr,sizeof(unsigned long),1, stream);
 						//save data to file
 						fwrite(&(current_node->data[start]), len, 1,stream);
-						fflush(stream);											
-						break;									
-						
+						break;
+
 				}
 								
 			}//end SD1
@@ -1718,40 +2019,32 @@ int add_item_to_list_ckpt(struct shared_data_ckpt *p){
 				//Write ckpt_struct into ckpt file if it is changed
 				if (current_ckpt_struct != new_ckpt_struct){
 					current_ckpt_struct = new_ckpt_struct;
-					fseek(stream, *ckpt_size,SEEK_SET);
 					fwrite(&current_ckpt_struct, sizeof(unsigned long), 1, stream);
-					fflush(stream);									
 				}
 				//save data into checkpoint file; depends on current_ckpt_struct
 				switch(current_ckpt_struct){
 					case SSD:
-						fseek(stream, *ckpt_size,SEEK_SET);
 						//save address to file
-						fwrite(&addr,sizeof(unsigned long),1, stream);						
+						fwrite(&addr,sizeof(unsigned long),1, stream);
 						//save len to file
-						fwrite(&len, sizeof(int), 1, stream);							
+						fwrite(&len, sizeof(int), 1, stream);
 						//save data to file
 						fwrite(&(current_node->data[start]), len, 1,stream);
-						fflush(stream);						
 						break;
 					case SD:
-						fseek(stream, *ckpt_size,SEEK_SET);
 						//save address to file
 						fwrite(&addr,sizeof(unsigned long),1, stream);
 						//save data to file
 						fwrite(&(current_node->data[start]), len, 1,stream);
-						fflush(stream);	
 						break;
 					case EP:
-						fseek(stream, *ckpt_size,SEEK_SET);
 						//save address to file
-						fwrite(&addr,sizeof(unsigned long),1, stream);						
+						fwrite(&addr,sizeof(unsigned long),1, stream);
 						//save data to file
 						fwrite(&(current_node->data[start]), len, 1,stream);
-						fflush(stream);											
-						break;									
-						
-				}			
+						break;
+
+				}
 			}//END SD2
 			
 			
@@ -1803,9 +2096,12 @@ int add_item_to_list_ckpt(struct shared_data_ckpt *p){
 		}
 		//set write protect to the page
 		rc = ioctl_set_write_protect(child_id, old_node->addr);
-		old_node = old_node->next;	
-		
-	}	
+		old_node = old_node->next;
+
+	}
+	fflush(stream);
+	cape_profile.generate_ckpt_ns += cape_now_ns() - profile_start_ns;
+	cape_profile.generate_ckpt_calls++;
 	return stream;
 }
 
@@ -1924,17 +2220,16 @@ int require_generate_workshare_checkpoint(){
 												//print_data_in_ckpt_list(list_ckpt_head);
 															
 				fseek(before_ckpt_stream, before_ckpt_size, SEEK_SET);
-				//Write signal of data structure 	
+				//Write signal of data structure
 				fwrite(&ckpt_struct, sizeof(unsigned long), 1, before_ckpt_stream);
-				fflush(before_ckpt_stream);
 				//read all node in list and save into checkpoint file
 				p = list_ckpt_head;
 				while(p!=NULL){
-					fwrite(&p->addr, sizeof(unsigned long), 1, before_ckpt_stream);				 
+					fwrite(&p->addr, sizeof(unsigned long), 1, before_ckpt_stream);
 					fwrite(p->data, CAPE_WORD, 1, before_ckpt_stream);
-					fflush(before_ckpt_stream);		 
-					p = p->next;		 
-				}	
+					p = p->next;
+				}
+				fflush(before_ckpt_stream);
 			list_ckpt_head = NULL;
 			list_ckpt_tail = NULL;
 		}
@@ -2001,33 +2296,29 @@ int join_checkpoint (int file_name, struct shared_data_ckpt * list){
 				else{
 					fseek(final_ckpt_stream, final_ckpt_size,SEEK_SET);
 				}
-				//Write signal of data structure 	
+				//Write signal of data structure
 				fwrite(&ckpt_struct, sizeof(unsigned long), 1, final_ckpt_stream);
-				fflush(final_ckpt_stream); 
 				//read all node in list and save into checkpoint file
 				while(p1!=NULL){
 					fwrite(&p1->addr, sizeof(unsigned long), 1, final_ckpt_stream);
-					fflush(final_ckpt_stream);		 
 					fwrite(p1->data, CAPE_WORD, 1, final_ckpt_stream);
-					fflush(final_ckpt_stream);		 
-					p1 = p1->next;		 
-				}			
+					p1 = p1->next;
+				}
+				fflush(final_ckpt_stream);
 			break;
 			
 		case TOTAL_CHECKPOINT:
 				fseek(total_ckpt_stream, total_ckpt_size,SEEK_SET);
-				//Write signal of data structure 	
+				//Write signal of data structure
 				fwrite(&ckpt_struct, sizeof(unsigned long), 1, total_ckpt_stream);
-				fflush(total_ckpt_stream); 
 				//read all node in list and save into checkpoint file
 				while(p1!=NULL){
 					fwrite(&p1->addr, sizeof(unsigned long), 1, total_ckpt_stream);
-					fflush(total_ckpt_stream);		 
 					fwrite(p1->data, CAPE_WORD, 1, total_ckpt_stream);
-					fflush(total_ckpt_stream);		 
-					p1 = p1->next;		 
-				}			
-				
+					p1 = p1->next;
+				}
+				fflush(total_ckpt_stream);
+
 			break;
 	} 
 	 return 0;	 
@@ -2353,24 +2644,20 @@ int require_inject_workshare_checkpoint(){
 				file_pointer += sizeof(unsigned long);
 				fseek(after_ckpt_stream, file_pointer, SEEK_SET);
 				current_ckpt_struct = EP;
-				
+
 				//write signal into final checkpoint
-				fseek(final_ckpt_stream, final_ckpt_size,SEEK_SET);
 				fwrite(&current_ckpt_struct, sizeof(unsigned long), 1, final_ckpt_stream);
-				fflush(final_ckpt_stream);
-				
+
 				break;
 			case SSD:
 				fread(&addr, sizeof(unsigned long), 1, after_ckpt_stream);
 				file_pointer += sizeof(unsigned long);
 				fseek(after_ckpt_stream, file_pointer, SEEK_SET);
 				current_ckpt_struct = SSD;
-				
+
 				//write signal into final checkpoint
-				fseek(final_ckpt_stream, final_ckpt_size,SEEK_SET);
 				fwrite(&current_ckpt_struct, sizeof(unsigned long), 1, final_ckpt_stream);
-				fflush(final_ckpt_stream);
-				
+
 				break;
 			case SD:
 				fread(&addr, sizeof(unsigned long), 1, after_ckpt_stream);
@@ -2378,10 +2665,8 @@ int require_inject_workshare_checkpoint(){
 				fseek(after_ckpt_stream, file_pointer, SEEK_SET);
 				current_ckpt_struct = SD;
 				//write signal into final checkpoint
-				fseek(final_ckpt_stream, final_ckpt_size,SEEK_SET);
 				fwrite(&current_ckpt_struct, sizeof(unsigned long), 1, final_ckpt_stream);
-				fflush(final_ckpt_stream);
-				
+
 				break;
 			case MD:
 				fread(&addr, sizeof(unsigned long), 1, after_ckpt_stream);
@@ -2389,12 +2674,10 @@ int require_inject_workshare_checkpoint(){
 				fseek(after_ckpt_stream, file_pointer, SEEK_SET);
 				current_ckpt_struct = MD;
 				//write signal into final checkpoint
-				fseek(final_ckpt_stream, final_ckpt_size,SEEK_SET);
 				fwrite(&current_ckpt_struct, sizeof(unsigned long), 1, final_ckpt_stream);
-				fflush(final_ckpt_stream);				
 				break;
 		}
-  		
+
   		//read data and write to final checkpoint
   		switch(current_ckpt_struct){
 			case EP:
@@ -2403,13 +2686,11 @@ int require_inject_workshare_checkpoint(){
 				buff = (unsigned char *) malloc(len);
 				fread(buff, len, 1,after_ckpt_stream);
 				file_pointer +=len;
-				fseek(after_ckpt_stream, file_pointer, SEEK_SET); 
-				
+				fseek(after_ckpt_stream, file_pointer, SEEK_SET);
+
 				//write into final checkpoint
-				fseek(final_ckpt_stream, final_ckpt_size,SEEK_SET);
-				fwrite(&addr, sizeof(unsigned long), 1, final_ckpt_stream); 		
+				fwrite(&addr, sizeof(unsigned long), 1, final_ckpt_stream);
 				fwrite(buff, len, 1, final_ckpt_stream);
-				fflush(final_ckpt_stream); 				
 				break;
 			case SSD:
 				  //read len from checkpoint
@@ -2417,21 +2698,17 @@ int require_inject_workshare_checkpoint(){
 				fread(&len, sizeof(int), 1, after_ckpt_stream);
 				file_pointer += sizeof(int);
 				fseek(after_ckpt_stream, file_pointer, SEEK_SET);
-				
+
 				 //read data from checkpoint
 				buff = (unsigned char *) malloc(len);
 				fread(buff, len, 1,after_ckpt_stream);
 				file_pointer +=len;
-				fseek(after_ckpt_stream, file_pointer, SEEK_SET); 
-  		
+				fseek(after_ckpt_stream, file_pointer, SEEK_SET);
+
 				//write into final checkpoint
-				fseek(final_ckpt_stream, final_ckpt_size,SEEK_SET);
 				fwrite(&addr, sizeof(unsigned long), 1, final_ckpt_stream);
-				//fflush(final_ckpt_stream);
 				fwrite(&len, sizeof(int), 1, final_ckpt_stream);
-				//fflush(final_ckpt_stream);
 				fwrite(buff, len, 1, final_ckpt_stream);
-				fflush(final_ckpt_stream); 				
 				break;
 			case SD:
 				len = CAPE_WORD;
@@ -2439,19 +2716,18 @@ int require_inject_workshare_checkpoint(){
 				buff = (unsigned char *) malloc(len);
 				fread(buff, len, 1,after_ckpt_stream);
 				file_pointer +=len;
-				fseek(after_ckpt_stream, file_pointer, SEEK_SET); 
-				
+				fseek(after_ckpt_stream, file_pointer, SEEK_SET);
+
 				//write into final checkpoint
-				fseek(final_ckpt_stream, final_ckpt_size,SEEK_SET);
-				fwrite(&addr, sizeof(unsigned long), 1, final_ckpt_stream); 		
+				fwrite(&addr, sizeof(unsigned long), 1, final_ckpt_stream);
 				fwrite(buff, len, 1, final_ckpt_stream);
-				fflush(final_ckpt_stream); 				
 				break;
 			case MD:
-				break;				
-		}   			
+				break;
+		}
  	}
- 	
+ 	fflush(final_ckpt_stream);
+
  	//printf("\n Node %ld: Merged %d bytes in to final ckpt: Final ckpt = %d", node, after_ckpt_size, final_ckpt_size);
  	fclose(after_ckpt_stream);
  	after_ckpt_size = 0;	  		 	 	
@@ -2787,32 +3063,28 @@ int require_inject_workshare_checkpoint(){
 				file_pointer += sizeof(unsigned long);
 				fseek(s_stream, file_pointer, SEEK_SET);
 				current_ckpt_struct = EP;
-				
+
 				//write signal into total checkpoint
-				fseek(total_ckpt_stream, total_ckpt_size,SEEK_SET);
 				fwrite(&current_ckpt_struct, sizeof(unsigned long), 1, total_ckpt_stream);
-				fflush(total_ckpt_stream);
-				
+
 				break;
 			case SSD:
 				fread(&addr, sizeof(unsigned long), 1, s_stream);
 				file_pointer += sizeof(unsigned long);
 				fseek(s_stream, file_pointer, SEEK_SET);
 				current_ckpt_struct = SSD;
-				
+
 				//write signal into total checkpoint
-				fseek(total_ckpt_stream, total_ckpt_size,SEEK_SET);
 				fwrite(&current_ckpt_struct, sizeof(unsigned long), 1, total_ckpt_stream);
-				fflush(total_ckpt_stream);
-				
+
 				break;
 			case SD:
 				fread(&addr, sizeof(unsigned long), 1, s_stream);
 				file_pointer += sizeof(unsigned long);
 				fseek(s_stream, file_pointer, SEEK_SET);
 				current_ckpt_struct = SD;
-				//write signal into total checkpoint				
-				
+				//write signal into total checkpoint
+
 				pro = is_in_share_data_list(addr, data_list_head);
 				if ((pro!=NULL) && (pro->properties != D_SHARED))
 				{
@@ -2823,24 +3095,20 @@ int require_inject_workshare_checkpoint(){
 					break;
 				}
 				else{
-					fseek(total_ckpt_stream, total_ckpt_size,SEEK_SET);
 					fwrite(&current_ckpt_struct, sizeof(unsigned long), 1, total_ckpt_stream);
-					fflush(total_ckpt_stream);
-				}							
+				}
 				break;
-				
+
 			case MD:
 				fread(&addr, sizeof(unsigned long), 1, s_stream);
 				file_pointer += sizeof(unsigned long);
 				fseek(s_stream, file_pointer, SEEK_SET);
 				current_ckpt_struct = MD;
 				//write signal into total checkpoint
-				fseek(total_ckpt_stream, total_ckpt_size,SEEK_SET);
 				fwrite(&current_ckpt_struct, sizeof(unsigned long), 1, total_ckpt_stream);
-				fflush(total_ckpt_stream);				
 				break;
 		}
-  		
+
   		//read data and write to total checkpoint
   		switch(current_ckpt_struct){
 			case EP:
@@ -2849,13 +3117,11 @@ int require_inject_workshare_checkpoint(){
 				buff = (unsigned char *) malloc(len);
 				fread(buff, len, 1,s_stream);
 				file_pointer +=len;
-				fseek(s_stream, file_pointer, SEEK_SET); 
-				
+				fseek(s_stream, file_pointer, SEEK_SET);
+
 				//write into total checkpoint
-				fseek(total_ckpt_stream, total_ckpt_size,SEEK_SET);
-				fwrite(&addr, sizeof(unsigned long), 1, total_ckpt_stream); 		
+				fwrite(&addr, sizeof(unsigned long), 1, total_ckpt_stream);
 				fwrite(buff, len, 1, total_ckpt_stream);
-				fflush(total_ckpt_stream); 				
 				break;
 			case SSD:
 				  //read len from checkpoint
@@ -2863,21 +3129,17 @@ int require_inject_workshare_checkpoint(){
 				fread(&len, sizeof(int), 1, s_stream);
 				file_pointer += sizeof(int);
 				fseek(s_stream, file_pointer, SEEK_SET);
-				
+
 				 //read data from checkpoint
 				buff = (unsigned char *) malloc(len);
 				fread(buff, len, 1,s_stream);
 				file_pointer +=len;
-				fseek(s_stream, file_pointer, SEEK_SET); 
-  		
+				fseek(s_stream, file_pointer, SEEK_SET);
+
 				//write into total checkpoint
-				fseek(total_ckpt_stream, total_ckpt_size,SEEK_SET);
 				fwrite(&addr, sizeof(unsigned long), 1, total_ckpt_stream);
-				//fflush(total_ckpt_stream);
 				fwrite(&len, sizeof(int), 1, total_ckpt_stream);
-				//fflush(total_ckpt_stream);
 				fwrite(buff, len, 1, total_ckpt_stream);
-				fflush(total_ckpt_stream); 				
 				break;
 			case SD:
 				len = CAPE_WORD;
@@ -2885,29 +3147,28 @@ int require_inject_workshare_checkpoint(){
 				buff = (unsigned char *) malloc(len);
 				fread(buff, len, 1,s_stream);
 				file_pointer +=len;
-				fseek(s_stream, file_pointer, SEEK_SET); 
-				
+				fseek(s_stream, file_pointer, SEEK_SET);
+
 				if((pro!=NULL) && (pro->properties != D_SHARED))
 				{
 					if (fflag ==FINAL_CHECKPOINT){
 						memcpy(plist->data, buff, len);
 						add_to_final_ckpt_list(plist, pro);
-					}	
-					break;				
+					}
+					break;
 				}
 				else{
 					//write into final checkpoint
-					fseek(total_ckpt_stream, total_ckpt_size,SEEK_SET);
-					fwrite(&addr, sizeof(unsigned long), 1, total_ckpt_stream); 		
+					fwrite(&addr, sizeof(unsigned long), 1, total_ckpt_stream);
 					fwrite(buff, len, 1, total_ckpt_stream);
-					fflush(total_ckpt_stream); 
 				}
-												
+
 				break;
 			case MD:
-				break;				
-		}   			
+				break;
+		}
  	}
+	fflush(total_ckpt_stream);
 	return 0;
 }
  

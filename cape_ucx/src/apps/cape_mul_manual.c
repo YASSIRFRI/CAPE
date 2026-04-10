@@ -4,7 +4,7 @@
 #include <sys/time.h>
 #include "../../include/cape_dickpt.h"
 
-#define DEFAULT_N 100
+#define DEFAULT_N 1024
 #define MAX_N 3200
 
 struct mul_state {
