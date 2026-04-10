@@ -917,16 +917,30 @@ static void ucx_exchange_addresses_via_fs(const char *dir, const char *jobid,
     if (!f) { perror("CAPE UCX: write rdy file"); exit(1); }
     fclose(f);
 
-    for (int i = 0; i < num_nodes; i++) {
-        uint64_t bootstrap_wait_start_ns;
-        snprintf(path, sizeof(path), "%s/cape_ucx_%s_rdy_%d", dir, jobid, i);
-        bootstrap_wait_start_ns = cape_now_ns();
+    uint64_t bootstrap_wait_start_ns = cape_now_ns();
+    if (node == 0) {
+        /* Master waits for all workers to be ready */
+        for (int i = 1; i < num_nodes; i++) {
+            snprintf(path, sizeof(path), "%s/cape_ucx_%s_rdy_%d", dir, jobid, i);
+            while (access(path, F_OK) != 0) {
+                cape_profile.ucx_bootstrap_wait_iters++;
+                usleep(10000);
+            }
+        }
+        /* Signal all workers that everyone is ready */
+        snprintf(path, sizeof(path), "%s/cape_ucx_%s_go", dir, jobid);
+        f = fopen(path, "w");
+        if (!f) { perror("CAPE UCX: write go file"); exit(1); }
+        fclose(f);
+    } else {
+        /* Workers only wait for master's go signal */
+        snprintf(path, sizeof(path), "%s/cape_ucx_%s_go", dir, jobid);
         while (access(path, F_OK) != 0) {
             cape_profile.ucx_bootstrap_wait_iters++;
             usleep(10000);
         }
-        cape_profile.ucx_bootstrap_wait_ns += cape_now_ns() - bootstrap_wait_start_ns;
     }
+    cape_profile.ucx_bootstrap_wait_ns += cape_now_ns() - bootstrap_wait_start_ns;
 
     ucs_status_t st;
     ucp_endpoints = malloc(num_nodes * sizeof(ucp_ep_h));
