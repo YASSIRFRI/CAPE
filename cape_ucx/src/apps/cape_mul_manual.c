@@ -7,13 +7,14 @@
 #define DEFAULT_N 1024
 #define MAX_N 3200
 
-struct mul_state {
+/* Only the result matrix c needs to be in the tracked region for checkpointing.
+ * a and b are read-only during computation — keep them as globals to avoid
+ * unnecessary write-protection overhead. Loop variables are local. */
+static int a[MAX_N][MAX_N];
+static int b[MAX_N][MAX_N];
+
+struct ckpt_state {
 	int c[MAX_N][MAX_N];
-	int a[MAX_N][MAX_N];
-	int b[MAX_N][MAX_N];
-	int i;
-	int j;
-	int k;
 };
 
 static unsigned long get_ms_of_day(void)
@@ -29,9 +30,9 @@ int main(int argc, char *argv[])
 	int reps = 1;
 	int rep;
 	unsigned long t0, t1;
-	struct mul_state *state;
+	struct ckpt_state *state;
 	unsigned long node, num_nodes;
-	int sum;
+	int i, j, k, sum;
 	int row_start, row_end;
 
 	if (argc > 1)
@@ -62,31 +63,30 @@ int main(int argc, char *argv[])
 
 	/* Initialize matrices */
 	srand(12345);
-	for (state->i = 0; state->i < n; state->i++) {
-		for (state->j = 0; state->j < n; state->j++) {
-			state->a[state->i][state->j] = rand() % 100;
-			state->b[state->i][state->j] = rand() % 100;
-			state->c[state->i][state->j] = 0;
+	for (i = 0; i < n; i++) {
+		for (j = 0; j < n; j++) {
+			a[i][j] = rand() % 100;
+			b[i][j] = rand() % 100;
+			state->c[i][j] = 0;
 		}
 	}
 
 	for (rep = 1; rep <= reps; rep++) {
 		/* Reset c */
-		for (state->i = 0; state->i < n; state->i++)
-			for (state->j = 0; state->j < n; state->j++)
-				state->c[state->i][state->j] = 0;
+		for (i = 0; i < n; i++)
+			for (j = 0; j < n; j++)
+				state->c[i][j] = 0;
 
 		t0 = get_ms_of_day();
 
 		dickpt_start_ckpt();
 
-		for (state->i = row_start; state->i < row_end; state->i++) {
-			for (state->j = 0; state->j < n; state->j++) {
+		for (i = row_start; i < row_end; i++) {
+			for (j = 0; j < n; j++) {
 				sum = 0;
-				for (state->k = 0; state->k < n; state->k++)
-					sum += state->a[state->i][state->k]
-					     * state->b[state->k][state->j];
-				state->c[state->i][state->j] = sum;
+				for (k = 0; k < n; k++)
+					sum += a[i][k] * b[k][j];
+				state->c[i][j] = sum;
 			}
 
 			dickpt_generate_ckpt();
