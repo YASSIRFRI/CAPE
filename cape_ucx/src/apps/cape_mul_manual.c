@@ -88,8 +88,6 @@ int main(int argc, char *argv[])
 					sum += a[i][k] * b[k][j];
 				state->c[i][j] = sum;
 			}
-
-			dickpt_generate_ckpt();
 		}
 
 		dickpt_generate_ckpt();
