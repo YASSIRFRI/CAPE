@@ -897,6 +897,10 @@ static void ucx_exchange_addresses_via_fs(const char *dir, const char *jobid,
     char path[512];
     FILE *f;
 
+    /* Remove stale rdy file from previous runs before writing anything */
+    snprintf(path, sizeof(path), "%s/cape_ucx_%s_rdy_%ld", dir, jobid, node);
+    unlink(path);
+
     snprintf(path, sizeof(path), "%s/cape_ucx_%s_addr_%ld", dir, jobid, node);
     f = fopen(path, "wb");
     if (!f) { perror("CAPE UCX: write addr file"); exit(1); }
@@ -912,6 +916,7 @@ static void ucx_exchange_addresses_via_fs(const char *dir, const char *jobid,
     }
     fclose(f);
 
+    /* Phase 1: write addr file, then signal ready */
     snprintf(path, sizeof(path), "%s/cape_ucx_%s_rdy_%ld", dir, jobid, node);
     f = fopen(path, "w");
     if (!f) { perror("CAPE UCX: write rdy file"); exit(1); }
@@ -919,7 +924,7 @@ static void ucx_exchange_addresses_via_fs(const char *dir, const char *jobid,
 
     uint64_t bootstrap_wait_start_ns = cape_now_ns();
     if (node == 0) {
-        /* Master waits for all workers to be ready */
+        /* Master waits for all workers' addr+rdy files */
         for (int i = 1; i < num_nodes; i++) {
             snprintf(path, sizeof(path), "%s/cape_ucx_%s_rdy_%d", dir, jobid, i);
             while (access(path, F_OK) != 0) {
@@ -927,15 +932,24 @@ static void ucx_exchange_addresses_via_fs(const char *dir, const char *jobid,
                 usleep(10000);
             }
         }
-        /* Signal all workers that everyone is ready */
-        snprintf(path, sizeof(path), "%s/cape_ucx_%s_go", dir, jobid);
+        /* Rewrite master's rdy file with "go" marker to signal all
+         * addresses are available. Workers poll for this marker. */
+        snprintf(path, sizeof(path), "%s/cape_ucx_%s_rdy_0", dir, jobid);
         f = fopen(path, "w");
-        if (!f) { perror("CAPE UCX: write go file"); exit(1); }
+        if (!f) { perror("CAPE UCX: rewrite rdy_0"); exit(1); }
+        fprintf(f, "go\n");
         fclose(f);
     } else {
-        /* Workers only wait for master's go signal */
-        snprintf(path, sizeof(path), "%s/cape_ucx_%s_go", dir, jobid);
-        while (access(path, F_OK) != 0) {
+        /* Workers wait for master's rdy file to contain the go marker */
+        snprintf(path, sizeof(path), "%s/cape_ucx_%s_rdy_0", dir, jobid);
+        while (1) {
+            f = fopen(path, "r");
+            if (f) {
+                char buf[8] = {0};
+                fgets(buf, sizeof(buf), f);
+                fclose(f);
+                if (buf[0] == 'g') break;
+            }
             cape_profile.ucx_bootstrap_wait_iters++;
             usleep(10000);
         }
