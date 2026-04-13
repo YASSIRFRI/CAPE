@@ -534,6 +534,7 @@ int cape_drain_userfaultfd(void)
 
 int cape_wait_for_child_event(pid_t pid, int *status)
 {
+	static int pidfd = -1;
 	uint64_t total_start_ns = cape_now_ns();
 
 	if (userfault_fd < 0 || !tracking_is_enabled)
@@ -549,50 +550,64 @@ int cape_wait_for_child_event(pid_t pid, int *status)
 		return rc;
 	}
 
+	/* Register pidfd in epoll on first call so the kernel wakes us
+	   on child state changes — no polling or timeouts needed. */
+	if (pidfd < 0) {
+		pidfd = syscall(SYS_pidfd_open, pid, 0);
+		if (pidfd < 0) {
+			perror("pidfd_open");
+			return -1;
+		}
+		struct epoll_event pev;
+		pev.events = EPOLLIN;
+		pev.data.fd = pidfd;
+		if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, pidfd, &pev) < 0) {
+			perror("epoll_ctl(pidfd)");
+			close(pidfd);
+			pidfd = -1;
+			return -1;
+		}
+	}
+
 	for (;;) {
-		uint64_t waitpid_start_ns;
-		pid_t rc;
-		uint64_t waitpid_elapsed_ns;
+		struct epoll_event evs[2];
+		int nfds;
+		uint64_t poll_start_ns;
+		uint64_t poll_elapsed_ns;
 
 		cape_profile.wait_loops++;
-		waitpid_start_ns = cape_now_ns();
-		rc = waitpid(pid, status, WNOHANG);
-		waitpid_elapsed_ns = cape_now_ns() - waitpid_start_ns;
-		cape_profile.waitpid_ns += waitpid_elapsed_ns;
-		cape_profile.waitpid_calls++;
 
-		if (rc == pid) {
-			uint64_t total_elapsed_ns = cape_now_ns() - total_start_ns;
-			cape_profile.wait_for_child_ns += total_elapsed_ns;
-			cape_profile.wait_tracked_ns += total_elapsed_ns;
-			return rc;
-		}
-		if (rc == -1) {
+		/* Block until the kernel signals userfault or child event */
+		poll_start_ns = cape_now_ns();
+		nfds = epoll_wait(epoll_fd, evs, 2, -1);
+		poll_elapsed_ns = cape_now_ns() - poll_start_ns;
+		cape_profile.poll_ns += poll_elapsed_ns;
+		cape_profile.poll_calls++;
+
+		if (nfds == -1) {
 			if (errno == EINTR)
 				continue;
 			return -1;
 		}
-		if (cape_drain_userfaultfd() != 0)
-			return -1;
 
-		{
-			struct epoll_event ev;
-			int poll_rc;
-			uint64_t poll_start_ns;
-			uint64_t poll_elapsed_ns;
-
-			poll_start_ns = cape_now_ns();
-			poll_rc = epoll_wait(epoll_fd, &ev, 1, 50);
-			poll_elapsed_ns = cape_now_ns() - poll_start_ns;
-			cape_profile.poll_ns += poll_elapsed_ns;
-			cape_profile.poll_calls++;
-			if (poll_rc == 0)
-				cape_profile.poll_timeouts++;
-			if (poll_rc == -1 && errno != EINTR)
-				return -1;
-			if (poll_rc > 0 && (ev.events & EPOLLIN) != 0) {
+		for (int i = 0; i < nfds; i++) {
+			if (evs[i].data.fd == userfault_fd) {
 				if (cape_handle_userfault_event() != 0)
 					return -1;
+			} else if (evs[i].data.fd == pidfd) {
+				/* Child changed state — reap it */
+				uint64_t waitpid_start_ns = cape_now_ns();
+				pid_t rc = waitpid(pid, status, WNOHANG);
+				cape_profile.waitpid_ns += cape_now_ns() - waitpid_start_ns;
+				cape_profile.waitpid_calls++;
+				if (rc == pid) {
+					uint64_t total_elapsed_ns = cape_now_ns() - total_start_ns;
+					cape_profile.wait_for_child_ns += total_elapsed_ns;
+					cape_profile.wait_tracked_ns += total_elapsed_ns;
+					close(pidfd);
+					pidfd = -1;
+					return rc;
+				}
 			}
 		}
 	}
