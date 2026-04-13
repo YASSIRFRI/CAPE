@@ -27,9 +27,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/epoll.h>
-#ifndef SYS_pidfd_open
-#define SYS_pidfd_open 434
-#endif
+#include <sys/signalfd.h>
 #include <fcntl.h>
 #include <linux/sched.h>
 #include <linux/userfaultfd.h>
@@ -71,6 +69,7 @@ int child_id, parent_id;
 int control_fd = -1;
 int userfault_fd = -1;
 static int epoll_fd = -1;
+static int signal_fd = -1;
 
 struct cape_dickpt_range *tracked_ranges = NULL;
 size_t tracked_range_count = 0;
@@ -537,7 +536,6 @@ int cape_drain_userfaultfd(void)
 
 int cape_wait_for_child_event(pid_t pid, int *status)
 {
-	static int pidfd = -1;
 	uint64_t total_start_ns = cape_now_ns();
 
 	if (userfault_fd < 0 || !tracking_is_enabled)
@@ -553,21 +551,25 @@ int cape_wait_for_child_event(pid_t pid, int *status)
 		return rc;
 	}
 
-	/* Register pidfd in epoll on first call so the kernel wakes us
-	   on child state changes — no polling or timeouts needed. */
-	if (pidfd < 0) {
-		pidfd = syscall(SYS_pidfd_open, pid, 0);
-		if (pidfd < 0) {
-			perror("pidfd_open");
+	/* Register signalfd for SIGCHLD in epoll on first call so the kernel
+	   wakes us on child state changes — no polling or timeouts needed. */
+	if (signal_fd < 0) {
+		sigset_t mask;
+		sigemptyset(&mask);
+		sigaddset(&mask, SIGCHLD);
+		sigprocmask(SIG_BLOCK, &mask, NULL);
+		signal_fd = signalfd(-1, &mask, SFD_NONBLOCK);
+		if (signal_fd < 0) {
+			perror("signalfd");
 			return -1;
 		}
-		struct epoll_event pev;
-		pev.events = EPOLLIN;
-		pev.data.fd = pidfd;
-		if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, pidfd, &pev) < 0) {
-			perror("epoll_ctl(pidfd)");
-			close(pidfd);
-			pidfd = -1;
+		struct epoll_event sev;
+		sev.events = EPOLLIN;
+		sev.data.fd = signal_fd;
+		if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, signal_fd, &sev) < 0) {
+			perror("epoll_ctl(signalfd)");
+			close(signal_fd);
+			signal_fd = -1;
 			return -1;
 		}
 	}
@@ -597,7 +599,11 @@ int cape_wait_for_child_event(pid_t pid, int *status)
 			if (evs[i].data.fd == userfault_fd) {
 				if (cape_handle_userfault_event() != 0)
 					return -1;
-			} else if (evs[i].data.fd == pidfd) {
+			} else if (evs[i].data.fd == signal_fd) {
+				/* Drain the signalfd */
+				struct signalfd_siginfo sinfo;
+				while (read(signal_fd, &sinfo, sizeof(sinfo)) > 0)
+					;
 				/* Child changed state — reap it */
 				uint64_t waitpid_start_ns = cape_now_ns();
 				pid_t rc = waitpid(pid, status, WNOHANG);
@@ -607,8 +613,6 @@ int cape_wait_for_child_event(pid_t pid, int *status)
 					uint64_t total_elapsed_ns = cape_now_ns() - total_start_ns;
 					cape_profile.wait_for_child_ns += total_elapsed_ns;
 					cape_profile.wait_tracked_ns += total_elapsed_ns;
-					close(pidfd);
-					pidfd = -1;
 					return rc;
 				}
 			}
