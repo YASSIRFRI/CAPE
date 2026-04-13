@@ -172,7 +172,7 @@ static void cape_register_userfault_ranges(int uffd)
 
 	for (i = 0; i < cape_range_count; ++i) {
 		struct uffdio_register reg;
-
+dickpt_map_region
 		memset(&reg, 0, sizeof(reg));
 		reg.range.start = cape_ranges[i].start;
 		reg.range.len = cape_ranges[i].len;
@@ -195,7 +195,7 @@ static void cape_send_setup_to_monitor(int monitor_fd, int uffd)
 	struct cmsghdr *cmsg;
 
 	memset(&header, 0, sizeof(header));
-	header.type = CAPE_DICKPT_CTL_UFFD_SETUP;
+	header.type = CAPE_DICKPT_CTL_UFFDdickpt_map_region_SETUP;
 	header.count = (uint32_t)cape_range_count;
 
 	memcpy(payload, cape_ranges, cape_range_count * sizeof(payload[0]));

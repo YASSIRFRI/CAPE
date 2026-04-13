@@ -26,7 +26,7 @@
 #include <math.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
-#include <poll.h>
+#include <sys/epoll.h>
 #include <fcntl.h>
 #include <linux/sched.h>
 #include <linux/userfaultfd.h>
@@ -67,6 +67,7 @@ int process_state = 0; //to follow the state of process
 int child_id, parent_id;
 int control_fd = -1;
 int userfault_fd = -1;
+static int epoll_fd = -1;
 
 struct cape_dickpt_range *tracked_ranges = NULL;
 size_t tracked_range_count = 0;
@@ -516,21 +517,16 @@ static int cape_handle_userfault_event(void)
 
 int cape_drain_userfaultfd(void)
 {
-	struct pollfd pfd;
+	struct epoll_event ev;
 
 	if (userfault_fd < 0 || !tracking_is_enabled)
 		return 0;
 
-	memset(&pfd, 0, sizeof(pfd));
-	pfd.fd = userfault_fd;
-	pfd.events = POLLIN;
-
-	while (poll(&pfd, 1, 0) > 0) {
-		if ((pfd.revents & POLLIN) == 0)
+	while (epoll_wait(epoll_fd, &ev, 1, 0) > 0) {
+		if ((ev.events & EPOLLIN) == 0)
 			break;
 		if (cape_handle_userfault_event() != 0)
 			return -1;
-		pfd.revents = 0;
 	}
 
 	return 0;
@@ -580,16 +576,13 @@ int cape_wait_for_child_event(pid_t pid, int *status)
 			return -1;
 
 		{
-			struct pollfd pfd;
+			struct epoll_event ev;
 			int poll_rc;
 			uint64_t poll_start_ns;
 			uint64_t poll_elapsed_ns;
 
-			memset(&pfd, 0, sizeof(pfd));
-			pfd.fd = userfault_fd;
-			pfd.events = POLLIN;
 			poll_start_ns = cape_now_ns();
-			poll_rc = poll(&pfd, 1, 50);
+			poll_rc = epoll_wait(epoll_fd, &ev, 1, 50);
 			poll_elapsed_ns = cape_now_ns() - poll_start_ns;
 			cape_profile.poll_ns += poll_elapsed_ns;
 			cape_profile.poll_calls++;
@@ -597,7 +590,7 @@ int cape_wait_for_child_event(pid_t pid, int *status)
 				cape_profile.poll_timeouts++;
 			if (poll_rc == -1 && errno != EINTR)
 				return -1;
-			if (poll_rc > 0 && (pfd.revents & POLLIN) != 0) {
+			if (poll_rc > 0 && (ev.events & EPOLLIN) != 0) {
 				if (cape_handle_userfault_event() != 0)
 					return -1;
 			}
@@ -674,6 +667,20 @@ int cape_receive_userfaultfd_setup(void)
 
 	if (userfault_fd < 0)
 		return 1;
+
+	/* Create epoll instance and register userfault_fd */
+	epoll_fd = epoll_create1(0);
+	if (epoll_fd < 0) {
+		perror("epoll_create1");
+		return 1;
+	}
+	struct epoll_event ev;
+	ev.events = EPOLLIN;
+	ev.data.fd = userfault_fd;
+	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, userfault_fd, &ev) < 0) {
+		perror("epoll_ctl(userfault_fd)");
+		return 1;
+	}
 
 	return 0;
 }
