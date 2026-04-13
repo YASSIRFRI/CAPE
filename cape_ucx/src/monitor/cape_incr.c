@@ -27,7 +27,6 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/epoll.h>
-#include <sys/signalfd.h>
 #include <fcntl.h>
 #include <linux/sched.h>
 #include <linux/userfaultfd.h>
@@ -69,7 +68,6 @@ int child_id, parent_id;
 int control_fd = -1;
 int userfault_fd = -1;
 static int epoll_fd = -1;
-static int signal_fd = -1;
 
 struct cape_dickpt_range *tracked_ranges = NULL;
 size_t tracked_range_count = 0;
@@ -551,70 +549,48 @@ int cape_wait_for_child_event(pid_t pid, int *status)
 		return rc;
 	}
 
-	/* Register signalfd for SIGCHLD in epoll on first call so the kernel
-	   wakes us on child state changes — no polling or timeouts needed. */
-	if (signal_fd < 0) {
-		sigset_t mask;
-		sigemptyset(&mask);
-		sigaddset(&mask, SIGCHLD);
-		sigprocmask(SIG_BLOCK, &mask, NULL);
-		signal_fd = signalfd(-1, &mask, SFD_NONBLOCK);
-		if (signal_fd < 0) {
-			perror("signalfd");
-			return -1;
-		}
-		struct epoll_event sev;
-		sev.events = EPOLLIN;
-		sev.data.fd = signal_fd;
-		if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, signal_fd, &sev) < 0) {
-			perror("epoll_ctl(signalfd)");
-			close(signal_fd);
-			signal_fd = -1;
-			return -1;
-		}
-	}
-
 	for (;;) {
-		struct epoll_event evs[2];
-		int nfds;
-		uint64_t poll_start_ns;
-		uint64_t poll_elapsed_ns;
+		uint64_t waitpid_start_ns;
+		pid_t rc;
 
 		cape_profile.wait_loops++;
+		waitpid_start_ns = cape_now_ns();
+		rc = waitpid(pid, status, WNOHANG);
+		cape_profile.waitpid_ns += cape_now_ns() - waitpid_start_ns;
+		cape_profile.waitpid_calls++;
 
-		/* Block until the kernel signals userfault or child event */
-		poll_start_ns = cape_now_ns();
-		nfds = epoll_wait(epoll_fd, evs, 2, -1);
-		poll_elapsed_ns = cape_now_ns() - poll_start_ns;
-		cape_profile.poll_ns += poll_elapsed_ns;
-		cape_profile.poll_calls++;
-
-		if (nfds == -1) {
+		if (rc == pid) {
+			uint64_t total_elapsed_ns = cape_now_ns() - total_start_ns;
+			cape_profile.wait_for_child_ns += total_elapsed_ns;
+			cape_profile.wait_tracked_ns += total_elapsed_ns;
+			return rc;
+		}
+		if (rc == -1) {
 			if (errno == EINTR)
 				continue;
 			return -1;
 		}
+		if (cape_drain_userfaultfd() != 0)
+			return -1;
 
-		for (int i = 0; i < nfds; i++) {
-			if (evs[i].data.fd == userfault_fd) {
+		{
+			struct epoll_event ev;
+			int nfds;
+			uint64_t poll_start_ns;
+			uint64_t poll_elapsed_ns;
+
+			poll_start_ns = cape_now_ns();
+			nfds = epoll_wait(epoll_fd, &ev, 1, 1);
+			poll_elapsed_ns = cape_now_ns() - poll_start_ns;
+			cape_profile.poll_ns += poll_elapsed_ns;
+			cape_profile.poll_calls++;
+			if (nfds == 0)
+				cape_profile.poll_timeouts++;
+			if (nfds == -1 && errno != EINTR)
+				return -1;
+			if (nfds > 0 && (ev.events & EPOLLIN) != 0) {
 				if (cape_handle_userfault_event() != 0)
 					return -1;
-			} else if (evs[i].data.fd == signal_fd) {
-				/* Drain the signalfd */
-				struct signalfd_siginfo sinfo;
-				while (read(signal_fd, &sinfo, sizeof(sinfo)) > 0)
-					;
-				/* Child changed state — reap it */
-				uint64_t waitpid_start_ns = cape_now_ns();
-				pid_t rc = waitpid(pid, status, WNOHANG);
-				cape_profile.waitpid_ns += cape_now_ns() - waitpid_start_ns;
-				cape_profile.waitpid_calls++;
-				if (rc == pid) {
-					uint64_t total_elapsed_ns = cape_now_ns() - total_start_ns;
-					cape_profile.wait_for_child_ns += total_elapsed_ns;
-					cape_profile.wait_tracked_ns += total_elapsed_ns;
-					return rc;
-				}
 			}
 		}
 	}
