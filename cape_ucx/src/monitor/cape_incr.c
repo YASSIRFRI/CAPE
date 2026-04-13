@@ -27,6 +27,9 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/epoll.h>
+#ifndef SYS_pidfd_open
+#define SYS_pidfd_open 434
+#endif
 #include <fcntl.h>
 #include <linux/sched.h>
 #include <linux/userfaultfd.h>
