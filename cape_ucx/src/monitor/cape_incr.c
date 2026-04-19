@@ -3280,10 +3280,9 @@ int require_allreduce_checkpoint(){
 		 
 	}	
 	
-//	printf("\nAFTER SYNCRONIZED: Node %ld: TOTAL CHECKPOINT SIZE = %d", node, total_ckpt_size);
-//	join_checkpoint(TOTAL_CHECKPOINT, final_list_ckpt_head);
-//	print_data_in_ckpt_list(final_list_ckpt_head);
-//	printf("\nAFTER SYNCRONIZED and JOINED: Node %ld: TOTAL CHECKPOINT SIZE = %d", node, total_ckpt_size);
+	/* Inject the merged checkpoint back into the child's address space
+	 * so the application sees all nodes' results. */
+	rc = inject_checkpoint(total_ckpt_stream, &total_ckpt_size, &save_regs);
 
 	return rc;
 }
