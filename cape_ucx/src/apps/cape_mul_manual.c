@@ -24,48 +24,43 @@ static unsigned long get_ms_of_day(void)
 	return (unsigned long)(tv.tv_sec * 1000UL + tv.tv_usec / 1000UL);
 }
 
-static int verify_result_samples(const struct ckpt_state *state, int n,
-				 int row_start, int row_end,
-				 unsigned long node, int rep)
+/* Verify the FULL result matrix (all rows, not just local).
+ * After allreduce every node should have the complete c = a * b. */
+static int verify_full(const struct ckpt_state *state, int n,
+		       int row_start, int row_end,
+		       unsigned long node, int rep)
 {
-	int local_rows = row_end - row_start;
-	int row_offsets[3];
-	int col_samples[4];
-	int r, c;
+	int errors = 0;
+	int i, j, k;
 
-	if (local_rows <= 0)
-		return 0;
-
-	row_offsets[0] = 0;
-	row_offsets[1] = local_rows / 2;
-	row_offsets[2] = local_rows - 1;
-
-	col_samples[0] = 0;
-	col_samples[1] = n / 3;
-	col_samples[2] = n / 2;
-	col_samples[3] = n - 1;
-
-	for (r = 0; r < 3; r++) {
-		int row = row_start + row_offsets[r];
-
-		for (c = 0; c < 4; c++) {
-			int col = col_samples[c];
+	for (i = 0; i < n; i++) {
+		for (j = 0; j < n; j++) {
 			long long expected = 0;
-			int k;
-
 			for (k = 0; k < n; k++)
-				expected += (long long)a[row][k] * b[k][col];
+				expected += (long long)a[i][k] * b[k][j];
 
-			if ((long long)state->c[row][col] != expected) {
+			if ((long long)state->c[i][j] != expected) {
+				const char *origin = (i >= row_start && i < row_end)
+						     ? "LOCAL" : "REMOTE";
 				fprintf(stderr,
-					"VERIFY FAIL node=%lu rep=%d row=%d col=%d got=%d expected=%lld\n",
-					node, rep, row, col, state->c[row][col], expected);
-				return 1;
+					"VERIFY FAIL [%s] node=%lu rep=%d "
+					"c[%d][%d] got=%d expected=%lld\n",
+					origin, node, rep, i, j,
+					state->c[i][j], expected);
+				if (++errors >= 10) {
+					fprintf(stderr,
+						"... too many errors, stopping\n");
+					return errors;
+				}
 			}
 		}
 	}
 
-	return 0;
+	if (errors == 0 && node == 0)
+		printf("VERIFY OK  rep=%d (%d x %d) all %d cells correct\n",
+		       rep, n, n, n * n);
+
+	return errors;
 }
 
 int main(int argc, char *argv[])
@@ -135,10 +130,11 @@ int main(int argc, char *argv[])
 		}
 
 		dickpt_generate_ckpt();
+		dickpt_allreduce_ckpt();
 		dickpt_stop_ckpt();
 
 		t1 = get_ms_of_day();
-		if (verify_result_samples(state, n, row_start, row_end, node, rep) != 0)
+		if (verify_full(state, n, row_start, row_end, node, rep) != 0)
 			return 1;
 
 		if (node == 0)

@@ -112,35 +112,18 @@ function replaceParallel
 	construct DickptStopCkpt [dickpt_stop_ckpt]
 		'dickpt_stop_ckpt();
 
-	construct HasReduction [opt dickpt_allreduce]
-		_ [addAllreduceIfNeededInParallel Clauses]
+	construct DickptAllreduce [dickpt_allreduce]
+		'dickpt_allreduce_ckpt();
 
 	construct NewDickptParallel [dickpt_parallel]
 		DickptStartCkpt
 		NewClauseList
 		InnerStatement
-		HasReduction
 		DickptGenerateCkpt
+		DickptAllreduce
 		DickptStopCkpt
 	by
 		NewDickptParallel
-end function
-
-function addAllreduceIfNeededInParallel Clauses [repeat parallel_construct_clauses]
-	replace [opt dickpt_allreduce]
-		AllReduceOpt [opt dickpt_allreduce]
-	where
-		Clauses [checkReductionClauseInParallel]
-
-	construct AllReduce [dickpt_allreduce]
-		'dickpt_allreduce_ckpt();
-	by
-		AllReduce
-end function
-
-function checkReductionClauseInParallel
-	match * [parallel_construct_clauses]
-		ReductionC [omp_reduction_clause]
 end function
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -179,8 +162,8 @@ function replaceParallelFor
 	construct DickptStopCkpt [dickpt_stop_ckpt]
 		'dickpt_stop_ckpt();
 
-	construct HasReduction [opt dickpt_allreduce]
-		_ [addAllreduceIfNeededInParallel Clauses]
+	construct DickptAllreduce [dickpt_allreduce]
+		'dickpt_allreduce_ckpt();
 
 	construct NewDickptParallelFor [dickpt_parallel_for]
 	{
@@ -196,8 +179,8 @@ function replaceParallelFor
 		NewClauseList
 		for (BinExp1 = __dickpt_left__ '; BinExp1 BinOp2 __dickpt_right__ '; Exp3)
 			Statement
-		HasReduction
 		DickptGenerateCkpt
+		DickptAllreduce
 		DickptStopCkpt
 	}
 	by
@@ -238,15 +221,15 @@ function replaceParallelSections
 			[addParallelReductionClauses each Clauses]
 			[addParallelCopyinClauses each Clauses]
 
-	construct HasReduction [opt dickpt_allreduce]
-		_ [addAllreduceIfNeededInParallel Clauses]
+	construct DickptAllreduce [dickpt_allreduce]
+		'dickpt_allreduce_ckpt();
 
 	construct NewDickptSections [dickpt_parallel_sections]
 		DickptStartCkpt
 		NewClausesList
 		SectionList
-		HasReduction
 		DickptGenerateCkpt
+		DickptAllreduce
 		DickptStopCkpt
 	by
 		NewDickptSections

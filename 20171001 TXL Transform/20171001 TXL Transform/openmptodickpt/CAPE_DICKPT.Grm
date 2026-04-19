@@ -101,8 +101,8 @@ define dickpt_parallel
 	[dickpt_start_ckpt]						[IN]
 	[clauses]								[EX]
 	[repeat compound_statement_body]
-	[opt dickpt_allreduce]
 	[dickpt_generate_ckpt]
+	[dickpt_allreduce]
 	[dickpt_stop_ckpt]
 end define
 
@@ -119,8 +119,8 @@ define dickpt_parallel_for
 		[dickpt_start_ckpt]
 		[clauses]
 		[for_statement]
-		[opt dickpt_allreduce]
 		[dickpt_generate_ckpt]
+		[dickpt_allreduce]
 		[dickpt_stop_ckpt]								[EX]
 	}														[NL]
 end define
@@ -129,8 +129,8 @@ define dickpt_parallel_sections
 	[dickpt_start_ckpt]
 	[clauses]
 	[repeat dickpt_section_statement+]
-	[opt dickpt_allreduce]
 	[dickpt_generate_ckpt]
+	[dickpt_allreduce]
 	[dickpt_stop_ckpt]
 end define
 
