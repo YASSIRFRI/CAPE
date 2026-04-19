@@ -1,0 +1,618 @@
+% Construct Transformation Rules for DICKPT.
+% Based on constructRules.Rul by Patricia REINOSO.
+%
+% DICKPT checkpoint model:
+%   - The PC (program counter) is the timestamp. All nodes run the
+%     same .text, so int3 addresses match across nodes.
+%   - The monitor compares dirty page bytes. Data parallelism means
+%     nodes write to disjoint sections => no conflict on merge.
+%   - Only the OUTERMOST parallel region owns the checkpoint lifecycle
+%     (dickpt_start_ckpt / dickpt_generate_ckpt / dickpt_stop_ckpt).
+%   - Inner constructs (for, sections, single, master) are pure
+%     control flow. They do NOT touch checkpoint operations.
+
+% Definition of directive. Union of omp and dickpt directives.
+define directives
+		[pragma_omp]
+	|	[dickpt_statement]
+end define
+
+% Inclusion of the definition of directives into
+% the definition of preprocessor already defined in
+% the C grammar.
+redefine preprocessor
+		...
+	|	[directives]
+end redefine
+
+
+% Main rule to replace omp constructs.
+rule replaceConstruct
+	replace [directives]
+		Construct [directives]
+
+	construct NewConstruct [directives]
+		Construct [replaceThreadPrivate]
+					[replaceParallelFor]
+					[replaceParallelSections]
+					[replaceParallel]
+					[replaceFor]
+					[replaceSections]
+					[replaceSingle]
+					[replaceMaster]
+					[replaceCritical]
+					[replaceBarrier]
+					[replaceAutomic]
+					[replaceFlush]
+	where not
+		NewConstruct [= Construct]
+	by
+		NewConstruct
+end rule
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%			THREAD PRIVATE CONSTRUCT REPLACEMENT 	  	%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+function replaceThreadPrivate
+	replace [directives]
+		'#pragma omp threadprivate(Variables [list decl_specifiers])
+
+	construct NewDickptStatement [repeat dickpt_threadprivate_variables]
+		_ [addVarThreadPrivate each Variables]
+
+	construct NewThreadPrivateStatement [dickpt_threadprivate]
+		NewDickptStatement
+	by
+		NewThreadPrivateStatement
+end function
+
+function addVarThreadPrivate Variable [decl_specifiers]
+
+	construct NewDickptThreadPrivate [dickpt_threadprivate_variables]
+		__cape_signal_val(D_THEAD_PRIVATE, (unsigned 'long)& Variable);
+
+	replace [repeat dickpt_threadprivate_variables]
+		DickptStatementList [repeat dickpt_threadprivate_variables]
+	by
+		DickptStatementList [. NewDickptThreadPrivate]
+end function
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%				PARALLEL CONSTRUCT REPLACEMENT 		  	%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+% Parallel is an outermost construct that owns the
+% checkpoint lifecycle: start_ckpt -> body -> generate -> stop.
+function replaceParallel
+	replace [directives]
+		'#pragma omp parallel Clauses [repeat parallel_construct_clauses]
+		Statement [statement]
+
+	deconstruct Statement
+		'{
+			InnerStatement [repeat compound_statement_body]
+		'}
+
+	construct NewClauseList [repeat clauses]
+		_ 	[addParallelDefaultClauses each Clauses]
+			[addParallelSharedClauses each Clauses]
+			[addParallelPrivateClauses each Clauses]
+			[addParallelFirstPrivateClauses each Clauses]
+			[addParallelLastPrivateClauses each Clauses]
+			[addParallelReductionClauses each Clauses]
+			[addParallelCopyinClauses each Clauses]
+
+	construct DickptStartCkpt [dickpt_start_ckpt]
+		'dickpt_start_ckpt();
+
+	construct DickptGenerateCkpt [dickpt_generate_ckpt]
+		'dickpt_generate_ckpt();
+
+	construct DickptStopCkpt [dickpt_stop_ckpt]
+		'dickpt_stop_ckpt();
+
+	construct HasReduction [opt dickpt_allreduce]
+		_ [addAllreduceIfNeededInParallel Clauses]
+
+	construct NewDickptParallel [dickpt_parallel]
+		DickptStartCkpt
+		NewClauseList
+		InnerStatement
+		HasReduction
+		DickptGenerateCkpt
+		DickptStopCkpt
+	by
+		NewDickptParallel
+end function
+
+function addAllreduceIfNeededInParallel Clauses [repeat parallel_construct_clauses]
+	replace [opt dickpt_allreduce]
+		AllReduceOpt [opt dickpt_allreduce]
+	where
+		Clauses [checkReductionClauseInParallel]
+
+	construct AllReduce [dickpt_allreduce]
+		'dickpt_allreduce_ckpt();
+	by
+		AllReduce
+end function
+
+function checkReductionClauseInParallel
+	match * [parallel_construct_clauses]
+		ReductionC [omp_reduction_clause]
+end function
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%			PARALLEL FOR CONSTRUCT REPLACEMENT 		  	%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+% Combined parallel+for: outermost construct, owns checkpoint lifecycle.
+% Computes work distribution and wraps in start_ckpt/generate/stop.
+function replaceParallelFor
+	replace [directives]
+		'#pragma omp parallel for Clauses [repeat parallel_construct_clauses]
+		for ( Exp1 [opt expression] '; Exp2 [opt expression] '; Exp3 [opt expression] )
+		Statement [statement]
+
+	construct NewClauseList [repeat clauses]
+		_ 	[addParallelDefaultClauses each Clauses]
+			[addParallelSharedClauses each Clauses]
+			[addParallelPrivateClauses each Clauses]
+			[addParallelFirstPrivateClauses each Clauses]
+			[addParallelLastPrivateClauses each Clauses]
+			[addParallelReductionClauses each Clauses]
+			[addParallelCopyinClauses each Clauses]
+
+	deconstruct Exp1
+		BinExp1 [binary_expression] '= UnExp1 [unary_expression]
+
+	deconstruct Exp2
+		BinExp2 [binary_expression] BinOp2 [binary_operator] UnExp2 [unary_expression]
+
+	construct DickptStartCkpt [dickpt_start_ckpt]
+		'dickpt_start_ckpt();
+
+	construct DickptGenerateCkpt [dickpt_generate_ckpt]
+		'dickpt_generate_ckpt();
+
+	construct DickptStopCkpt [dickpt_stop_ckpt]
+		'dickpt_stop_ckpt();
+
+	construct HasReduction [opt dickpt_allreduce]
+		_ [addAllreduceIfNeededInParallel Clauses]
+
+	construct NewDickptParallelFor [dickpt_parallel_for]
+	{
+		unsigned 'long __dickpt_node__ = 'dickpt_read_node();
+		unsigned 'long __dickpt_num_nodes__ = 'dickpt_read_num_nodes();
+		'long 'long __dickpt_first__ = UnExp1;
+		'long 'long __dickpt_last__ = UnExp2;
+		'long 'long __dickpt_count__ = __dickpt_last__ - __dickpt_first__;
+		'long 'long __dickpt_left__ = __dickpt_first__ + (__dickpt_count__ * __dickpt_node__) / __dickpt_num_nodes__;
+		'long 'long __dickpt_right__ = __dickpt_first__ + (__dickpt_count__ * (__dickpt_node__ + 1)) / __dickpt_num_nodes__;
+		'dickpt_send_num_jobs(__dickpt_count__);
+		DickptStartCkpt
+		NewClauseList
+		for (BinExp1 = __dickpt_left__ '; BinExp1 BinOp2 __dickpt_right__ '; Exp3)
+			Statement
+		HasReduction
+		DickptGenerateCkpt
+		DickptStopCkpt
+	}
+	by
+		NewDickptParallelFor
+end function
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%		PARALLEL SECTIONS CONSTRUCT REPLACEMENT 	  	%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+% Combined parallel+sections: outermost construct, owns checkpoint.
+function replaceParallelSections
+
+	replace [directives]
+		'#pragma omp parallel sections Clauses [repeat parallel_construct_clauses]
+		 '{
+			Sections [repeat section_structure+]
+		 '}
+
+	construct SectionList [repeat dickpt_section_statement]
+		_ [addDickptSection each Sections]
+
+	construct DickptStartCkpt [dickpt_start_ckpt]
+		'dickpt_start_ckpt();
+
+	construct DickptGenerateCkpt [dickpt_generate_ckpt]
+		'dickpt_generate_ckpt();
+
+	construct DickptStopCkpt [dickpt_stop_ckpt]
+		'dickpt_stop_ckpt();
+
+	construct NewClausesList [repeat clauses]
+		_ 	[addParallelDefaultClauses each Clauses]
+			[addParallelSharedClauses each Clauses]
+			[addParallelPrivateClauses each Clauses]
+			[addParallelFirstPrivateClauses each Clauses]
+			[addParallelLastPrivateClauses each Clauses]
+			[addParallelReductionClauses each Clauses]
+			[addParallelCopyinClauses each Clauses]
+
+	construct HasReduction [opt dickpt_allreduce]
+		_ [addAllreduceIfNeededInParallel Clauses]
+
+	construct NewDickptSections [dickpt_parallel_sections]
+		DickptStartCkpt
+		NewClausesList
+		SectionList
+		HasReduction
+		DickptGenerateCkpt
+		DickptStopCkpt
+	by
+		NewDickptSections
+end function
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%				FOR CONSTRUCT REPLACEMENT 			  	%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+% Inner for: NO checkpoint lifecycle. The enclosing parallel
+% already owns start_ckpt/generate/stop.
+% This just computes work distribution and loops.
+function replaceFor
+	replace [directives]
+		PragmaStatement [pragma_omp]
+
+	deconstruct PragmaStatement
+		'#pragma omp ForConstruct [for_construct]
+
+	construct NewFor [directives]
+		PragmaStatement
+	by
+		NewFor [replaceForNowait] [replaceRegularFor]
+end function
+
+function replaceForNowait
+	replace [directives]
+		'#pragma omp 'for NowaitClause[omp_nowait_clause] Clauses [repeat for_construct_clauses]
+		for ( Exp1 [opt expression] '; Exp2 [opt expression] '; Exp3 [opt expression] )
+		Statement [statement]
+
+	construct NewForClause [for_construct_clauses]
+		NowaitClause
+
+	construct NewOMPClauses [repeat for_construct_clauses]
+		Clauses [. NewForClause]
+
+	construct NewClauseList [repeat clauses]
+		_ 	[addForPrivateClauses each NewOMPClauses]
+			[addForFirstPrivateClauses each NewOMPClauses]
+			[addForLastPrivateClauses each NewOMPClauses]
+			[addForReductionClauses each NewOMPClauses]
+			[addForNowaitClauses each NewOMPClauses]
+
+	deconstruct Exp1
+		BinExp1 [binary_expression] '= UnExp1 [unary_expression]
+
+	deconstruct Exp2
+		BinExp2 [binary_expression] BinOp2 [binary_operator] UnExp2 [unary_expression]
+
+	construct HasReduction [opt dickpt_allreduce]
+		_ [addAllreduceIfNeededInFor NewOMPClauses]
+
+	% No start_ckpt / generate / stop -- inner construct
+	construct NewDickptFor [dickpt_for]
+	{
+		unsigned 'long __dickpt_node__ = 'dickpt_read_node();
+		unsigned 'long __dickpt_num_nodes__ = 'dickpt_read_num_nodes();
+		'long 'long __dickpt_first__ = UnExp1;
+		'long 'long __dickpt_last__ = UnExp2;
+		'long 'long __dickpt_count__ = __dickpt_last__ - __dickpt_first__;
+		'long 'long __dickpt_left__ = __dickpt_first__ + (__dickpt_count__ * __dickpt_node__) / __dickpt_num_nodes__;
+		'long 'long __dickpt_right__ = __dickpt_first__ + (__dickpt_count__ * (__dickpt_node__ + 1)) / __dickpt_num_nodes__;
+		'dickpt_send_num_jobs(__dickpt_count__);
+		NewClauseList
+		for (BinExp1 = __dickpt_left__ '; BinExp1 BinOp2 __dickpt_right__ '; Exp3)
+			Statement
+		HasReduction
+	}
+	by
+		NewDickptFor
+end function
+
+function replaceRegularFor
+	replace [directives]
+		'#pragma omp 'for Clauses [repeat for_construct_clauses]
+		for ( Exp1 [opt expression] '; Exp2 [opt expression] '; Exp3 [opt expression] )
+		Statement [statement]
+
+	construct NewClausesList [repeat clauses]
+		_ 	[addForPrivateClauses each Clauses]
+			[addForFirstPrivateClauses each Clauses]
+			[addForLastPrivateClauses each Clauses]
+			[addForReductionClauses each Clauses]
+			[addForNowaitClauses each Clauses]
+
+	deconstruct Exp1
+		BinExp1 [binary_expression] '= UnExp1 [unary_expression]
+
+	deconstruct Exp2
+		BinExp2 [binary_expression] BinOp2 [binary_operator] UnExp2 [unary_expression]
+
+	construct HasReduction [opt dickpt_allreduce]
+		_ [addAllreduceIfNeededInFor Clauses]
+
+	% No start_ckpt / generate / stop -- inner construct
+	construct NewDickptFor [dickpt_for]
+	{
+		unsigned 'long __dickpt_node__ = 'dickpt_read_node();
+		unsigned 'long __dickpt_num_nodes__ = 'dickpt_read_num_nodes();
+		'long 'long __dickpt_first__ = UnExp1;
+		'long 'long __dickpt_last__ = UnExp2;
+		'long 'long __dickpt_count__ = __dickpt_last__ - __dickpt_first__;
+		'long 'long __dickpt_left__ = __dickpt_first__ + (__dickpt_count__ * __dickpt_node__) / __dickpt_num_nodes__;
+		'long 'long __dickpt_right__ = __dickpt_first__ + (__dickpt_count__ * (__dickpt_node__ + 1)) / __dickpt_num_nodes__;
+		'dickpt_send_num_jobs(__dickpt_count__);
+		NewClausesList
+		for (BinExp1 = __dickpt_left__ '; BinExp1 BinOp2 __dickpt_right__ '; Exp3)
+			Statement
+		HasReduction
+	}
+	by
+		NewDickptFor
+end function
+
+function addAllreduceIfNeededInFor Clauses [repeat for_construct_clauses]
+	replace [opt dickpt_allreduce]
+		AllReduceOpt [opt dickpt_allreduce]
+	where
+		Clauses [checkReductionClauseInFor]
+
+	construct AllReduce [dickpt_allreduce]
+		'dickpt_allreduce_ckpt();
+	by
+		AllReduce
+end function
+
+function checkReductionClauseInFor
+	match * [for_construct_clauses]
+		ReductionC [omp_reduction_clause]
+end function
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%				SECTIONS CONSTRUCT REPLACEMENT 		  	%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+% Inner sections: NO checkpoint lifecycle.
+% Just route each section to a node by rank.
+function replaceSections
+
+	replace [directives]
+		PragmaStatement [pragma_omp]
+
+	deconstruct PragmaStatement
+		'#pragma omp SectionsConstruct [sections_construct]
+
+	construct NewSections [directives]
+		PragmaStatement
+	by
+		NewSections [replaceSectionsNowait] [replaceRegularSections]
+end function
+
+function replaceSectionsNowait
+
+	replace [directives]
+		'#pragma omp sections NowaitClause[omp_nowait_clause] Clauses [repeat sections_construct_clauses]
+		 '{
+			Sections [repeat section_structure+]
+		 '}
+
+	construct SectionList [repeat dickpt_section_statement]
+		_ [addDickptSection each Sections]
+
+	construct NewSectionClause [sections_construct_clauses]
+		NowaitClause
+
+	construct NewOMPClauses [repeat sections_construct_clauses]
+		Clauses [. NewSectionClause]
+
+	construct NewClausesList [repeat clauses]
+		_ 	[addSectionsPrivateClauses each NewOMPClauses]
+			[addSectionsFirstPrivateClauses each NewOMPClauses]
+			[addSectionsLastPrivateClauses each NewOMPClauses]
+			[addSectionsReductionClauses each NewOMPClauses]
+			[addSectionsNowaitClauses each NewOMPClauses]
+
+	% No checkpoint lifecycle -- inner construct
+	construct NewDickptSections [dickpt_sections]
+		NewClausesList
+		SectionList
+	by
+		NewDickptSections
+end function
+
+function replaceRegularSections
+
+	replace [directives]
+		'#pragma omp sections Clauses [repeat sections_construct_clauses]
+		 '{
+			Sections [repeat section_structure+]
+		 '}
+
+	construct SectionList [repeat dickpt_section_statement]
+		_ [addDickptSection each Sections]
+
+	construct NewClausesList [repeat clauses]
+		_ 	[addSectionsPrivateClauses each Clauses]
+			[addSectionsFirstPrivateClauses each Clauses]
+			[addSectionsLastPrivateClauses each Clauses]
+			[addSectionsReductionClauses each Clauses]
+			[addSectionsNowaitClauses each Clauses]
+
+	% No checkpoint lifecycle -- inner construct
+	construct NewDickptSections [dickpt_sections]
+		NewClausesList
+		SectionList
+	by
+		NewDickptSections
+end function
+
+function addAllreduceIfNeededInSections Clauses [repeat sections_construct_clauses]
+	replace [opt dickpt_allreduce]
+		AllReduceOpt [opt dickpt_allreduce]
+	where
+		Clauses [checkReductionClauseInSections]
+
+	construct AllReduce [dickpt_allreduce]
+		'dickpt_allreduce_ckpt();
+	by
+		AllReduce
+end function
+
+function checkReductionClauseInSections
+	match * [sections_construct_clauses]
+		ReductionC [omp_reduction_clause]
+end function
+
+% In DICKPT, sections are assigned to nodes by rank.
+% Each section is guarded by: if (dickpt_read_node() == N)
+function addDickptSection Section [section_structure]
+
+	deconstruct Section
+		'['#pragma omp section']
+			Body [repeat compound_statement_body]
+
+	import SectionCounter [number]
+
+	construct NewSection [dickpt_section_statement]
+		if ('dickpt_read_node() == SectionCounter)
+		'{
+			Body
+		'}
+
+	construct One [number]
+		1
+	construct NextCounter [number]
+		SectionCounter [+ One]
+	export SectionCounter
+		NextCounter
+
+	replace [repeat dickpt_section_statement]
+		SectionList [repeat dickpt_section_statement]
+
+	by
+		SectionList [. NewSection]
+
+end function
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%			SINGLE CONSTRUCT REPLACEMENT 			  	%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+% Inner single: just route to node 0. No checkpoint ops.
+function replaceSingle
+	replace [directives]
+		'#pragma omp single Clauses [repeat single_construct_clauses]
+		CompoundStatement [compound_statement]
+
+	construct NewDickptClauses [repeat clauses]
+		_ 	[addSinglePrivateClauses each Clauses]
+			[addSingleFirstPrivateClauses each Clauses]
+			[addSingleCopyPrivateClauses each Clauses]
+			[addSingleNowaitClauses each Clauses]
+
+	construct NewDickptSingle [dickpt_single]
+		NewDickptClauses
+		if('dickpt_read_node()==0)
+			CompoundStatement
+	by
+		NewDickptSingle
+end function
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%			MASTER CONSTRUCT REPLACEMENT 			  	%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+% Inner master: just route to node 0. No checkpoint ops.
+function replaceMaster
+	replace [directives]
+		'#pragma omp master
+		CompoundStatement [compound_statement]
+
+	construct NewDickptMaster [dickpt_master]
+		if('dickpt_read_node()==0)
+			CompoundStatement
+	by
+		NewDickptMaster
+end function
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%			CRITICAL CONSTRUCT REPLACEMENT 			  	%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+% Critical: serialize execution across nodes using barriers.
+function replaceCritical
+	replace [directives]
+		'#pragma omp critical
+		CompoundStatement [compound_statement]
+
+	construct DickptBarrier [dickpt_barrier]
+		'dickpt_waitfor_ckpt();
+
+	construct NewDickptCritical [dickpt_automic_critical]
+		for (__i__ = 0 '; __i__ < 'dickpt_read_num_nodes'(') '; __i__ ++)
+		{
+			if (__i__ == 'dickpt_read_node'('))
+				CompoundStatement
+			DickptBarrier
+		}
+	by
+		NewDickptCritical
+end function
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%			BARRIER CONSTRUCT REPLACEMENT 			  	%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+function replaceBarrier
+	replace [directives]
+		'#pragma omp barrier
+	by
+		'dickpt_waitfor_ckpt();
+end function
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%			AUTOMIC CONSTRUCT REPLACEMENT 			  	%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+function replaceAutomic
+	replace [directives]
+		'#pragma omp automic
+		CompoundStatement [compound_statement]
+
+	construct DickptBarrier [dickpt_barrier]
+		'dickpt_waitfor_ckpt();
+
+	construct NewDickptAutomic [dickpt_automic_critical]
+		for (__i__ = 0 '; __i__ < 'dickpt_read_num_nodes'(') '; __i__ ++)
+		{
+			if (__i__ == 'dickpt_read_node'('))
+				CompoundStatement
+			DickptBarrier
+		}
+	by
+		NewDickptAutomic
+end function
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%			FLUSH CONSTRUCT REPLACEMENT 			  	%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+% Flush = generate a checkpoint at this PC so dirty pages
+% become visible. The PC identifies this synchronization point.
+function replaceFlush
+	replace [directives]
+		'#pragma omp FlushConstruct [flush_construct]
+	by
+		'dickpt_generate_ckpt();
+end function

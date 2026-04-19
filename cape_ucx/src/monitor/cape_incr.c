@@ -1190,17 +1190,17 @@ int require_generate_checkpoint();
 int require_send_checkpoint();
 int require_receive_checkpoint();
 int require_inject_checkpoint();
-int require_merge_checkpoint();
 int require_waitfor_checkpoint();
 int require_broadcast_checkpoint();
 int read_shared_data();
 void end_shared_data();
 
-int init_generate_workshare_checkpoint(unsigned int ntask);
-int require_generate_workshare_checkpoint();
-int require_generate_total_checkpoint(); //generate total checkpoint and broadcast to all nodes
-int require_scatter_checkpoint();
-int require_inject_workshare_checkpoint();
+/* V5: unused */
+// int init_generate_workshare_checkpoint(unsigned int ntask);
+// int require_generate_workshare_checkpoint();
+// int require_generate_total_checkpoint();
+// int require_scatter_checkpoint();
+// int require_inject_workshare_checkpoint();
 
 int require_allreduce_checkpoint();
 int allreduce_checkpoint();
@@ -1332,14 +1332,6 @@ int main(int argc, char * argv[]){
 						if(rc != 0)	exit(1);		
 						break;
 						
-					case S_GENERATE_TOTAL_CHECKPOINT:
-						rc = require_generate_total_checkpoint();
-						break;	
-						
-					case S_GENERATE_WORKSHARE_CHECKPOINT:
-						rc = require_generate_workshare_checkpoint();
-						break;
-														
 					case S_SEND_CHECKPOINT:	
 						rc = require_send_checkpoint();
 						if(rc != 0)	exit(1);						
@@ -1355,14 +1347,16 @@ int main(int argc, char * argv[]){
 						if (rc!=0)	exit(1);						
 						break;
 						
+					/* V5: unused
 					case S_INJECT_WORKSHARE_CHECKPOINT:
-						rc = require_inject_workshare_checkpoint();						
+						rc = require_inject_workshare_checkpoint();
 						break;
-					
+
 					case S_MERGE_CHECKPOINT:
 						rc= require_merge_checkpoint();
-						if( rc !=0) exit(1);						
+						if( rc !=0) exit(1);
 						break;
+					*/
 					case S_WAIT_FOR_CHECKPOINT:
 						rc= require_waitfor_checkpoint();
 						if( rc !=0) exit(1);						
@@ -1370,11 +1364,6 @@ int main(int argc, char * argv[]){
 					case S_BROADCAST_CHECKPOINT:
 						rc= require_broadcast_checkpoint();
 						if( rc !=0) exit(1);						
-						break;
-
-					case S_SCATTER_CHECKPOINT:
-						rc = require_scatter_checkpoint();
-						if( rc !=0) exit(1);	
 						break;
 					case S_ALL_REDUCE:
 						rc = require_allreduce_checkpoint();
@@ -1400,7 +1389,6 @@ int main(int argc, char * argv[]){
 							printf("Monitor %ld: Error on initialize jobs for all nodes \n", node);
 							exit(1);
 						}
-						init_generate_workshare_checkpoint(number_of_jobs);
 						break;
 					case S_APP_SEND_TIMESPAN: //read timespan form child				
 						rc = get_long_int_from_child(&timespan);
@@ -1537,10 +1525,11 @@ int get_long_int_from_child(unsigned long *value){
  */
 int init_jobs_per_node(){	
 	int rc = 0;
- 	if(number_of_jobs % num_nodes == 0)
-		jobs_per_node = number_of_jobs/num_nodes;
-	else
+	if (num_nodes <= 0) {
 		rc = 1;
+	} else {
+		jobs_per_node = (number_of_jobs + num_nodes - 1) / num_nodes;
+	}
 	current_job = 0;
 	return rc;	
 	
@@ -1718,41 +1707,6 @@ void end_shared_data(){
 	
 }
 
-/* ---------------------------------------------------------------------
- * check_addr_in_data_list(): check addr that contains in shared_data or not
- * Some cases:
- * 		1) (addr>=node->addr) and (addr+len <= node->addr + node->len
- * 		2) (addr >= node-> addr ) and (addr < node->addr + node->len)
- * 		3) (addr < node->addr)  and (addr + len > node-> addr)
- * 		4) (addr < node-> addr) and (addr + len > node->addr + node->len)
- * 	return: 
- * 		point to node of list if that is found
- * 		NULL: if it is not found
- * ---------------------------------------------------------------------
- */
-/*
-struct shared_data * check_addr_in_data_list(long int addr, int len,  struct shared_data *dp, int *flag){
-	struct shared_data *p;	
-	p = dp;		
-	while(list!= NULL){		
-		if(addr >= p->addr){
-			if (addr+len <= p->addr + p->len){ 
-				*flag = 1;				
-				return p;
-			}
-			else{}
-				
-		}
-				
-			
-		list = list -> next;
-	}
-	
-	
-	return NULL;
-}
-
-*/
 
 /* ==================================================================
  * Print data in list: This function to test the list to ensure that it is correct
@@ -2171,113 +2125,6 @@ int require_generate_checkpoint(){
 	return rc;
 }
 
-/* ----------------------------------------------------------------------
- * require_generate_total_checkpoint(): Version 4.0 -> Not use in version 5
- * 	1. generate checkpoint and save into a memory file stream
- * 	2. re-lock pages
- * 	3. clear list
- * After generate ckpt, bcast to all nodes
- * -----------------------------------------------------------------------
- */
-int require_generate_total_checkpoint(){
-	int rc=0;
-
-	rc = cape_drain_userfaultfd();
-	if (rc != 0)
-		return rc;
-
-	//generate new check point
-	total_ckpt_stream = generate_checkpoint(child_id,
-											list_head,
-											&total_ckpt,
-											&total_ckpt_size,
-											ENTRY_CHECKPOINT,
-											timespan);
-	//printf("Monitor %ld - generated %d bytes checkpoint \n", node, after_ckpt_size);
-	clear_list(list_head);	
-	
-	if(rc!=0) printf("Monitor %ld: Error on requiring generate checkpoint\n", node);	
-	return rc;
-}
-
-
-/*----------------------------------------------------------------------
- * init_generate_workshare_checkpoint(): V4.0 - Not use in version 5
- * 	init data that will be used in require_generate_workshare_checkpoint() 
- * ---------------------------------------------------------------------
- */
-int init_generate_workshare_checkpoint(unsigned int ntask){
-	int rc=0;
-	
-	mbefore_ckpt_stream = open_binary_memstream(&mbefore_ckpt, &mbefore_ckpt_size);	
-	
-	return rc;
-
-}
-
-/* ----------------------------------------------------------------------
- * require_generate_workshare_checkpoint(): Version 4.0 - NOT use in version 5
- * This functions will be called by master only
- * 	1. generate checkpoint and save into array of memory stream
- * 	2. re-lock pages
- * 	3. clear list
- * Results: will be saved into mbefore_ckpt_streams
- * -----------------------------------------------------------------------
- */
-int require_generate_workshare_checkpoint(){
-	int rc=0;
-	unsigned char *before_ckpt;
-	FILE *before_ckpt_stream;
-	size_t before_ckpt_size;
-	int ckpt_struct = SD;
-	struct shared_data_ckpt *p;
-
-	
-	if(node==0){		
-		rc = cape_drain_userfaultfd();
-		if (rc != 0)
-			return rc;
-
-		//generate checkpoints
-		before_ckpt_stream =  generate_checkpoint(child_id,
-			list_head, 
-			&before_ckpt, 
-			&before_ckpt_size,
-			ENTRY_CHECKPOINT, timespan);			
-		//printf("Monitor %ld - generated %d bytes checkpoint \n", node, before_ckpt_size);		
-		clear_list(list_head);		
-		
-		
-		//add L part into checkpoint, if it exist
-		if(list_ckpt_head != NULL){	
-												//print_data_in_ckpt_list(list_ckpt_head);
-															
-				fseek(before_ckpt_stream, before_ckpt_size, SEEK_SET);
-				//Write signal of data structure
-				fwrite(&ckpt_struct, sizeof(unsigned long), 1, before_ckpt_stream);
-				//read all node in list and save into checkpoint file
-				p = list_ckpt_head;
-				while(p!=NULL){
-					fwrite(&p->addr, sizeof(unsigned long), 1, before_ckpt_stream);
-					fwrite(p->data, CAPE_WORD, 1, before_ckpt_stream);
-					p = p->next;
-				}
-				fflush(before_ckpt_stream);
-			list_ckpt_head = NULL;
-			list_ckpt_tail = NULL;
-		}
-
-		//add a workshare checkpoint into group of workshared checkpoints
-		fwrite(before_ckpt, sizeof(char), before_ckpt_size, mbefore_ckpt_stream);		
-		fflush(mbefore_ckpt_stream);
-		
-		//close before_ckpt_stream	
-		fclose(before_ckpt_stream);
-		before_ckpt_size = 0;		
-	}	
-	return rc;
-}
-
 
 
 /* ---------------------------------------
@@ -2511,8 +2358,6 @@ int inject_checkpoint(FILE *stream, size_t *file_size, struct user_regs_struct *
 				file_pointer += sizeof(unsigned long);
 				fseek(stream, file_pointer, SEEK_SET);				
 				current_ckpt_struct = SD;	
-				
-
 				break;
 			case EP:
 				fread(&addr, sizeof(unsigned long), 1, stream);
@@ -2549,16 +2394,11 @@ int inject_checkpoint(FILE *stream, size_t *file_size, struct user_regs_struct *
 			case MD:
 				break;
 		} 
-		//printf("\nNode %ld: addr = %lx - current_ckpt_struct = %d - len = %d", node, addr, current_ckpt_struct, len);	 		
-  		//read data from checkpoint
   		buff = (unsigned char *) malloc(len);
   		fread(buff, len, 1, stream);
   		file_pointer +=len;
   		fseek(stream, file_pointer, SEEK_SET);  		
  		
- 		//printf("\nInject: Node %ld: current_file_pointer = %d - file size = %d", node, file_pointer, *file_size);	 		
- 		
-  		//write data to memory  		
   		ioctl_write_data(child_id, buff, addr, len);  		
   	}  	
   	
@@ -2592,198 +2432,9 @@ int inject_checkpoint(FILE *stream, size_t *file_size, struct user_regs_struct *
   	
   	return rc;
   }
-/* -----------------------------------------------------------------
-  * require_inject_workshare_checkpoint(): v4.0 - NOT USE IN VERSION 5
-  * 	inject workshare checkpoint into CAPE program memory
-  * 	get checkpoint form beffor_buffer, then copy into a file and call inject_checkpoint function
-  * ----------------------------------------------------------------
-  */
-int require_inject_workshare_checkpoint(){
-	int rc =0;
-	int i;
-	unsigned char *before_ckpt;
-	FILE *before_ckpt_stream;
-	size_t before_ckpt_size;	
-	
-	if (before_buffer == NULL) return 1; //checkpoint is empty
-	if (task_ckpt_size == 0 ) return 1; //checkpoint is empty
-	
-	if (current_job >= jobs_per_node) return 1;
-	
-	before_ckpt_stream = open_binary_memstream(&before_ckpt, &before_ckpt_size);
-		
-	fwrite(before_buffer + (current_job * task_ckpt_size),\
-		   sizeof(char), 		\
-		   task_ckpt_size,    \
-		   before_ckpt_stream);
-		   
-	fflush(before_ckpt_stream);
-			
-	inject_checkpoint(before_ckpt_stream, &before_ckpt_size, &save_regs);			
-	
-	current_job ++;	
-	
-	return rc;
-}
 
 
 
-/* -------------------------------------
-  * merge_checkpoint():  NOT USE IN VERSION 5
-  * Merge checkpoint after in checkpoint final at one node
-  * 	After merging: close after_ckpt
-  *
-  * C1 = S1 + L1
-  * C2 = S2 + L2
-  * This function just merge S1 vs S2, L1 vs L2 is merged automatically in generate_checkpoint function.
-  *  -------------------------------------
-  */
- int merge_checkpoint() {
- 	unsigned char *buff;
- 	unsigned long addr;
- 	unsigned long file_pointer =  0;
- 	int len, rc =0; 
- 	unsigned long current_ckpt_struct, new_ckpt_struct;
- 	current_ckpt_struct = SSD; //init checkpoint structure
- 	
- 	//IF final_ckpt = NULL
- 	if(final_ckpt_size==0)
- 	{
- 		final_ckpt_stream = open_binary_memstream(&final_ckpt, &final_ckpt_size);
- 		//get the registers
-		ptrace(PTRACE_GETREGS, child_id, NULL, &save_regs);
-	
-		//save register to file
-		fwrite(&save_regs,sizeof(struct user_regs_struct),1, final_ckpt_stream);
-		fflush(final_ckpt_stream);
- 	}
- 	
- 	
- 	file_pointer += sizeof(struct user_regs_struct);
- 	fseek(after_ckpt_stream, file_pointer, SEEK_SET);
-
- 	while(file_pointer < after_ckpt_size)
- 	{
- 		
- 		//read address from after checkpoint
-  		fread(&addr, sizeof(unsigned long), 1, after_ckpt_stream);
-  		file_pointer += sizeof(unsigned long);
-  		fseek(after_ckpt_stream, file_pointer, SEEK_SET);
-  		
-  		//if addr is the struct signal, not an adress, then we read address again, and write signal into final_ckpt
-  		switch(addr){
-			case EP:
-				fread(&addr, sizeof(unsigned long), 1, after_ckpt_stream);
-				file_pointer += sizeof(unsigned long);
-				fseek(after_ckpt_stream, file_pointer, SEEK_SET);
-				current_ckpt_struct = EP;
-
-				//write signal into final checkpoint
-				fwrite(&current_ckpt_struct, sizeof(unsigned long), 1, final_ckpt_stream);
-
-				break;
-			case SSD:
-				fread(&addr, sizeof(unsigned long), 1, after_ckpt_stream);
-				file_pointer += sizeof(unsigned long);
-				fseek(after_ckpt_stream, file_pointer, SEEK_SET);
-				current_ckpt_struct = SSD;
-
-				//write signal into final checkpoint
-				fwrite(&current_ckpt_struct, sizeof(unsigned long), 1, final_ckpt_stream);
-
-				break;
-			case SD:
-				fread(&addr, sizeof(unsigned long), 1, after_ckpt_stream);
-				file_pointer += sizeof(unsigned long);
-				fseek(after_ckpt_stream, file_pointer, SEEK_SET);
-				current_ckpt_struct = SD;
-				//write signal into final checkpoint
-				fwrite(&current_ckpt_struct, sizeof(unsigned long), 1, final_ckpt_stream);
-
-				break;
-			case MD:
-				fread(&addr, sizeof(unsigned long), 1, after_ckpt_stream);
-				file_pointer += sizeof(unsigned long);
-				fseek(after_ckpt_stream, file_pointer, SEEK_SET);
-				current_ckpt_struct = MD;
-				//write signal into final checkpoint
-				fwrite(&current_ckpt_struct, sizeof(unsigned long), 1, final_ckpt_stream);
-				break;
-		}
-
-  		//read data and write to final checkpoint
-  		switch(current_ckpt_struct){
-			case EP:
-				len = PAGE_SIZE;
-				//read data from checkpoint
-				buff = (unsigned char *) malloc(len);
-				fread(buff, len, 1,after_ckpt_stream);
-				file_pointer +=len;
-				fseek(after_ckpt_stream, file_pointer, SEEK_SET);
-
-				//write into final checkpoint
-				fwrite(&addr, sizeof(unsigned long), 1, final_ckpt_stream);
-				fwrite(buff, len, 1, final_ckpt_stream);
-				break;
-			case SSD:
-				  //read len from checkpoint
-				len = 0;
-				fread(&len, sizeof(int), 1, after_ckpt_stream);
-				file_pointer += sizeof(int);
-				fseek(after_ckpt_stream, file_pointer, SEEK_SET);
-
-				 //read data from checkpoint
-				buff = (unsigned char *) malloc(len);
-				fread(buff, len, 1,after_ckpt_stream);
-				file_pointer +=len;
-				fseek(after_ckpt_stream, file_pointer, SEEK_SET);
-
-				//write into final checkpoint
-				fwrite(&addr, sizeof(unsigned long), 1, final_ckpt_stream);
-				fwrite(&len, sizeof(int), 1, final_ckpt_stream);
-				fwrite(buff, len, 1, final_ckpt_stream);
-				break;
-			case SD:
-				len = CAPE_WORD;
-				//read data from checkpoint
-				buff = (unsigned char *) malloc(len);
-				fread(buff, len, 1,after_ckpt_stream);
-				file_pointer +=len;
-				fseek(after_ckpt_stream, file_pointer, SEEK_SET);
-
-				//write into final checkpoint
-				fwrite(&addr, sizeof(unsigned long), 1, final_ckpt_stream);
-				fwrite(buff, len, 1, final_ckpt_stream);
-				break;
-			case MD:
-				break;
-		}
- 	}
- 	fflush(final_ckpt_stream);
-
- 	//printf("\n Node %ld: Merged %d bytes in to final ckpt: Final ckpt = %d", node, after_ckpt_size, final_ckpt_size);
- 	fclose(after_ckpt_stream);
- 	after_ckpt_size = 0;	  		 	 	
- 	return rc; 	
- }
-
-
-/*----------------------------------------------------------------
- * require_merge_checkpoint(): Version 3.0 => NOT USE in V4.0
- * 		call merge_checkpoint function
- * ---------------------------------------------------------------
- */
- int require_merge_checkpoint() {
- 	int rc = 0;
- 	
- 	rc = merge_checkpoint();
- 	
-
-
- 	
- 	if (rc!=0) dprintf ("Monitor: Error on locking the process image\n");
- 	return rc;
- }
  
  /*---------------------------------------------------------------------
   * add_to_final_ckpt_list(): L = L1 + L2
@@ -3387,47 +3038,7 @@ int require_broadcast_checkpoint(){
 	return rc;
 }
  
-/*----------------------------------------------------------------------
- * require_scatter_checkpoint(): Version 4.0
- * 		Scatter workshare checkpoint to all node in system
- * ---------------------------------------------------------------------
- */
-int require_scatter_checkpoint(){
-	int rc = 0;
-	int i;
-	int chunk_size;
 
-	if (node == 0 ){
-		if (mbefore_ckpt_size <=0) return 1;
-		task_ckpt_size = mbefore_ckpt_size / number_of_jobs ;
-	}
-
-	/* Broadcast task_ckpt_size from master to all slaves */
-	if (node == 0) {
-		for (i = 1; i < num_nodes; i++)
-			cape_ucx_send(&task_ckpt_size, sizeof(int), i, TAG_SCATTER_SIZE);
-	} else {
-		cape_ucx_recv(&task_ckpt_size, sizeof(int), 0, TAG_SCATTER_SIZE);
-	}
-
-	chunk_size = jobs_per_node * task_ckpt_size;
-	before_buffer = malloc(chunk_size * sizeof(char));
-
-	/* Scatter: master sends each slave its chunk, keeps its own */
-	if (node == 0) {
-		memcpy(before_buffer, mbefore_ckpt, chunk_size);
-		for (i = 1; i < num_nodes; i++)
-			cape_ucx_send(mbefore_ckpt + i * chunk_size, chunk_size, i, TAG_SCATTER_DATA);
-		fclose(mbefore_ckpt_stream);
-		mbefore_ckpt_size = 0;
-	} else {
-		cape_ucx_recv(before_buffer, chunk_size, 0, TAG_SCATTER_DATA);
-	}
-
-	//initialize current job for all node
-	current_job = 0;
-	return rc;
-}
 /*----------------------------------------------------------------------
  * Check a number is power of 2 or not
  *---------------------------------------------------------------------

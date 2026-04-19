@@ -1,0 +1,92 @@
+% Execution Environment Routine Transformation Rules for DICKPT.
+% Based on environmentRoutRules.Rul by Patricia REINOSO.
+%
+% In DICKPT:
+%   omp_get_num_threads() -> dickpt_read_num_nodes()
+%   omp_get_thread_num()  -> dickpt_read_node()
+%   omp_set_num_threads() -> dickpt_send_num_jobs()
+
+% Inclusion of the environment routines
+% into the reference definition
+% taken from the C Grammar.
+redefine reference
+		...
+	|	[environment_routine]
+end redefine
+
+redefine compound_statement_body
+		...
+	|	[environment_routine];
+end redefine
+
+% Definition of environment_routine as the union
+% of the environment routines included in omp and
+% their transformation into dickpt.
+define environment_routine
+		[omp_environment_routine]
+	|	[dickpt_environment_routine]
+end define
+
+% Main rule of the environment routine transformation.
+rule replaceEnvRoutine
+	replace [reference]
+		Routine [reference]
+
+	construct NewRoutine [reference]
+		Routine [replaceEnvRoutSetNum]
+				[replaceEnvRoutGetNum]
+				[replaceEnvRoutGetThread]
+				[replaceEnvRoutGetNumStatement]
+				[replaceEnvRoutGetThreadStatement]
+	where not
+		NewRoutine [= Routine]
+	by
+		NewRoutine
+end rule
+
+% Handles the set number of nodes routine.
+function replaceEnvRoutSetNum
+	replace [reference]
+		omp_set_num_threads(Exp[reference_id])
+	by
+		'dickpt_send_num_jobs(Exp)
+end function
+
+% Handles the set number of nodes routine.
+% In case it is a statement.
+rule replaceEnvRoutSetNumStatement
+	replace [compound_statement_body]
+		omp_set_num_threads(Exp[reference_id]);
+	by
+		'dickpt_send_num_jobs(Exp) ;
+end rule
+
+rule replaceEnvRoutGetNumStatement
+	replace [compound_statement_body]
+		omp_get_num_threads();
+	by
+		'dickpt_read_num_nodes();
+end rule
+
+rule replaceEnvRoutGetThreadStatement
+	replace [compound_statement_body]
+		omp_get_thread_num();
+	by
+		'dickpt_read_node();
+end rule
+
+% Handles the get number of nodes routine.
+function replaceEnvRoutGetNum
+	replace [reference]
+		omp_get_num_threads()
+	by
+		'dickpt_read_num_nodes()
+end function
+
+% Handles the get id of current node routine.
+function replaceEnvRoutGetThread
+	replace [reference]
+		omp_get_thread_num()
+	by
+		'dickpt_read_node()
+end function

@@ -1,0 +1,636 @@
+% Clause Transformation Rules for DICKPT.
+% Based on clausesRules.Rul by Patricia REINOSO.
+%
+% In DICKPT, clauses are communicated to the monitor via
+% __cape_signal / __cape_signal_val with D_* codes from cape_signal.h.
+
+% Definition of clauses as the union of the
+% omp clauses and their transformation into dickpt.
+define clauses
+		[omp_clause]
+	|	[dickpt_clause]
+	|	[repeat clauses]
+end define
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%					CLAUSE REPLACEMENT 				  	%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+function replaceClauses
+	replace [clauses]
+		Clause [clauses]
+	by
+		Clause  [replaceDefaultClause]
+				[replaceSharedClause]
+				[replacePrivateClause]
+				[replaceFirstPrivateClause]
+				[replaceLastPrivateClause]
+				[replaceReductionClause]
+				[replaceCopyinClause]
+				[replaceCopyPrivateClause]
+				[replaceNowaitClause]
+end function
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%				DEFAULT CLAUSE REPLACEMENT 			  	%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+function replaceDefaultClause
+	replace [clauses]
+		DefaultClause [omp_default_clause]
+	construct Clause [clauses]
+		DefaultClause
+	by
+		Clause [replaceDefaultNoneClause] [replaceDefaultSharedClause]
+end function
+
+function replaceDefaultSharedClause
+	replace [clauses]
+		default(shared)
+	by
+		_
+end function
+
+function replaceDefaultNoneClause
+	replace [clauses]
+		default(none)
+	by
+		__cape_signal(D_DEFAULT_NONE);
+end function
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%				SHARED CLAUSE REPLACEMENT 			  	%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+function replaceSharedClause
+	replace [clauses]
+		Clause [omp_shared_clause]
+	deconstruct Clause
+		shared(Variables [list reference_id])
+	construct DickptClauseList [repeat clauses]
+		_ [addSharedClause each Variables]
+	by
+		DickptClauseList
+end function
+
+function addSharedClause Variable [reference_id]
+	construct DickptClause [clauses]
+		__cape_signal_val(D_SHARED, (unsigned 'long)& Variable);
+	replace [repeat clauses]
+		DickptClauseList [repeat clauses]
+	by
+		DickptClauseList [. DickptClause]
+end function
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%				PRIVATE CLAUSE REPLACEMENT 			  	%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+function replacePrivateClause
+	replace [clauses]
+		Clause [omp_private_clause]
+	deconstruct Clause
+		'private '( Variables [list reference_id] ')
+	construct DickptClauseList [repeat clauses]
+		_ [addPrivateClause each Variables]
+	by
+		DickptClauseList
+end function
+
+function addPrivateClause Variable [reference_id]
+	construct DickptClause [clauses]
+		__cape_signal_val(D_PRIVATE, (unsigned 'long)& Variable);
+	replace [repeat clauses]
+		DickptClauseList [repeat clauses]
+	by
+		DickptClauseList [. DickptClause]
+end function
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%			FIRST PRIVATE CLAUSE REPLACEMENT 		  	%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+function replaceFirstPrivateClause
+	replace [clauses]
+		Clause [omp_firstprivate_clause]
+
+	deconstruct Clause
+		firstprivate(Variables [list reference_id])
+
+	construct DickptClauseList [repeat clauses]
+		_ [addFirstPrivateClause each Variables]
+	by
+		DickptClauseList
+end function
+
+function addFirstPrivateClause Variable [reference_id]
+	construct DickptClause [clauses]
+		__cape_signal_val(D_FIRST_PRIVATE, (unsigned 'long)& Variable);
+	replace [repeat clauses]
+		DickptClauseList [repeat clauses]
+	by
+		DickptClauseList [. DickptClause]
+end function
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%			LAST PRIVATE CLAUSE REPLACEMENT 		  	%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+function replaceLastPrivateClause
+	replace [clauses]
+		Clause [omp_lastprivate_clause]
+	deconstruct Clause
+		lastprivate(Variables [list reference_id])
+	construct DickptClauseList [repeat clauses]
+		_ [addLastPrivateClause each Variables]
+	by
+		DickptClauseList
+end function
+
+function addLastPrivateClause Variable [reference_id]
+	construct DickptClause [clauses]
+		__cape_signal_val(D_LAST_PRIVATE, (unsigned 'long)& Variable);
+	replace [repeat clauses]
+		DickptClauseList [repeat clauses]
+	by
+		DickptClauseList [. DickptClause]
+end function
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%				REDUCTION CLAUSE REPLACEMENT 		  	%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+function replaceReductionClause
+	replace [clauses]
+		Clause [omp_reduction_clause]
+	deconstruct Clause
+		reduction(Operator [omp_operator] : Variables [list reference_id])
+	construct DickptClauseList [repeat clauses]
+		_ [addReductionClause Operator each Variables]
+	by
+		DickptClauseList
+end function
+
+function addReductionClause Operator [omp_operator] Variable [reference_id]
+	construct NewOperator [operators]
+		Operator
+	construct DickptOp [dickpt_reduction_op]
+		D_REDUCTION_SUM
+	construct FinalOp [dickpt_reduction_op]
+		DickptOp [mapSumOp Operator] [mapMulOp Operator] [mapMaxOp Operator] [mapMinOp Operator]
+	construct DickptClause [clauses]
+		__cape_signal_val(FinalOp, (unsigned 'long)&Variable);
+	replace [repeat clauses]
+		DickptClauseList [repeat clauses]
+	by
+		DickptClauseList [. DickptClause]
+end function
+
+function mapSumOp Operator [omp_operator]
+	deconstruct Operator
+		'+
+	replace [dickpt_reduction_op]
+		_ [dickpt_reduction_op]
+	by
+		D_REDUCTION_SUM
+end function
+
+function mapMulOp Operator [omp_operator]
+	deconstruct Operator
+		'*
+	replace [dickpt_reduction_op]
+		_ [dickpt_reduction_op]
+	by
+		D_REDUCTION_MUL
+end function
+
+function mapMaxOp Operator [omp_operator]
+	deconstruct Operator
+		max
+	replace [dickpt_reduction_op]
+		_ [dickpt_reduction_op]
+	by
+		D_REDUCTION_MAX
+end function
+
+function mapMinOp Operator [omp_operator]
+	deconstruct Operator
+		min
+	replace [dickpt_reduction_op]
+		_ [dickpt_reduction_op]
+	by
+		D_REDUCTION_MIN
+end function
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%				COPY IN CLAUSE REPLACEMENT 			  	%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+function replaceCopyinClause
+	replace [clauses]
+		Clause [omp_copyin_clause]
+	deconstruct Clause
+		copyin(Variables [list reference_id])
+	construct DickptClauseList [repeat clauses]
+		_ [addCopyinClause each Variables]
+	by
+		DickptClauseList
+end function
+
+function addCopyinClause Variable [reference_id]
+	construct DickptClause [clauses]
+		__cape_signal_val(D_COPY_IN, (unsigned 'long)& Variable);
+	replace [repeat clauses]
+		DickptClauseList [repeat clauses]
+	by
+		DickptClauseList [. DickptClause]
+end function
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%			COPY PRIVATE CLAUSE REPLACEMENT 		  	%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+% copyprivate is not directly supported in DICKPT.
+% We map it to D_PRIVATE as the closest equivalent.
+function replaceCopyPrivateClause
+	replace [clauses]
+		Clause [omp_copyprivate_clause]
+	deconstruct Clause
+		copyprivate(Variables [list reference_id])
+	construct DickptClauseList [repeat clauses]
+		_ [addCopyPrivateClause each Variables]
+	by
+		DickptClauseList
+end function
+
+function addCopyPrivateClause Variable [reference_id]
+	construct DickptClause [clauses]
+		__cape_signal_val(D_PRIVATE, (unsigned 'long)& Variable);
+	replace [repeat clauses]
+		DickptClauseList [repeat clauses]
+	by
+		DickptClauseList [. DickptClause]
+end function
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%				NOWAIT CLAUSE REPLACEMENT 			  	%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+function replaceNowaitClause
+	replace [clauses]
+		Clause [omp_nowait_clause]
+	by
+		_
+end function
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%			PARALLEL CONSTRUCT CLAUSE REPLACEMENT 		%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+function addParallelDefaultClauses Clause [parallel_construct_clauses]
+	replace [repeat clauses]
+		ClauseList [repeat clauses]
+
+	deconstruct Clause
+		ClauseClause [omp_default_clause]
+
+	construct NewClause [clauses]
+		ClauseClause
+
+	construct OMPClause [clauses]
+		NewClause [replaceDefaultClause]
+	by
+		ClauseList [. OMPClause]
+end function
+
+function addParallelSharedClauses Clause [parallel_construct_clauses]
+	replace [repeat clauses]
+		ClauseList [repeat clauses]
+
+	deconstruct Clause
+		ClauseClause [omp_shared_clause]
+
+	construct NewClause [clauses]
+		ClauseClause
+
+	construct OMPClause [clauses]
+		NewClause [replaceSharedClause]
+	by
+		ClauseList [. OMPClause]
+end function
+
+function addParallelPrivateClauses Clause [parallel_construct_clauses]
+	replace [repeat clauses]
+		ClauseList [repeat clauses]
+
+	deconstruct Clause
+		ClauseClause [omp_private_clause]
+
+	construct NewClause [clauses]
+		ClauseClause
+
+	construct OMPClause [clauses]
+		NewClause [replacePrivateClause]
+	by
+		ClauseList [. OMPClause]
+end function
+
+function addParallelFirstPrivateClauses Clause [parallel_construct_clauses]
+	replace [repeat clauses]
+		ClauseList [repeat clauses]
+
+	deconstruct Clause
+		ClauseClause [omp_firstprivate_clause]
+
+	construct NewClause [clauses]
+		ClauseClause
+
+	construct OMPClause [clauses]
+		NewClause [replaceFirstPrivateClause]
+	by
+		ClauseList [. OMPClause]
+end function
+
+function addParallelLastPrivateClauses Clause [parallel_construct_clauses]
+	replace [repeat clauses]
+		ClauseList [repeat clauses]
+
+	deconstruct Clause
+		ClauseClause [omp_lastprivate_clause]
+
+	construct NewClause [clauses]
+		ClauseClause
+
+	construct OMPClause [clauses]
+		NewClause [replaceLastPrivateClause]
+	by
+		ClauseList [. OMPClause]
+end function
+
+function addParallelReductionClauses Clause [parallel_construct_clauses]
+	replace [repeat clauses]
+		ClauseList [repeat clauses]
+
+	deconstruct Clause
+		ClauseClause [omp_reduction_clause]
+
+	construct NewClause [clauses]
+		ClauseClause
+
+	construct OMPClause [clauses]
+		NewClause [replaceReductionClause]
+	by
+		ClauseList [. OMPClause]
+end function
+
+function addParallelCopyinClauses Clause [parallel_construct_clauses]
+	replace [repeat clauses]
+		ClauseList [repeat clauses]
+
+	deconstruct Clause
+		ClauseClause [omp_copyin_clause]
+
+	construct NewClause [clauses]
+		ClauseClause
+
+	construct OMPClause [clauses]
+		NewClause [replaceCopyinClause]
+	by
+		ClauseList [. OMPClause]
+end function
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%			FOR CONSTRUCT CLAUSE REPLACEMENT 			%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+function addForPrivateClauses Clause [for_construct_clauses]
+	replace [repeat clauses]
+		ClauseList [repeat clauses]
+
+	deconstruct Clause
+		ClauseClause [omp_private_clause]
+
+	construct NewClause [clauses]
+		ClauseClause
+
+	construct OMPClause [clauses]
+		NewClause [replacePrivateClause]
+	by
+		ClauseList [. OMPClause]
+end function
+
+function addForFirstPrivateClauses Clause [for_construct_clauses]
+	replace [repeat clauses]
+		ClauseList [repeat clauses]
+
+	deconstruct Clause
+		ClauseClause [omp_firstprivate_clause]
+
+	construct NewClause [clauses]
+		ClauseClause
+
+	construct OMPClause [clauses]
+		NewClause [replaceFirstPrivateClause]
+	by
+		ClauseList [. OMPClause]
+end function
+
+function addForLastPrivateClauses Clause [for_construct_clauses]
+	replace [repeat clauses]
+		ClauseList [repeat clauses]
+
+	deconstruct Clause
+		ClauseClause [omp_lastprivate_clause]
+
+	construct NewClause [clauses]
+		ClauseClause
+
+	construct OMPClause [clauses]
+		NewClause [replaceLastPrivateClause]
+	by
+		ClauseList [. OMPClause]
+end function
+
+function addForReductionClauses Clause [for_construct_clauses]
+	replace [repeat clauses]
+		ClauseList [repeat clauses]
+
+	deconstruct Clause
+		ClauseClause [omp_reduction_clause]
+
+	construct NewClause [clauses]
+		ClauseClause
+
+	construct OMPClause [clauses]
+		NewClause [replaceReductionClause]
+	by
+		ClauseList [. OMPClause]
+end function
+
+function addForNowaitClauses Clause [for_construct_clauses]
+	replace [repeat clauses]
+		ClauseList [repeat clauses]
+
+	deconstruct Clause
+		ClauseClause [omp_nowait_clause]
+
+	construct NewClause [clauses]
+		ClauseClause
+
+	construct OMPClause [clauses]
+		NewClause [replaceNowaitClause]
+	by
+		ClauseList [. OMPClause]
+end function
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%			SECTIONS CONSTRUCT CLAUSE REPLACEMENT 		%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+function addSectionsPrivateClauses Clause [sections_construct_clauses]
+	replace [repeat clauses]
+		ClauseList [repeat clauses]
+
+	deconstruct Clause
+		ClauseClause [omp_private_clause]
+
+	construct NewClause [clauses]
+		ClauseClause
+
+	construct OMPClause [clauses]
+		NewClause [replacePrivateClause]
+	by
+		ClauseList [. OMPClause]
+end function
+
+function addSectionsFirstPrivateClauses Clause [sections_construct_clauses]
+	replace [repeat clauses]
+		ClauseList [repeat clauses]
+
+	deconstruct Clause
+		ClauseClause [omp_firstprivate_clause]
+
+	construct NewClause [clauses]
+		ClauseClause
+
+	construct OMPClause [clauses]
+		NewClause [replaceFirstPrivateClause]
+	by
+		ClauseList [. OMPClause]
+end function
+
+function addSectionsLastPrivateClauses Clause [sections_construct_clauses]
+	replace [repeat clauses]
+		ClauseList [repeat clauses]
+
+	deconstruct Clause
+		ClauseClause [omp_lastprivate_clause]
+
+	construct NewClause [clauses]
+		ClauseClause
+
+	construct OMPClause [clauses]
+		NewClause [replaceLastPrivateClause]
+	by
+		ClauseList [. OMPClause]
+end function
+
+function addSectionsReductionClauses Clause [sections_construct_clauses]
+	replace [repeat clauses]
+		ClauseList [repeat clauses]
+
+	deconstruct Clause
+		ClauseClause [omp_reduction_clause]
+
+	construct NewClause [clauses]
+		ClauseClause
+
+	construct OMPClause [clauses]
+		NewClause [replaceReductionClause]
+	by
+		ClauseList [. OMPClause]
+end function
+
+function addSectionsNowaitClauses Clause [sections_construct_clauses]
+	replace [repeat clauses]
+		ClauseList [repeat clauses]
+
+	deconstruct Clause
+		ClauseClause [omp_nowait_clause]
+
+	construct NewClause [clauses]
+		ClauseClause
+
+	construct OMPClause [clauses]
+		NewClause [replaceNowaitClause]
+	by
+		ClauseList [. OMPClause]
+end function
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%			SINGLE CONSTRUCT CLAUSE REPLACEMENT 		%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+function addSinglePrivateClauses Clause [single_construct_clauses]
+	replace [repeat clauses]
+		ClauseList [repeat clauses]
+
+	deconstruct Clause
+		ClauseClause [omp_private_clause]
+
+	construct NewClause [clauses]
+		ClauseClause
+
+	construct OMPClause [clauses]
+		NewClause [replacePrivateClause]
+	by
+		ClauseList [. OMPClause]
+end function
+
+function addSingleFirstPrivateClauses Clause [single_construct_clauses]
+	replace [repeat clauses]
+		ClauseList [repeat clauses]
+
+	deconstruct Clause
+		ClauseClause [omp_firstprivate_clause]
+
+	construct NewClause [clauses]
+		ClauseClause
+
+	construct OMPClause [clauses]
+		NewClause [replaceFirstPrivateClause]
+	by
+		ClauseList [. OMPClause]
+end function
+
+function addSingleCopyPrivateClauses Clause [single_construct_clauses]
+	replace [repeat clauses]
+		ClauseList [repeat clauses]
+
+	deconstruct Clause
+		ClauseClause [omp_copyprivate_clause]
+
+	construct NewClause [clauses]
+		ClauseClause
+
+	construct OMPClause [clauses]
+		NewClause [replaceCopyPrivateClause]
+	by
+		ClauseList [. OMPClause]
+end function
+
+function addSingleNowaitClauses Clause [single_construct_clauses]
+	replace [repeat clauses]
+		ClauseList [repeat clauses]
+
+	deconstruct Clause
+		ClauseClause [omp_nowait_clause]
+
+	construct NewClause [clauses]
+		ClauseClause
+
+	construct OMPClause [clauses]
+		NewClause [replaceNowaitClause]
+	by
+		ClauseList [. OMPClause]
+end function

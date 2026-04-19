@@ -1,0 +1,105 @@
+% Variable Declaration Transformation Rules for DICKPT.
+% Based on varDeclarationRules.Rul by Patricia REINOSO.
+%
+% In DICKPT, variable declarations are replaced by
+% dickpt_register_region() calls to register them for
+% checkpoint tracking by the monitor.
+
+% Inclusion of the dickpt declarations on the
+% declaration definition taken from the C Grammar.
+redefine declaration
+		...
+	|	[dickpt_register_region]
+	|	[repeat declaration]
+end redefine
+
+% Main rule in the variable declaration replacement.
+rule replaceDeclaration
+	replace [declaration]
+		Declaration [declaration]
+	construct NewDeclaration [declaration]
+		Declaration [replaceDeclarationList]
+						[replaceVariableDeclaration]
+						[replaceArrayDeclaration]
+						[replace2DimArrayDeclaration]
+	where not
+		NewDeclaration [= Declaration]
+	by
+		NewDeclaration
+
+end rule
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%				SINGLE VARIABLE REPLACEMENT 		  	%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+rule replaceVariableDeclaration
+	replace [declaration]
+		DeclSpec [decl_specifiers] Var [id];
+
+	by
+		'dickpt_register_region(& Var, sizeof(Var));
+end rule
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%				1-DIMENSION ARRAY REPLACEMENT 		  	%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+rule replaceArrayDeclaration
+
+	replace [declaration]
+		DeclSpec [decl_specifiers] Var [id] '[ Expression [constant_expression] '];
+
+	by
+		'dickpt_register_region(&Var, sizeof(Var));
+end rule
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%				2-DIMENSION ARRAY REPLACEMENT 		  	%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+rule replace2DimArrayDeclaration
+
+	replace [declaration]
+		DeclSpec [decl_specifiers] Var [id] '[ Exp1 [reference] ']'[ Exp2 [reference] '];
+
+	by
+		'dickpt_register_region(&Var, sizeof(Var));
+end rule
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%		LIST OF VARIABLE DECLARATION REPLACEMENT 	  	%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+rule replaceDeclarationList
+
+	replace [declaration]
+		DeclSpec [decl_specifiers] Variables [list init_declarator+];
+
+	deconstruct Variables
+		First [init_declarator] , Rest [list init_declarator+]
+
+	construct NewDeclarationList [repeat declaration]
+		_ [addVarDeclaration DeclSpec each Variables]
+
+	by
+		NewDeclarationList
+
+end rule
+
+function addVarDeclaration VarType [decl_specifiers] Variable [init_declarator]
+
+	construct NewDeclaration [declaration]
+		VarType Variable;
+
+	construct NewDickptDeclaration [declaration]
+		NewDeclaration [replaceVariableDeclaration] [replaceArrayDeclaration] [replace2DimArrayDeclaration]
+
+	replace [repeat declaration]
+		DickptDeclarationList [repeat declaration]
+
+	by
+		DickptDeclarationList [. NewDickptDeclaration]
+
+end function

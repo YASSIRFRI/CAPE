@@ -1,0 +1,259 @@
+% Grammar definition for CAPE DICKPT (incremental checkpointing).
+% Based on CAPE.Grm by Patricia REINOSO.
+%
+% DICKPT is the two-executable model: the application communicates
+% with an external monitor via int3 breakpoints / signals.
+%
+% Key difference from timestamped CAPE:
+%   - The PC (program counter) IS the timestamp. Since all nodes
+%     execute the same .text, the int3 address identifies the checkpoint.
+%   - The monitor compares dirty page bytes directly. Data parallelism
+%     means nodes write to different sections, so no conflict.
+%   - Only the outermost parallel region needs checkpoint lifecycle
+%     (start_ckpt / generate_ckpt / stop_ckpt).
+%   - Inner constructs (for, single, master, sections) are pure
+%     control flow - no checkpoint operations.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%						KEYS 						  	%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+keys
+	D_COPY_IN
+	D_DEFAULT_NONE
+	D_DEFAULT_SHARED
+	D_FIRST_PRIVATE
+	D_LAST_PRIVATE
+	D_PRIVATE
+	D_REDUCTION_MAX
+	D_REDUCTION_MIN
+	D_REDUCTION_MUL
+	D_REDUCTION_SUM
+	D_SHARED
+	D_THEAD_PRIVATE
+end keys
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%				DICKPT CHECKPOINT STATEMENTS		  	%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+define dickpt_start_ckpt
+		'dickpt_start_ckpt(); [NL]
+end define
+
+define dickpt_stop_ckpt
+		'dickpt_stop_ckpt(); [NL]
+end define
+
+define dickpt_generate_ckpt
+		'dickpt_generate_ckpt(); [NL]
+end define
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%					VARIABLE DECLARATION 			  	%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+define dickpt_register_region
+		'dickpt_register_region(&[reference], sizeof([reference])); [NL]
+end define
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%				ENVIRONMENT ROUTINES	 			  	%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+define dickpt_read_num_nodes
+	'dickpt_read_num_nodes()
+end define
+
+define dickpt_read_node
+	'dickpt_read_node()
+end define
+
+define dickpt_send_num_jobs
+	'dickpt_send_num_jobs([reference_id])
+end define
+
+define dickpt_environment_routine
+		[dickpt_read_num_nodes]
+	|	[dickpt_read_node]
+	|	[dickpt_send_num_jobs]
+end define
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%					CONSTRUCTS 			  				%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+define dickpt_threadprivate
+	[repeat dickpt_threadprivate_variables]
+end define
+
+define dickpt_threadprivate_variables
+	__cape_signal_val(D_THEAD_PRIVATE, (unsigned 'long)&[decl_specifiers]); [NL]
+end define
+
+% ── Parallel region (outermost) ──────────────────────
+% Only parallel regions own the checkpoint lifecycle.
+% dickpt_start_ckpt starts userfaultfd write-protect tracking.
+% dickpt_generate_ckpt snapshots dirty pages (PC = timestamp).
+% dickpt_stop_ckpt releases tracking.
+
+define dickpt_parallel
+	[dickpt_start_ckpt]						[IN]
+	[clauses]								[EX]
+	[repeat compound_statement_body]
+	[opt dickpt_allreduce]
+	[dickpt_generate_ckpt]
+	[dickpt_stop_ckpt]
+end define
+
+define dickpt_parallel_for
+	{														[IN] [NL]
+		unsigned 'long __dickpt_node__ = 'dickpt_read_node(); [NL]
+		unsigned 'long __dickpt_num_nodes__ = 'dickpt_read_num_nodes(); [NL]
+		'long 'long __dickpt_first__ = [unary_expression]; [NL]
+		'long 'long __dickpt_last__ = [unary_expression]; [NL]
+		'long 'long __dickpt_count__ = __dickpt_last__ - __dickpt_first__; [NL]
+		'long 'long __dickpt_left__ = __dickpt_first__ + (__dickpt_count__ * __dickpt_node__) / __dickpt_num_nodes__; [NL]
+		'long 'long __dickpt_right__ = __dickpt_first__ + (__dickpt_count__ * (__dickpt_node__ + 1)) / __dickpt_num_nodes__; [NL]
+		'dickpt_send_num_jobs(__dickpt_count__); [NL]
+		[dickpt_start_ckpt]
+		[clauses]
+		[for_statement]
+		[opt dickpt_allreduce]
+		[dickpt_generate_ckpt]
+		[dickpt_stop_ckpt]								[EX]
+	}														[NL]
+end define
+
+define dickpt_parallel_sections
+	[dickpt_start_ckpt]
+	[clauses]
+	[repeat dickpt_section_statement+]
+	[opt dickpt_allreduce]
+	[dickpt_generate_ckpt]
+	[dickpt_stop_ckpt]
+end define
+
+% ── Inner constructs (inside a parallel region) ──────
+% These are pure control flow. The enclosing parallel
+% region already owns the checkpoint lifecycle.
+% No dickpt_start_ckpt / generate / stop here.
+
+define dickpt_for
+	{														[IN] [NL]
+		unsigned 'long __dickpt_node__ = 'dickpt_read_node(); [NL]
+		unsigned 'long __dickpt_num_nodes__ = 'dickpt_read_num_nodes(); [NL]
+		'long 'long __dickpt_first__ = [unary_expression]; [NL]
+		'long 'long __dickpt_last__ = [unary_expression]; [NL]
+		'long 'long __dickpt_count__ = __dickpt_last__ - __dickpt_first__; [NL]
+		'long 'long __dickpt_left__ = __dickpt_first__ + (__dickpt_count__ * __dickpt_node__) / __dickpt_num_nodes__; [NL]
+		'long 'long __dickpt_right__ = __dickpt_first__ + (__dickpt_count__ * (__dickpt_node__ + 1)) / __dickpt_num_nodes__; [NL]
+		'dickpt_send_num_jobs(__dickpt_count__); [NL]
+		[repeat clauses]
+		[for_statement]
+		[opt dickpt_allreduce]							[EX]
+	}														[NL]
+end define
+
+define dickpt_section_statement
+	'if ('dickpt_read_node() == [number]) 	[NL]
+	{									[NL]
+		[repeat compound_statement_body]
+	}									[NL]
+end define
+
+define dickpt_sections
+	[clauses]
+	[repeat dickpt_section_statement+]
+end define
+
+define dickpt_single
+	[clauses]
+	if ([dickpt_read_node] == 0 )
+		[statement]
+end define
+
+define dickpt_master
+	if ([dickpt_read_node] == 0 )
+		[statement]
+end define
+
+% ── Synchronization (inside parallel) ────────────────
+
+define dickpt_automic_critical
+	for (__i__ = 0 '; __i__ < [dickpt_read_num_nodes] '; __i__ ++)
+	{											[IN] [NL]
+		if (__i__ == [dickpt_read_node])
+			[statement]
+		[dickpt_barrier] 						[EX]
+	}											[NL]
+end define
+
+define dickpt_barrier
+	'dickpt_waitfor_ckpt(); [NL]
+end define
+
+% Flush = generate a checkpoint so dirty pages become
+% visible to the monitor. The PC identifies this point.
+define dickpt_flush
+	'dickpt_generate_ckpt(); [NL]
+end define
+
+define dickpt_allreduce
+	'dickpt_allreduce_ckpt(); [NL]
+end define
+
+define dickpt_construct
+		[dickpt_threadprivate]
+	|	[dickpt_parallel]
+	|	[dickpt_parallel_for]
+	|	[dickpt_parallel_sections]
+	|	[dickpt_for]
+	|	[dickpt_sections]
+	|	[dickpt_single]
+	|	[dickpt_master]
+	|	[dickpt_automic_critical]
+	|	[dickpt_flush]
+	|	[dickpt_barrier]
+end define
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%					STATEMENTS 			  				%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+define dickpt_statement
+		[dickpt_register_region]
+	|	[dickpt_construct]
+end define
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%					CLAUSES 			  				%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+define dickpt_clause
+		__cape_signal(D_DEFAULT_NONE);								[NL]
+	|	__cape_signal_val(D_SHARED, (unsigned 'long)&[reference_id]);			[NL]
+	|	__cape_signal_val(D_PRIVATE, (unsigned 'long)&[reference_id]);		[NL]
+	|	__cape_signal_val(D_FIRST_PRIVATE, (unsigned 'long)&[reference_id]);	[NL]
+	|	__cape_signal_val(D_LAST_PRIVATE, (unsigned 'long)&[reference_id]);	[NL]
+	|	__cape_signal_val([dickpt_reduction_op], (unsigned 'long)&[reference_id]);	[NL]
+	|	__cape_signal_val(D_COPY_IN, (unsigned 'long)&[reference_id]);		[NL]
+end define
+
+define dickpt_reduction_op
+		D_REDUCTION_SUM
+	|	D_REDUCTION_MUL
+	|	D_REDUCTION_MAX
+	|	D_REDUCTION_MIN
+end define
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%					OPERATORS 			  				%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+define dickpt_operator
+		D_REDUCTION_MAX
+	|	D_REDUCTION_MIN
+	|	D_REDUCTION_MUL
+	|	D_REDUCTION_SUM
+end define

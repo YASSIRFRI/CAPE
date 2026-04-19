@@ -1,0 +1,60 @@
+% Operator Transformation Rules for DICKPT.
+% Based on operatorRules.Rul by Patricia REINOSO.
+%
+% In DICKPT, reduction operators map to D_REDUCTION_* signal codes.
+
+% Definition of operators as the union of the
+% operators of omp and the operators of dickpt.
+define operators
+		[omp_operator]
+	|	[dickpt_operator]
+end define
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%				OPERATOR REPLACEMENT 				  	%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+% Replaces OMP operators to DICKPT D_REDUCTION_* codes.
+function replaceOperatorToDickpt
+	replace [operators]
+		Operator [operators]
+	by
+		Operator [replaceSumOperator]
+				 [replaceMulOperator]
+				 [replaceMaxOperator]
+				 [replaceMinOperator]
+end function
+
+% SUM Operator
+function replaceSumOperator
+	replace [operators]
+		'+
+	construct DickptOp [dickpt_operator]
+		D_REDUCTION_SUM
+	by
+		DickptOp
+end function
+
+% MUL Operator
+function replaceMulOperator
+	replace [operators]
+		'*
+	by
+		D_REDUCTION_MUL
+end function
+
+% MAX Operator
+function replaceMaxOperator
+	replace [operators]
+		max
+	by
+		D_REDUCTION_MAX
+end function
+
+% MIN Operator
+function replaceMinOperator
+	replace [operators]
+		min
+	by
+		D_REDUCTION_MIN
+end function
