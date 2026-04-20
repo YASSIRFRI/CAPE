@@ -1294,7 +1294,7 @@ int main(int argc, char * argv[]){
 			close(control_pair[1]);
 			/* Create a pollable fd for the child so epoll_wait can
 			 * detect ptrace stops without busy-polling waitpid. */
-			child_pidfd = (int)syscall(SYS_pidfd_open, child_id, 0);
+			child_pidfd = (int)syscall(__NR_pidfd_open, child_id, 0);
 			if (child_pidfd < 0)
 				perror("pidfd_open (non-fatal, falling back to 1ms poll)");
 			break;
