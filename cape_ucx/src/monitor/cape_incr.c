@@ -68,6 +68,7 @@ int child_id, parent_id;
 int control_fd = -1;
 int userfault_fd = -1;
 static int epoll_fd = -1;
+static int child_pidfd = -1;
 
 struct cape_dickpt_range *tracked_ranges = NULL;
 size_t tracked_range_count = 0;
@@ -549,6 +550,19 @@ int cape_wait_for_child_event(pid_t pid, int *status)
 		return rc;
 	}
 
+	/* Register child pidfd in epoll so we can block until either a
+	 * userfault event or a child status change (ptrace stop). */
+	{
+		static int pidfd_registered = 0;
+		if (!pidfd_registered && child_pidfd >= 0 && epoll_fd >= 0) {
+			struct epoll_event pev;
+			pev.events = EPOLLIN;
+			pev.data.fd = child_pidfd;
+			if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, child_pidfd, &pev) == 0)
+				pidfd_registered = 1;
+		}
+	}
+
 	for (;;) {
 		uint64_t waitpid_start_ns;
 		pid_t rc;
@@ -574,13 +588,16 @@ int cape_wait_for_child_event(pid_t pid, int *status)
 			return -1;
 
 		{
-			struct epoll_event ev;
-			int nfds;
+			struct epoll_event evs[2];
+			int nfds, i;
 			uint64_t poll_start_ns;
 			uint64_t poll_elapsed_ns;
+			/* With pidfd in the epoll set we can block indefinitely;
+			 * fall back to 1ms if pidfd was not available. */
+			int timeout = (child_pidfd >= 0) ? -1 : 1;
 
 			poll_start_ns = cape_now_ns();
-			nfds = epoll_wait(epoll_fd, &ev, 1, 1);
+			nfds = epoll_wait(epoll_fd, evs, 2, timeout);
 			poll_elapsed_ns = cape_now_ns() - poll_start_ns;
 			cape_profile.poll_ns += poll_elapsed_ns;
 			cape_profile.poll_calls++;
@@ -588,9 +605,14 @@ int cape_wait_for_child_event(pid_t pid, int *status)
 				cape_profile.poll_timeouts++;
 			if (nfds == -1 && errno != EINTR)
 				return -1;
-			if (nfds > 0 && (ev.events & EPOLLIN) != 0) {
-				if (cape_handle_userfault_event() != 0)
-					return -1;
+			for (i = 0; i < nfds; i++) {
+				if (evs[i].data.fd == userfault_fd &&
+				    (evs[i].events & EPOLLIN) != 0) {
+					if (cape_handle_userfault_event() != 0)
+						return -1;
+				}
+				/* pidfd readable means child status changed —
+				 * loop back to waitpid to collect it. */
 			}
 		}
 	}
@@ -1270,6 +1292,11 @@ int main(int argc, char * argv[]){
 		default :	/* Parent */
 			control_fd = control_pair[0];
 			close(control_pair[1]);
+			/* Create a pollable fd for the child so epoll_wait can
+			 * detect ptrace stops without busy-polling waitpid. */
+			child_pidfd = (int)syscall(SYS_pidfd_open, child_id, 0);
+			if (child_pidfd < 0)
+				perror("pidfd_open (non-fatal, falling back to 1ms poll)");
 			break;
 	}
 	
