@@ -3323,17 +3323,15 @@ int require_allreduce_checkpoint(){
 	 * (open_memstream only updates on fflush/fclose). */
 	fflush(total_ckpt_stream);
 
-	printf("Monitor %ld: ALLREDUCE INJECT total_ckpt_size=%zu total_ckpt=%p stream=%p\n",
-	       node, total_ckpt_size, (void*)total_ckpt, (void*)total_ckpt_stream);
-	fflush(stdout);
-
-	/* Inject the merged checkpoint back into the child's address space
-	 * so the application sees all nodes' results. */
-	rc = inject_checkpoint_with_write_access(total_ckpt_stream, &total_ckpt_size, &save_regs);
-
-	printf("Monitor %ld: ALLREDUCE INJECT rc=%d total_ckpt_size=%zu\n",
-	       node, rc, total_ckpt_size);
-	fflush(stdout);
+	/* open_memstream is write-only — fread from it returns 0.
+	 * Open a readable stream from the buffer for injection. */
+	fclose(total_ckpt_stream);
+	{
+		FILE *inject_stream = fmemopen(total_ckpt, total_ckpt_size, "rb");
+		size_t inject_size = total_ckpt_size;
+		rc = inject_checkpoint_with_write_access(inject_stream, &inject_size, &save_regs);
+	}
+	total_ckpt_size = 0;
 
 	return rc;
 }
