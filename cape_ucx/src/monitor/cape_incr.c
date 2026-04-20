@@ -2999,17 +2999,13 @@ int merge_external_checkpoint(FILE *src_ckpt_stream, 		\
  	
  	fclose(tmp_stream);
  	tmp_size = 0;
- 	
-//	join_checkpoint(TOTAL_CHECKPOINT, final_list_ckpt_head);
-//	print_data_in_ckpt_list(final_list_ckpt_head);
- 	
-//	clear_list_data_ckpt(final_list_ckpt_head);
-//	final_list_ckpt_head = NULL;
-//	final_list_ckpt_tail = NULL;
- 	
- 		 	 	
- 	return rc; 	
-	
+
+	/* Flush so total_ckpt_size reflects all data written by merge_data().
+	 * open_memstream only updates the size on fflush/fclose. Without this,
+	 * callers (hypercube/ring allreduce, inject) see a stale size. */
+	fflush(total_ckpt_stream);
+
+ 	return rc;
  }
  
  
