@@ -745,7 +745,9 @@ static void cape_recv_cb(void *request, ucs_status_t status,
     r->completed = 1;
 }
 
-/* Block until a non-blocking UCX request finishes. */
+/* Block until a non-blocking UCX request finishes.
+ * Uses ucp_worker_wait (epoll-based) instead of busy-polling
+ * ucp_worker_progress to avoid wasting CPU cycles. */
 static void cape_ucx_wait(void *req, size_t expect_len, int check_len,
                           ucp_tag_t *out_tag)
 {
@@ -762,7 +764,12 @@ static void cape_ucx_wait(void *req, size_t expect_len, int check_len,
     cape_ucx_req_t *r = (cape_ucx_req_t *)req;
     while (!r->completed) {
         uint64_t progress_start_ns = cape_now_ns();
-        ucp_worker_progress(ucp_worker);
+        /* First try to make progress — completions may already be queued */
+        if (ucp_worker_progress(ucp_worker) == 0) {
+            /* No events to process — block until the transport signals
+             * activity via epoll instead of spinning. */
+            ucp_worker_wait(ucp_worker);
+        }
         cape_profile.ucx_progress_ns += cape_now_ns() - progress_start_ns;
         cape_profile.ucx_progress_calls++;
     }
@@ -1053,7 +1060,7 @@ static void cape_ucx_init(void)
     ucp_params.field_mask   = UCP_PARAM_FIELD_FEATURES
                             | UCP_PARAM_FIELD_REQUEST_SIZE
                             | UCP_PARAM_FIELD_REQUEST_INIT;
-    ucp_params.features     = UCP_FEATURE_TAG;
+    ucp_params.features     = UCP_FEATURE_TAG | UCP_FEATURE_WAKEUP;
     ucp_params.request_size = sizeof(cape_ucx_req_t);
     ucp_params.request_init = cape_ucx_req_init;
 
