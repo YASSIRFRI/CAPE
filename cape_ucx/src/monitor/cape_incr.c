@@ -2916,93 +2916,81 @@ int merge_external_checkpoint(FILE *src_ckpt_stream, 		\
 							  unsigned char *src_ckpt_data, \
 							  size_t src_ckpt_size 	)
  {
-	FILE *tmp_stream;
+	FILE *tmp_read_stream, *src_read_stream;
 	unsigned char *tmp_ckpt;
 	size_t tmp_size;
 
 
- 	unsigned long file_pointer =  0, tmp_pointer=0;
- 	int rc =0; 
+ 	unsigned long file_pointer =  0;
+ 	int rc =0;
  	unsigned long t1, t2;
- 	
+
  	if (src_ckpt_size == 0 ) return 1;
- 	
+
  	//IF total_ckpt = NULL: Write Source Checkpoint to Total checkpoint
  	if(total_ckpt_size==0)
  	{
- 		total_ckpt_stream = open_binary_memstream(&total_ckpt, &total_ckpt_size); 	 		
+ 		total_ckpt_stream = open_binary_memstream(&total_ckpt, &total_ckpt_size);
  		fwrite(src_ckpt_data, src_ckpt_size, 1, total_ckpt_stream);
- 		fflush(total_ckpt_stream);		
- 		
+ 		fflush(total_ckpt_stream);
+
 		return 0;
  	}
- 	
-// 	if (final_list_ckpt_head != NULL)
-//			clear_list_data_ckpt(final_list_ckpt_head); 	
-//	final_list_ckpt_head =NULL;
-//	final_list_ckpt_tail = NULL;
-		
- 	
- 	//Copy total_ckpt to tmp_ckpt and close total_ckpt
-	tmp_stream = open_binary_memstream(&tmp_ckpt, &tmp_size);
-	fwrite(total_ckpt, total_ckpt_size, 1, tmp_stream);
-	fflush(tmp_stream);
- 	
+
+ 	/* Save total_ckpt buffer and close the write stream */
+	fflush(total_ckpt_stream);
+	tmp_ckpt = total_ckpt;
+	tmp_size = total_ckpt_size;
 	fclose(total_ckpt_stream);
 	total_ckpt_size = 0;
- 	 	
- 	file_pointer = 0;
- 	tmp_pointer =0 ;
- 	
- 	//1. Read timespan 	
- 	fseek(tmp_stream, tmp_pointer, SEEK_SET);
- 	fread(&t1, sizeof(unsigned long), 1, tmp_stream);
- 	
- 	fseek(src_ckpt_stream, file_pointer, SEEK_SET);
- 	fread(&t2, sizeof(unsigned long), 1, src_ckpt_stream);
- 	
- 	total_ckpt_stream = open_binary_memstream(&total_ckpt, &total_ckpt_size); 
- 	
 
- 	 	
+	/* Open READABLE streams from the buffers.
+	 * open_memstream is write-only; fread from it returns 0.
+	 * Use fmemopen for reading. */
+	tmp_read_stream = fmemopen(tmp_ckpt, tmp_size, "rb");
+	src_read_stream = fmemopen(src_ckpt_data, src_ckpt_size, "rb");
+
+ 	//1. Read timespan
+ 	fread(&t1, sizeof(unsigned long), 1, tmp_read_stream);
+ 	fread(&t2, sizeof(unsigned long), 1, src_read_stream);
+
+ 	total_ckpt_stream = open_binary_memstream(&total_ckpt, &total_ckpt_size);
+
+	file_pointer += sizeof(unsigned long);
+	file_pointer += sizeof(struct user_regs_struct);
+
  	if (t1 >= t2)
  	{
 		//Write t1 and R1 into Total_ckpt
 		fwrite(tmp_ckpt, sizeof(unsigned long) + sizeof(struct user_regs_struct), 1, total_ckpt_stream);
 		fflush(total_ckpt_stream);
-		
-		file_pointer += sizeof(unsigned long) ;
-		file_pointer += sizeof(struct user_regs_struct);
+
 		//Write S2 into Total_ckpt
-		merge_data(src_ckpt_stream, src_ckpt_data, src_ckpt_size, file_pointer, FINAL_CHECKPOINT);
-		
+		merge_data(src_read_stream, src_ckpt_data, src_ckpt_size, file_pointer, FINAL_CHECKPOINT);
+
 		//Write S1 into Total_ckpt
-		merge_data(tmp_stream, tmp_ckpt, tmp_size, file_pointer, TOTAL_CHECKPOINT);
-		
+		merge_data(tmp_read_stream, tmp_ckpt, tmp_size, file_pointer, TOTAL_CHECKPOINT);
+
 	}
  	else
  	{
 		//Write t2 and R2 into Total_ckpt
 		fwrite(src_ckpt_data, sizeof(unsigned long) + sizeof(struct user_regs_struct), 1, total_ckpt_stream);
 		fflush(total_ckpt_stream);
-		
-		file_pointer += sizeof(unsigned long) ;
-		file_pointer += sizeof(struct user_regs_struct);
-		
+
 		//Write S1 into Total_ckpt
-		merge_data(tmp_stream, tmp_ckpt, tmp_size, file_pointer, TOTAL_CHECKPOINT);
-		
+		merge_data(tmp_read_stream, tmp_ckpt, tmp_size, file_pointer, TOTAL_CHECKPOINT);
+
 		//Write S2 into Total_ckpt
-		merge_data(src_ckpt_stream, src_ckpt_data, src_ckpt_size, file_pointer, FINAL_CHECKPOINT);
+		merge_data(src_read_stream, src_ckpt_data, src_ckpt_size, file_pointer, FINAL_CHECKPOINT);
 	}
- 	
- 	
- 	fclose(tmp_stream);
- 	tmp_size = 0;
+
+ 	fclose(tmp_read_stream);
+ 	fclose(src_read_stream);
+	free(tmp_ckpt);
 
 	/* Flush so total_ckpt_size reflects all data written by merge_data().
-	 * open_memstream only updates the size on fflush/fclose. Without this,
-	 * callers (hypercube/ring allreduce, inject) see a stale size. */
+	 * open_memstream only updates the size on fflush/fclose. */
 	fflush(total_ckpt_stream);
 
  	return rc;
