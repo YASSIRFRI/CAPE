@@ -3327,6 +3327,14 @@ int require_allreduce_checkpoint(){
 	 * Open a readable stream from the buffer for injection. */
 	fclose(total_ckpt_stream);
 	{
+		/* Debug: dump first bytes of checkpoint to verify format */
+		unsigned long *hdr = (unsigned long *)total_ckpt;
+		size_t hdr_off = (sizeof(unsigned long) + sizeof(struct user_regs_struct)) / sizeof(unsigned long);
+		printf("Monitor %ld: CKPT total_ckpt_size=%zu timespan=%lu first_data_words: 0x%lx 0x%lx 0x%lx 0x%lx\n",
+		       node, total_ckpt_size, hdr[0],
+		       hdr[hdr_off], hdr[hdr_off+1], hdr[hdr_off+2], hdr[hdr_off+3]);
+		fflush(stdout);
+
 		FILE *inject_stream = fmemopen(total_ckpt, total_ckpt_size, "rb");
 		size_t inject_size = total_ckpt_size;
 		rc = inject_checkpoint_with_write_access(inject_stream, &inject_size, &save_regs);
