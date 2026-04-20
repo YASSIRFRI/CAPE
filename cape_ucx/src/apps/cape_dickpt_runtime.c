@@ -272,7 +272,10 @@ void dickpt_prepare_tracking(void)
 	if (cape_tracking_ready)
 		return;
 
-	cape_register_stack_range();
+	/* Do NOT track the stack — it is node-local state at different
+	 * addresses on each node.  Only dickpt_map_region / dickpt_register_region
+	 * regions (shared data) should be checkpointed and exchanged. */
+	/* cape_register_stack_range(); */
 	monitor_fd = cape_get_monitor_fd();
 	uffd = cape_create_userfaultfd();
 	cape_register_userfault_ranges(uffd);
