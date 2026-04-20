@@ -2394,18 +2394,61 @@ int inject_checkpoint(FILE *stream, size_t *file_size, struct user_regs_struct *
 			case MD:
 				break;
 		} 
+  		if (len <= 0)
+  			continue;
+
   		buff = (unsigned char *) malloc(len);
-  		fread(buff, len, 1, stream);
+  		if (buff == NULL) {
+  			rc = 1;
+  			break;
+  		}
+  		if (fread(buff, len, 1, stream) != 1) {
+  			free(buff);
+  			rc = 1;
+  			break;
+  		}
   		file_pointer +=len;
   		fseek(stream, file_pointer, SEEK_SET);  		
  		
-  		ioctl_write_data(child_id, buff, addr, len);  		
+  		rc = ioctl_write_data(child_id, buff, addr, len);
+  		free(buff);
+  		if (rc != 0) {
+  			fprintf(stderr,
+  				"Monitor %ld: failed to inject checkpoint data at 0x%lx len=%d: %s\n",
+  				node, addr, len, strerror(errno));
+  			break;
+  		}
   	}  	
   	
   	fclose(stream); 
   	*file_size = 0;
   	return rc;
   }
+
+static int inject_checkpoint_with_write_access(FILE *stream, size_t *file_size,
+		struct user_regs_struct *regs)
+{
+	int rc;
+	int wp_rc;
+	int reprotect = 0;
+
+	if (tracking_is_enabled) {
+		rc = cape_writeprotect_tracked_ranges(0);
+		if (rc != 0)
+			return rc;
+		reprotect = 1;
+	}
+
+	rc = inject_checkpoint(stream, file_size, regs);
+
+	if (reprotect) {
+		wp_rc = cape_writeprotect_tracked_ranges(1);
+		if (rc == 0)
+			rc = wp_rc;
+	}
+
+	return rc;
+}
   
  /* -----------------------------------------------------------------
   * require_inject_checkpoint(): version 3 => version 4
@@ -2427,7 +2470,7 @@ int inject_checkpoint(FILE *stream, size_t *file_size, struct user_regs_struct *
 
   	
   	//Inject checkpoint	
-	rc = inject_checkpoint(total_ckpt_stream, &total_ckpt_size, &save_regs); 	
+	rc = inject_checkpoint_with_write_access(total_ckpt_stream, &total_ckpt_size, &save_regs); 	
   	 
   	
   	return rc;
@@ -3280,9 +3323,13 @@ int require_allreduce_checkpoint(){
 		 
 	}	
 	
+	/* Flush so total_ckpt / total_ckpt_size are up-to-date
+	 * (open_memstream only updates on fflush/fclose). */
+	fflush(total_ckpt_stream);
+
 	/* Inject the merged checkpoint back into the child's address space
 	 * so the application sees all nodes' results. */
-	rc = inject_checkpoint(total_ckpt_stream, &total_ckpt_size, &save_regs);
+	rc = inject_checkpoint_with_write_access(total_ckpt_stream, &total_ckpt_size, &save_regs);
 
 	return rc;
 }
