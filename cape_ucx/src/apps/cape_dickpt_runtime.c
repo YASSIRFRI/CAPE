@@ -226,17 +226,40 @@ void dickpt_register_region(void *addr, size_t len)
 	cape_add_range((uint64_t)(uintptr_t)addr, (uint64_t)len);
 }
 
+/*
+ * All DICKPT nodes must map their tracked region at the SAME virtual address
+ * so that checkpoint diffs (which contain absolute addresses) can be injected
+ * into any node's address space after allreduce.
+ *
+ * We use a fixed hint address in a range that is typically unused by the
+ * default mmap region and the heap.  MAP_FIXED_NOREPLACE (Linux 4.17+)
+ * fails cleanly if the range is already occupied.
+ */
+#ifndef DICKPT_FIXED_MAP_ADDR
+#define DICKPT_FIXED_MAP_ADDR  ((void *)0x200000000000UL)  /* 32 TiB */
+#endif
+
 void *dickpt_map_region(size_t len)
 {
 	void *addr;
 	size_t page_size = cape_page_size();
 	size_t aligned_len = (size_t)cape_align_up((uint64_t)len, page_size);
+	static char *next_fixed = NULL;
 
-	addr = mmap(NULL, aligned_len, PROT_READ | PROT_WRITE,
-	            MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-	if (addr == MAP_FAILED)
-		return NULL;
+	if (next_fixed == NULL)
+		next_fixed = (char *)DICKPT_FIXED_MAP_ADDR;
 
+	addr = mmap(next_fixed, aligned_len, PROT_READ | PROT_WRITE,
+	            MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
+	if (addr == MAP_FAILED) {
+		/* Fall back: let kernel choose (inject may not work across nodes) */
+		addr = mmap(NULL, aligned_len, PROT_READ | PROT_WRITE,
+		            MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+		if (addr == MAP_FAILED)
+			return NULL;
+	}
+
+	next_fixed = (char *)addr + aligned_len;
 	dickpt_register_region(addr, aligned_len);
 	return addr;
 }
