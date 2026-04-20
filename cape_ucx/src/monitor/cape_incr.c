@@ -44,6 +44,10 @@
 #include "../include/cape_dickpt_uffd.h"
 #include "../include/cape_signal.h"
 
+#ifndef __NR_pidfd_open
+#define __NR_pidfd_open 434
+#endif
+
 #include <ucp/api/ucp.h>
 #ifdef USE_PMIX
 #include <pmix.h>
