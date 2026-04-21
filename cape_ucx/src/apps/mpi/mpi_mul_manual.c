@@ -5,7 +5,7 @@
 #include <sys/time.h>
 
 #define DEFAULT_N 1024
-#define MAX_N 3200
+#define MAX_N 3000
 
 static int a[MAX_N][MAX_N];
 static int b[MAX_N][MAX_N];
