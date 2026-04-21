@@ -22,6 +22,38 @@ int a[MAX_N][MAX_N];
 int b[MAX_N][MAX_N];
 int c[MAX_N][MAX_N];
 
+static int verify_full(int n, unsigned long node, int rep)
+{
+	int errors = 0;
+	int i, j, k;
+
+	for (i = 0; i < n; i++) {
+		for (j = 0; j < n; j++) {
+			long long expected = 0;
+			for (k = 0; k < n; k++)
+				expected += (long long)a[i][k] * b[k][j];
+
+			if ((long long)c[i][j] != expected) {
+				fprintf(stderr,
+					"VERIFY FAIL node=%lu rep=%d "
+					"c[%d][%d] got=%d expected=%lld\n",
+					node, rep, i, j, c[i][j], expected);
+				if (++errors >= 10) {
+					fprintf(stderr,
+						"... too many errors, stopping\n");
+					return errors;
+				}
+			}
+		}
+	}
+
+	if (errors == 0 && node == 0)
+		printf("VERIFY OK  rep=%d (%d x %d) all %d cells correct\n",
+		       rep, n, n, n * n);
+
+	return errors;
+}
+
 void generate_matrix(int n)
 {
 	__enter_func();
@@ -92,6 +124,10 @@ int main(int argc, char **argv)
 		t0 = get_ms_of_day();
 		matrix_mult(n);
 		t1 = get_ms_of_day();
+		if (verify_full(n, cape_get_node_num(), rep) != 0) {
+			cape_finalize();
+			return 1;
+		}
 		if (cape_get_node_num() == 0)
 			printf("RESULT n=%d rep=%d ms=%lu\n", n, rep, t1 - t0);
 	}
