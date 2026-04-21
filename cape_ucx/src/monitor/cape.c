@@ -153,6 +153,29 @@ static inline void cape_prof_acc_sendrecv(double call_ns, double recv_wait_ns)
 #define PROF_ACC(accum, var)  (accum) += cape_get_ns() - (var)
 #define PROF_INC(counter)     (counter)++
 #define PROF_ADD(counter, v)  (counter) += (v)
+#define PROF_SET_SENDRECV_CONTEXT(phase, step, partner, epoch) \
+	cape_prof_set_sendrecv_context((phase), (step), (partner), (epoch))
+#define PROF_CLEAR_SENDRECV_CONTEXT() cape_prof_clear_sendrecv_context()
+#define PROF_RECORD_RECV_WAIT(delta_var, start_var) \
+	double delta_var = cape_get_ns() - (start_var); \
+	prof_ucx_recv_wait_ns += (delta_var)
+#define PROF_RECORD_SEND_WAIT(start_var) \
+	PROF_ACC(prof_ucx_send_wait_ns, start_var)
+#define PROF_RECORD_SENDRECV(start_var, recv_wait_ns) \
+	cape_prof_acc_sendrecv(cape_get_ns() - (start_var), (recv_wait_ns))
+#define PROF_RECORD_ALLREDUCE_ARRIVAL(epoch) \
+	do { \
+		double _arrival_rt_ns = cape_get_realtime_ns(); \
+		if (prof_allreduce_arrival_count == 0) \
+			prof_allreduce_arrival_first_rt_ns = _arrival_rt_ns; \
+		prof_allreduce_arrival_last_rt_ns = _arrival_rt_ns; \
+		if (prof_allreduce_arrival_count < CAPE_PROFILE_MAX_ARRIVALS) { \
+			unsigned long idx = prof_allreduce_arrival_count; \
+			prof_allreduce_arrival_rt_ns[idx] = _arrival_rt_ns; \
+			prof_allreduce_arrival_epoch[idx] = (epoch); \
+		} \
+		prof_allreduce_arrival_count++; \
+	} while (0)
 
 #else /* !CAPE_PROFILE */
 
@@ -160,6 +183,12 @@ static inline void cape_prof_acc_sendrecv(double call_ns, double recv_wait_ns)
 #define PROF_ACC(accum, var)  (void)0
 #define PROF_INC(counter)     (void)0
 #define PROF_ADD(counter, v)  (void)0
+#define PROF_SET_SENDRECV_CONTEXT(phase, step, partner, epoch) do { } while (0)
+#define PROF_CLEAR_SENDRECV_CONTEXT() do { } while (0)
+#define PROF_RECORD_RECV_WAIT(delta_var, start_var) double delta_var = 0.0
+#define PROF_RECORD_SEND_WAIT(start_var) do { } while (0)
+#define PROF_RECORD_SENDRECV(start_var, recv_wait_ns) do { } while (0)
+#define PROF_RECORD_ALLREDUCE_ARRIVAL(epoch) do { } while (0)
 
 #endif /* CAPE_PROFILE */
 /* ==================================================================== */
@@ -345,29 +374,16 @@ static void cape_ucx_sendrecv(
     PROF_START(_t_sendrecv);
     PROF_START(_t_recv_wait);
     cape_ucx_wait(rreq, recvlen, 1, &matched_tag);
-#ifdef CAPE_PROFILE
-    double _recv_wait_ns = cape_get_ns() - _t_recv_wait;
-    prof_ucx_recv_wait_ns += _recv_wait_ns;
-#else
-    PROF_ACC(prof_ucx_recv_wait_ns, _t_recv_wait);
-#endif
+    PROF_RECORD_RECV_WAIT(_recv_wait_ns, _t_recv_wait);
 
     PROF_START(_t_send_wait);
     cape_ucx_wait(sreq, 0, 0, NULL);
-#ifdef CAPE_PROFILE
-    double _send_wait_ns = cape_get_ns() - _t_send_wait;
-    prof_ucx_send_wait_ns += _send_wait_ns;
-    (void)_send_wait_ns;
-#else
-    PROF_ACC(prof_ucx_send_wait_ns, _t_send_wait);
-#endif
+    PROF_RECORD_SEND_WAIT(_t_send_wait);
 
     PROF_INC(prof_sendrecv_count);
     PROF_ADD(prof_bytes_sent, sendlen);
     PROF_ADD(prof_bytes_received, recvlen);
-#ifdef CAPE_PROFILE
-    cape_prof_acc_sendrecv(cape_get_ns() - _t_sendrecv, _recv_wait_ns);
-#endif
+    PROF_RECORD_SENDRECV(_t_sendrecv, _recv_wait_ns);
 }
 /***********************************************************************/
 
@@ -1798,32 +1814,24 @@ int hypercube_allreduce(unsigned int node, unsigned int num_nodes, char ckpt_fla
 			send_hdr[0] = send_msg_size;
 			send_hdr[1] = 0; /* 0 = uncompressed */
 		}
-#ifdef CAPE_PROFILE
-		cape_prof_set_sendrecv_context(CAPE_SR_PHASE_SIZE, i, (int)partner, epoch);
-#endif
+		PROF_SET_SENDRECV_CONTEXT(CAPE_SR_PHASE_SIZE, i, (int)partner, epoch);
 		PROF_START(_t_size_xchg);
 		cape_ucx_sendrecv(send_hdr, sizeof(send_hdr), partner,
 		                  recv_hdr, sizeof(recv_hdr), partner,
 		                  size_token);
 		PROF_ACC(prof_allreduce_size_ns, _t_size_xchg);
-#ifdef CAPE_PROFILE
-		cape_prof_clear_sendrecv_context();
-#endif
+		PROF_CLEAR_SENDRECV_CONTEXT();
 		recv_msg_size = recv_hdr[0]; /* wire size */
 		unsigned long recv_orig_size = recv_hdr[1];
 #else /* !CAPE_COMPRESS */
 		/* Exchange message sizes (step tag: i*2) */
-#ifdef CAPE_PROFILE
-		cape_prof_set_sendrecv_context(CAPE_SR_PHASE_SIZE, i, (int)partner, epoch);
-#endif
+		PROF_SET_SENDRECV_CONTEXT(CAPE_SR_PHASE_SIZE, i, (int)partner, epoch);
 		PROF_START(_t_size_xchg);
 		cape_ucx_sendrecv(&send_msg_size, sizeof(unsigned long), partner,
 		                  &recv_msg_size, sizeof(unsigned long), partner,
 		                  size_token);
 		PROF_ACC(prof_allreduce_size_ns, _t_size_xchg);
-#ifdef CAPE_PROFILE
-		cape_prof_clear_sendrecv_context();
-#endif
+		PROF_CLEAR_SENDRECV_CONTEXT();
 #endif /* CAPE_COMPRESS */
 
 		recv_msg = malloc(sizeof(char) * recv_msg_size);
@@ -1837,9 +1845,7 @@ int hypercube_allreduce(unsigned int node, unsigned int num_nodes, char ckpt_fla
 		}
 
 		/* Exchange checkpoint data (step tag: i*2+1) */
-#ifdef CAPE_PROFILE
-		cape_prof_set_sendrecv_context(CAPE_SR_PHASE_DATA, i, (int)partner, epoch);
-#endif
+		PROF_SET_SENDRECV_CONTEXT(CAPE_SR_PHASE_DATA, i, (int)partner, epoch);
 		PROF_START(_t_data_xchg);
 #ifdef CAPE_COMPRESS
 		cape_ucx_sendrecv(comp_buf ? comp_buf : send_msg,
@@ -1852,9 +1858,7 @@ int hypercube_allreduce(unsigned int node, unsigned int num_nodes, char ckpt_fla
 		                  data_token);
 #endif
 		PROF_ACC(prof_allreduce_data_ns, _t_data_xchg);
-#ifdef CAPE_PROFILE
-		cape_prof_clear_sendrecv_context();
-#endif
+		PROF_CLEAR_SENDRECV_CONTEXT();
 
 #ifdef CAPE_COMPRESS
 		free(comp_buf);
@@ -1935,33 +1939,25 @@ int ring_allreduce(unsigned int node, unsigned int nnodes, char ckpt_flag, uint3
 			send_hdr[1] = 0;
 			send_hdr[2] = 0;
 		}
-#ifdef CAPE_PROFILE
-		cape_prof_set_sendrecv_context(CAPE_SR_PHASE_SIZE, step, (int)left, epoch);
-#endif
+		PROF_SET_SENDRECV_CONTEXT(CAPE_SR_PHASE_SIZE, step, (int)left, epoch);
 		PROF_START(_t_size_xchg);
 		cape_ucx_sendrecv(send_hdr, sizeof(send_hdr), right,
 		                  recv_hdr, sizeof(recv_hdr), left,
 		                  size_token);
 		PROF_ACC(prof_allreduce_size_ns, _t_size_xchg);
-#ifdef CAPE_PROFILE
-		cape_prof_clear_sendrecv_context();
-#endif
+		PROF_CLEAR_SENDRECV_CONTEXT();
 		recv_msg_size = recv_hdr[0];
 		unsigned int recv_orig_size = recv_hdr[1];
 		unsigned int recv_compressed = recv_hdr[2];
 #else /* !CAPE_COMPRESS */
 		/* Exchange sizes: send to right, receive from left (step tag: i*2) */
-#ifdef CAPE_PROFILE
-		cape_prof_set_sendrecv_context(CAPE_SR_PHASE_SIZE, step, (int)left, epoch);
-#endif
+		PROF_SET_SENDRECV_CONTEXT(CAPE_SR_PHASE_SIZE, step, (int)left, epoch);
 		PROF_START(_t_size_xchg);
 		cape_ucx_sendrecv(&send_msg_size, sizeof(unsigned int), right,
 		                  &recv_msg_size, sizeof(unsigned int), left,
 		                  size_token);
 		PROF_ACC(prof_allreduce_size_ns, _t_size_xchg);
-#ifdef CAPE_PROFILE
-		cape_prof_clear_sendrecv_context();
-#endif
+		PROF_CLEAR_SENDRECV_CONTEXT();
 #endif /* CAPE_COMPRESS */
 
 		recv_msg = malloc(sizeof(char) * recv_msg_size);
@@ -1977,9 +1973,7 @@ int ring_allreduce(unsigned int node, unsigned int nnodes, char ckpt_flag, uint3
 		}
 
 		/* Exchange data (step tag: i*2+1) */
-#ifdef CAPE_PROFILE
-		cape_prof_set_sendrecv_context(CAPE_SR_PHASE_DATA, step, (int)left, epoch);
-#endif
+		PROF_SET_SENDRECV_CONTEXT(CAPE_SR_PHASE_DATA, step, (int)left, epoch);
 		PROF_START(_t_data_xchg);
 #ifdef CAPE_COMPRESS
 		cape_ucx_sendrecv(comp_buf ? comp_buf : send_msg,
@@ -1992,9 +1986,7 @@ int ring_allreduce(unsigned int node, unsigned int nnodes, char ckpt_flag, uint3
 		                  data_token);
 #endif
 		PROF_ACC(prof_allreduce_data_ns, _t_data_xchg);
-#ifdef CAPE_PROFILE
-		cape_prof_clear_sendrecv_context();
-#endif
+		PROF_CLEAR_SENDRECV_CONTEXT();
 
 #ifdef CAPE_COMPRESS
 		free(comp_buf);
@@ -2069,18 +2061,7 @@ int require_allreduce(char ckpt_flag){
 	epoch = __allreduce_epoch__ & 0x0fffU;
 	if (epoch == 0)
 		epoch = 1;
-#ifdef CAPE_PROFILE
-	double _arrival_rt_ns = cape_get_realtime_ns();
-	if (prof_allreduce_arrival_count == 0)
-		prof_allreduce_arrival_first_rt_ns = _arrival_rt_ns;
-	prof_allreduce_arrival_last_rt_ns = _arrival_rt_ns;
-	if (prof_allreduce_arrival_count < CAPE_PROFILE_MAX_ARRIVALS) {
-		unsigned long idx = prof_allreduce_arrival_count;
-		prof_allreduce_arrival_rt_ns[idx] = _arrival_rt_ns;
-		prof_allreduce_arrival_epoch[idx] = epoch;
-	}
-	prof_allreduce_arrival_count++;
-#endif
+	PROF_RECORD_ALLREDUCE_ARRIVAL(epoch);
 	PROF_START(_t_allreduce);
 	int _rc;
 	if (is_power_of_two(__nnodes__))

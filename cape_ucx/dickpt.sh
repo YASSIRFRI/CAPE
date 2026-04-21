@@ -36,7 +36,7 @@ fi
 N_VALUES_STR="${N_VALUES_STR:-3000}"
 D_VALUES_STR="${D_VALUES_STR:-256}"
 REPS="${REPS:-1}"
-APP="${APP:-all}"
+APP="${APP:-1}"
 PROFILE="${PROFILE:-0}"
 read -r -a N_VALUES <<< "${N_VALUES_STR}"
 read -r -a D_VALUES <<< "${D_VALUES_STR}"
