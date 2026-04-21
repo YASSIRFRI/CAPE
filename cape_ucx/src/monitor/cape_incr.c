@@ -957,18 +957,6 @@ static int fs_entry_exists(const char *dir, const char *basename)
     return found;
 }
 
-/* NFS-safe content probe: read one small file bypassing page cache for the
- * parent dir by re-opening each call. Returns first byte or 0 on failure. */
-static char fs_read_first_byte(const char *filepath)
-{
-    int fd = open(filepath, O_RDONLY);
-    if (fd < 0) return 0;
-    char b = 0;
-    ssize_t r = read(fd, &b, 1);
-    close(fd);
-    return (r == 1) ? b : 0;
-}
-
 /* Exchange addresses via shared filesystem (same approach as cape.c) */
 static void ucx_exchange_addresses_via_fs(const char *dir, const char *jobid,
                                           ucp_address_t *local_addr,
@@ -1005,6 +993,19 @@ static void ucx_exchange_addresses_via_fs(const char *dir, const char *jobid,
     fclose(f);
     fs_publish_dir_entry(dir, path);
 
+    /* Go marker is a separate file (not a rewrite of rdy_0) to avoid NFS
+     * page-cache staleness on its content — readers see it via a fresh
+     * READDIR in fs_entry_exists instead of a cached read(). */
+    char go_base[128];
+    snprintf(go_base, sizeof(go_base), "cape_ucx_%s_go", jobid);
+
+    if (node == 0) {
+        /* Clear any stale go marker from a previous run before waiting. */
+        snprintf(path, sizeof(path), "%s/%s", dir, go_base);
+        unlink(path);
+        fs_publish_dir_entry(dir, path);
+    }
+
     uint64_t bootstrap_wait_start_ns = cape_now_ns();
     if (node == 0) {
         /* Master waits for all workers' addr+rdy files */
@@ -1015,18 +1016,15 @@ static void ucx_exchange_addresses_via_fs(const char *dir, const char *jobid,
                 usleep(10000);
             }
         }
-        /* Rewrite master's rdy file with "go" marker to signal all
-         * addresses are available. Workers poll for this marker. */
-        snprintf(path, sizeof(path), "%s/cape_ucx_%s_rdy_0", dir, jobid);
+        /* Publish the go marker as a brand-new file. */
+        snprintf(path, sizeof(path), "%s/%s", dir, go_base);
         f = fopen(path, "w");
-        if (!f) { perror("CAPE UCX: rewrite rdy_0"); exit(1); }
-        fprintf(f, "go\n");
+        if (!f) { perror("CAPE UCX: create go file"); exit(1); }
         fclose(f);
         fs_publish_dir_entry(dir, path);
     } else {
-        /* Workers wait for master's rdy file to contain the go marker */
-        snprintf(path, sizeof(path), "%s/cape_ucx_%s_rdy_0", dir, jobid);
-        while (fs_read_first_byte(path) != 'g') {
+        /* Workers wait for the go marker to appear via a fresh READDIR. */
+        while (!fs_entry_exists(dir, go_base)) {
             cape_profile.ucx_bootstrap_wait_iters++;
             usleep(10000);
         }
