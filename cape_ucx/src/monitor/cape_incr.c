@@ -30,6 +30,7 @@
 #include <fcntl.h>
 #include <linux/sched.h>
 #include <linux/userfaultfd.h>
+#include <dirent.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -927,12 +928,54 @@ static const char *cape_ucx_bootstrap_dir(void)
 }
 
 #ifndef USE_PMIX
+/* NFS-safe publish: after creating a file under `dir`, fsync the parent
+ * directory's fd so the new entry is committed to the NFS server and its
+ * mtime bumps — this lets other clients' cache revalidation detect the
+ * change instead of waiting out their negative-lookup cache (~30s).
+ * `filepath` is the full path of the file just created. */
+static void fs_publish_dir_entry(const char *dir, const char *filepath)
+{
+    int ffd = open(filepath, O_RDONLY);
+    if (ffd >= 0) { fsync(ffd); close(ffd); }
+    int dfd = open(dir, O_RDONLY | O_DIRECTORY);
+    if (dfd >= 0) { fsync(dfd); close(dfd); }
+}
+
+/* NFS-safe existence probe for `basename` inside `dir`. Forces a fresh
+ * READDIR RPC by opening the directory each time; negative dentry cache on
+ * `access()` can otherwise block for acregmin/acdirmin (~30s by default). */
+static int fs_entry_exists(const char *dir, const char *basename)
+{
+    DIR *d = opendir(dir);
+    if (!d) return 0;
+    int found = 0;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        if (strcmp(e->d_name, basename) == 0) { found = 1; break; }
+    }
+    closedir(d);
+    return found;
+}
+
+/* NFS-safe content probe: read one small file bypassing page cache for the
+ * parent dir by re-opening each call. Returns first byte or 0 on failure. */
+static char fs_read_first_byte(const char *filepath)
+{
+    int fd = open(filepath, O_RDONLY);
+    if (fd < 0) return 0;
+    char b = 0;
+    ssize_t r = read(fd, &b, 1);
+    close(fd);
+    return (r == 1) ? b : 0;
+}
+
 /* Exchange addresses via shared filesystem (same approach as cape.c) */
 static void ucx_exchange_addresses_via_fs(const char *dir, const char *jobid,
                                           ucp_address_t *local_addr,
                                           size_t local_addr_len)
 {
     char path[512];
+    char rdy_base[128];
     FILE *f;
 
     /* Remove stale rdy file from previous runs before writing anything */
@@ -953,19 +996,21 @@ static void ucx_exchange_addresses_via_fs(const char *dir, const char *jobid,
         exit(1);
     }
     fclose(f);
+    fs_publish_dir_entry(dir, path);
 
     /* Phase 1: write addr file, then signal ready */
     snprintf(path, sizeof(path), "%s/cape_ucx_%s_rdy_%ld", dir, jobid, node);
     f = fopen(path, "w");
     if (!f) { perror("CAPE UCX: write rdy file"); exit(1); }
     fclose(f);
+    fs_publish_dir_entry(dir, path);
 
     uint64_t bootstrap_wait_start_ns = cape_now_ns();
     if (node == 0) {
         /* Master waits for all workers' addr+rdy files */
         for (int i = 1; i < num_nodes; i++) {
-            snprintf(path, sizeof(path), "%s/cape_ucx_%s_rdy_%d", dir, jobid, i);
-            while (access(path, F_OK) != 0) {
+            snprintf(rdy_base, sizeof(rdy_base), "cape_ucx_%s_rdy_%d", jobid, i);
+            while (!fs_entry_exists(dir, rdy_base)) {
                 cape_profile.ucx_bootstrap_wait_iters++;
                 usleep(10000);
             }
@@ -977,17 +1022,11 @@ static void ucx_exchange_addresses_via_fs(const char *dir, const char *jobid,
         if (!f) { perror("CAPE UCX: rewrite rdy_0"); exit(1); }
         fprintf(f, "go\n");
         fclose(f);
+        fs_publish_dir_entry(dir, path);
     } else {
         /* Workers wait for master's rdy file to contain the go marker */
         snprintf(path, sizeof(path), "%s/cape_ucx_%s_rdy_0", dir, jobid);
-        while (1) {
-            f = fopen(path, "r");
-            if (f) {
-                char buf[8] = {0};
-                fgets(buf, sizeof(buf), f);
-                fclose(f);
-                if (buf[0] == 'g') break;
-            }
+        while (fs_read_first_byte(path) != 'g') {
             cape_profile.ucx_bootstrap_wait_iters++;
             usleep(10000);
         }
