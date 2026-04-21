@@ -3231,18 +3231,17 @@ int ring_allreduce(){
 
 	}
 	free(recv_buffer);
-
+/*----------------------------------------------------------------------
+ * hypercube_allreduce(): Allreduce using hypercube algorithm
+ * 
+ * ---------------------------------------------------------------------
+ */
 
 
     return rc;
 }
 
 
-/*----------------------------------------------------------------------
- * hypercube_allreduce(): Allreduce using hypercube algorithm
- * 
- * ---------------------------------------------------------------------
- */
 int hypercube_allreduce(){
 	int rc = 0;
 	int i;
@@ -3303,11 +3302,6 @@ int hypercube_allreduce(){
     return rc;
 }
 
-/*----------------------------------------------------------------------
- * require_allreduce_checkpoint(): version 4.0 => version 5
- * 		at each node, it collect checkpoints from other nodes
- * --------------------------------------------------------------------- 
- */ 
 int require_allreduce_checkpoint(){
 	int rc = 0;
 	//rc = prepare_allreduce_checkpoint();	
@@ -3318,10 +3312,6 @@ int require_allreduce_checkpoint(){
 	
 	
 	rc=  merge_external_checkpoint(final_ckpt_stream, final_ckpt, final_ckpt_size);		
-	
-//	print_data_in_ckpt_list(list_ckpt_head);
-
-	
 	join_checkpoint(TOTAL_CHECKPOINT, final_list_ckpt_head);
 	
 	
