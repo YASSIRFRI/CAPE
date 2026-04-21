@@ -37,6 +37,7 @@ N_VALUES_STR="${N_VALUES_STR:-3000}"
 D_VALUES_STR="${D_VALUES_STR:-256}"
 REPS="${REPS:-1}"
 APP="${APP:-all}"
+PROFILE="${PROFILE:-0}"
 read -r -a N_VALUES <<< "${N_VALUES_STR}"
 read -r -a D_VALUES <<< "${D_VALUES_STR}"
 
@@ -112,7 +113,7 @@ make -C "${PROJECT_DIR}" cleanall \
     L_FOLDER="${BUILD_DIR}/lib" 2>/dev/null || true
 
 # Build dickpt monitor (needs UCX) + dickpt app (plain binary)
-make -C "${PROJECT_DIR}" dickpt "${MAKE_ARGS[@]}"
+make -C "${PROJECT_DIR}" dickpt PROFILE="${PROFILE}" "${MAKE_ARGS[@]}"
 
 MONITOR="${BUILD_DIR}/bin/cape_dickpt_monitor"
 
@@ -127,6 +128,7 @@ echo "Reps: ${REPS}"
 echo "Build dir: ${BUILD_DIR}"
 echo "CSV: ${CSV}"
 echo "MPI launch mode: ${SRUN_MPI_MODE}"
+echo "Monitor profiling: ${PROFILE}"
 
 run_one() {
     local app_name="$1"; shift

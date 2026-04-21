@@ -125,6 +125,7 @@ unsigned char *before_buffer;
 #define dprintf(fmt, args...) do { } while (0)
 #endif
 
+#ifdef CAPE_PROFILE
 typedef struct {
 	uint64_t monitor_start_ns;
 	uint64_t wait_for_child_ns;
@@ -339,6 +340,23 @@ static void cape_profile_report(void)
 		cape_pct(cape_profile.ucx_wait_ns, total_ns),
 		cape_pct(cape_profile.userfault_handle_ns, total_ns));
 }
+#define CAPE_PROFILE_NS_VAR(name) uint64_t name
+#define CAPE_PROFILE_NS_START(name) do { (name) = cape_now_ns(); } while (0)
+#define CAPE_PROFILE_SET(field, value) do { cape_profile.field = (value); } while (0)
+#define CAPE_PROFILE_INC(field) do { cape_profile.field++; } while (0)
+#define CAPE_PROFILE_ADD(field, value) do { cape_profile.field += (value); } while (0)
+#define CAPE_PROFILE_ADD_NS(field, start) \
+	do { cape_profile.field += cape_now_ns() - (start); } while (0)
+#else
+#define cape_profile_note_sigtrap(trap_code, elapsed_ns) do { } while (0)
+#define cape_profile_report() do { } while (0)
+#define CAPE_PROFILE_NS_VAR(name)
+#define CAPE_PROFILE_NS_START(name) do { } while (0)
+#define CAPE_PROFILE_SET(field, value) do { } while (0)
+#define CAPE_PROFILE_INC(field) do { } while (0)
+#define CAPE_PROFILE_ADD(field, value) do { } while (0)
+#define CAPE_PROFILE_ADD_NS(field, start) do { } while (0)
+#endif
 
 static FILE *open_binary_memstream(unsigned char **bufloc, size_t *sizeloc)
 {
@@ -349,7 +367,8 @@ static int read_remote_memory(pid_t pid, unsigned long remote_addr, void *local_
 			      size_t len)
 {
 	size_t done = 0;
-	uint64_t start_ns = cape_now_ns();
+	CAPE_PROFILE_NS_VAR(start_ns);
+	CAPE_PROFILE_NS_START(start_ns);
 
 	while (done < len) {
 		struct iovec local = {
@@ -367,9 +386,9 @@ static int read_remote_memory(pid_t pid, unsigned long remote_addr, void *local_
 		done += (size_t)rc;
 	}
 
-	cape_profile.process_vm_read_ns += cape_now_ns() - start_ns;
-	cape_profile.process_vm_read_calls++;
-	cape_profile.process_vm_read_bytes += (uint64_t)len;
+	CAPE_PROFILE_ADD_NS(process_vm_read_ns, start_ns);
+	CAPE_PROFILE_INC(process_vm_read_calls);
+	CAPE_PROFILE_ADD(process_vm_read_bytes, (uint64_t)len);
 
 	return 0;
 }
@@ -378,7 +397,8 @@ static int write_remote_memory(pid_t pid, const void *local_buf,
 			       unsigned long remote_addr, size_t len)
 {
 	size_t done = 0;
-	uint64_t start_ns = cape_now_ns();
+	CAPE_PROFILE_NS_VAR(start_ns);
+	CAPE_PROFILE_NS_START(start_ns);
 
 	while (done < len) {
 		struct iovec local = {
@@ -396,9 +416,9 @@ static int write_remote_memory(pid_t pid, const void *local_buf,
 		done += (size_t)rc;
 	}
 
-	cape_profile.process_vm_write_ns += cape_now_ns() - start_ns;
-	cape_profile.process_vm_write_calls++;
-	cape_profile.process_vm_write_bytes += (uint64_t)len;
+	CAPE_PROFILE_ADD_NS(process_vm_write_ns, start_ns);
+	CAPE_PROFILE_INC(process_vm_write_calls);
+	CAPE_PROFILE_ADD(process_vm_write_bytes, (uint64_t)len);
 
 	return 0;
 }
@@ -406,7 +426,8 @@ static int write_remote_memory(pid_t pid, const void *local_buf,
 static int cape_userfault_writeprotect(unsigned long start, unsigned long len, int enable)
 {
 	struct uffdio_writeprotect wp;
-	uint64_t start_ns = cape_now_ns();
+	CAPE_PROFILE_NS_VAR(start_ns);
+	CAPE_PROFILE_NS_START(start_ns);
 
 	if (userfault_fd < 0)
 		return -1;
@@ -416,10 +437,10 @@ static int cape_userfault_writeprotect(unsigned long start, unsigned long len, i
 	wp.range.len = len;
 	wp.mode = enable ? UFFDIO_WRITEPROTECT_MODE_WP : 0;
 
-	cape_profile.writeprotect_calls++;
+	CAPE_PROFILE_INC(writeprotect_calls);
 	if (ioctl(userfault_fd, UFFDIO_WRITEPROTECT, &wp) == -1)
 		return -1;
-	cape_profile.writeprotect_ns += cape_now_ns() - start_ns;
+	CAPE_PROFILE_ADD_NS(writeprotect_ns, start_ns);
 	return 0;
 }
 
@@ -427,7 +448,8 @@ static int cape_capture_dirty_page(unsigned int pid, unsigned long fault_addr)
 {
 	unsigned long aligned_addr;
 	struct page_node *temp_node, *current_node;
-	uint64_t start_ns = cape_now_ns();
+	CAPE_PROFILE_NS_VAR(start_ns);
+	CAPE_PROFILE_NS_START(start_ns);
 
 	aligned_addr = fault_addr & ~(PAGE_SIZE - 1);
 	temp_node = list_head;
@@ -451,8 +473,8 @@ static int cape_capture_dirty_page(unsigned int pid, unsigned long fault_addr)
 	if (list_head == NULL) {
 		list_head = current_node;
 		list_end = current_node;
-		cape_profile.dirty_capture_ns += cape_now_ns() - start_ns;
-		cape_profile.dirty_pages_captured++;
+		CAPE_PROFILE_ADD_NS(dirty_capture_ns, start_ns);
+		CAPE_PROFILE_INC(dirty_pages_captured);
 		return 0;
 	}
 
@@ -460,8 +482,8 @@ static int cape_capture_dirty_page(unsigned int pid, unsigned long fault_addr)
 		current_node->before = list_end;
 		list_end->next = current_node;
 		list_end = current_node;
-		cape_profile.dirty_capture_ns += cape_now_ns() - start_ns;
-		cape_profile.dirty_pages_captured++;
+		CAPE_PROFILE_ADD_NS(dirty_capture_ns, start_ns);
+		CAPE_PROFILE_INC(dirty_pages_captured);
 		return 0;
 	}
 
@@ -469,8 +491,8 @@ static int cape_capture_dirty_page(unsigned int pid, unsigned long fault_addr)
 		current_node->next = list_head;
 		list_head->before = current_node;
 		list_head = current_node;
-		cape_profile.dirty_capture_ns += cape_now_ns() - start_ns;
-		cape_profile.dirty_pages_captured++;
+		CAPE_PROFILE_ADD_NS(dirty_capture_ns, start_ns);
+		CAPE_PROFILE_INC(dirty_pages_captured);
 		return 0;
 	}
 
@@ -478,8 +500,8 @@ static int cape_capture_dirty_page(unsigned int pid, unsigned long fault_addr)
 	current_node->before = temp_node->before;
 	temp_node->before->next = current_node;
 	temp_node->before = current_node;
-	cape_profile.dirty_capture_ns += cape_now_ns() - start_ns;
-	cape_profile.dirty_pages_captured++;
+	CAPE_PROFILE_ADD_NS(dirty_capture_ns, start_ns);
+	CAPE_PROFILE_INC(dirty_pages_captured);
 	return 0;
 }
 
@@ -488,7 +510,8 @@ static int cape_handle_userfault_event(void)
 	struct uffd_msg msg;
 	ssize_t nread;
 	unsigned long page_addr;
-	uint64_t start_ns = cape_now_ns();
+	CAPE_PROFILE_NS_VAR(start_ns);
+	CAPE_PROFILE_NS_START(start_ns);
 
 	nread = read(userfault_fd, &msg, sizeof(msg));
 	if (nread == -1) {
@@ -506,7 +529,7 @@ static int cape_handle_userfault_event(void)
 	if ((msg.arg.pagefault.flags & UFFD_PAGEFAULT_FLAG_WP) == 0)
 		return 0;
 
-	cape_profile.userfault_events++;
+	CAPE_PROFILE_INC(userfault_events);
 	page_addr = msg.arg.pagefault.address & ~(PAGE_SIZE - 1);
 	if (cape_capture_dirty_page(child_id, page_addr) != 0) {
 		fprintf(stderr, "Monitor %ld: failed to snapshot page 0x%lx\n",
@@ -518,7 +541,7 @@ static int cape_handle_userfault_event(void)
 		return -1;
 	}
 
-	cape_profile.userfault_handle_ns += cape_now_ns() - start_ns;
+	CAPE_PROFILE_ADD_NS(userfault_handle_ns, start_ns);
 	return 0;
 }
 
@@ -541,18 +564,19 @@ int cape_drain_userfaultfd(void)
 
 int cape_wait_for_child_event(pid_t pid, int *status)
 {
-	uint64_t total_start_ns = cape_now_ns();
+	CAPE_PROFILE_NS_VAR(total_start_ns);
+	CAPE_PROFILE_NS_START(total_start_ns);
 
 	if (userfault_fd < 0 || !tracking_is_enabled)
 	{
-		uint64_t wait_start_ns = cape_now_ns();
+		CAPE_PROFILE_NS_VAR(wait_start_ns);
+		CAPE_PROFILE_NS_START(wait_start_ns);
 		pid_t rc = waitpid(pid, status, 0);
-		uint64_t elapsed_ns = cape_now_ns() - wait_start_ns;
 
-		cape_profile.wait_for_child_ns += elapsed_ns;
-		cape_profile.wait_blocking_ns += elapsed_ns;
-		cape_profile.waitpid_ns += elapsed_ns;
-		cape_profile.waitpid_calls++;
+		CAPE_PROFILE_ADD_NS(wait_for_child_ns, wait_start_ns);
+		CAPE_PROFILE_ADD_NS(wait_blocking_ns, wait_start_ns);
+		CAPE_PROFILE_ADD_NS(waitpid_ns, wait_start_ns);
+		CAPE_PROFILE_INC(waitpid_calls);
 		return rc;
 	}
 
@@ -570,19 +594,18 @@ int cape_wait_for_child_event(pid_t pid, int *status)
 	}
 
 	for (;;) {
-		uint64_t waitpid_start_ns;
+		CAPE_PROFILE_NS_VAR(waitpid_start_ns);
 		pid_t rc;
 
-		cape_profile.wait_loops++;
-		waitpid_start_ns = cape_now_ns();
+		CAPE_PROFILE_INC(wait_loops);
+		CAPE_PROFILE_NS_START(waitpid_start_ns);
 		rc = waitpid(pid, status, WNOHANG);
-		cape_profile.waitpid_ns += cape_now_ns() - waitpid_start_ns;
-		cape_profile.waitpid_calls++;
+		CAPE_PROFILE_ADD_NS(waitpid_ns, waitpid_start_ns);
+		CAPE_PROFILE_INC(waitpid_calls);
 
 		if (rc == pid) {
-			uint64_t total_elapsed_ns = cape_now_ns() - total_start_ns;
-			cape_profile.wait_for_child_ns += total_elapsed_ns;
-			cape_profile.wait_tracked_ns += total_elapsed_ns;
+			CAPE_PROFILE_ADD_NS(wait_for_child_ns, total_start_ns);
+			CAPE_PROFILE_ADD_NS(wait_tracked_ns, total_start_ns);
 			return rc;
 		}
 		if (rc == -1) {
@@ -596,19 +619,17 @@ int cape_wait_for_child_event(pid_t pid, int *status)
 		{
 			struct epoll_event evs[2];
 			int nfds, i;
-			uint64_t poll_start_ns;
-			uint64_t poll_elapsed_ns;
+			CAPE_PROFILE_NS_VAR(poll_start_ns);
 			/* With pidfd in the epoll set we can block indefinitely;
 			 * fall back to 1ms if pidfd was not available. */
 			int timeout = (child_pidfd >= 0) ? -1 : 1;
 
-			poll_start_ns = cape_now_ns();
+			CAPE_PROFILE_NS_START(poll_start_ns);
 			nfds = epoll_wait(epoll_fd, evs, 2, timeout);
-			poll_elapsed_ns = cape_now_ns() - poll_start_ns;
-			cape_profile.poll_ns += poll_elapsed_ns;
-			cape_profile.poll_calls++;
+			CAPE_PROFILE_ADD_NS(poll_ns, poll_start_ns);
+			CAPE_PROFILE_INC(poll_calls);
 			if (nfds == 0)
-				cape_profile.poll_timeouts++;
+				CAPE_PROFILE_INC(poll_timeouts);
 			if (nfds == -1 && errno != EINTR)
 				return -1;
 			for (i = 0; i < nfds; i++) {
@@ -779,7 +800,8 @@ static void cape_recv_cb(void *request, ucs_status_t status,
 static void cape_ucx_wait(void *req, size_t expect_len, int check_len,
                           ucp_tag_t *out_tag)
 {
-	uint64_t wait_start_ns = cape_now_ns();
+	CAPE_PROFILE_NS_VAR(wait_start_ns);
+	CAPE_PROFILE_NS_START(wait_start_ns);
 
     if (out_tag) *out_tag = 0;
     if (req == NULL)
@@ -791,17 +813,18 @@ static void cape_ucx_wait(void *req, size_t expect_len, int check_len,
     }
     cape_ucx_req_t *r = (cape_ucx_req_t *)req;
     while (!r->completed) {
-        uint64_t progress_start_ns = cape_now_ns();
+        CAPE_PROFILE_NS_VAR(progress_start_ns);
+        CAPE_PROFILE_NS_START(progress_start_ns);
         /* First try to make progress — completions may already be queued */
         if (ucp_worker_progress(ucp_worker) == 0) {
             /* No events to process — block until the transport signals
              * activity via epoll instead of spinning. */
             ucp_worker_wait(ucp_worker);
         }
-        cape_profile.ucx_progress_ns += cape_now_ns() - progress_start_ns;
-        cape_profile.ucx_progress_calls++;
+        CAPE_PROFILE_ADD_NS(ucx_progress_ns, progress_start_ns);
+        CAPE_PROFILE_INC(ucx_progress_calls);
     }
-    cape_profile.ucx_wait_ns += cape_now_ns() - wait_start_ns;
+    CAPE_PROFILE_ADD_NS(ucx_wait_ns, wait_start_ns);
     if (out_tag)
         *out_tag = r->sender_tag;
     if (r->status != UCS_OK) {
@@ -837,7 +860,8 @@ static void cape_ucx_sendrecv(
         void       *recvbuf, size_t recvlen, int src,
         uint32_t    token)
 {
-    uint64_t start_ns = cape_now_ns();
+    CAPE_PROFILE_NS_VAR(start_ns);
+    CAPE_PROFILE_NS_START(start_ns);
     ucp_tag_t send_tag = CAPE_UCX_TAG(node, token);
     ucp_tag_t recv_tag = CAPE_UCX_TAG(src,  token);
 
@@ -859,16 +883,17 @@ static void cape_ucx_sendrecv(
 
     cape_ucx_wait(rreq, recvlen, 1, NULL);
     cape_ucx_wait(sreq, 0, 0, NULL);
-    cape_profile.ucx_sendrecv_ns += cape_now_ns() - start_ns;
-    cape_profile.ucx_sendrecv_calls++;
-    cape_profile.ucx_send_bytes += (uint64_t)sendlen;
-    cape_profile.ucx_recv_bytes += (uint64_t)recvlen;
+    CAPE_PROFILE_ADD_NS(ucx_sendrecv_ns, start_ns);
+    CAPE_PROFILE_INC(ucx_sendrecv_calls);
+    CAPE_PROFILE_ADD(ucx_send_bytes, (uint64_t)sendlen);
+    CAPE_PROFILE_ADD(ucx_recv_bytes, (uint64_t)recvlen);
 }
 
 /* Simple blocking send via UCX tag. */
 static void cape_ucx_send(const void *buf, size_t len, int dest, uint32_t token)
 {
-    uint64_t start_ns = cape_now_ns();
+    CAPE_PROFILE_NS_VAR(start_ns);
+    CAPE_PROFILE_NS_START(start_ns);
     ucp_tag_t tag = CAPE_UCX_TAG(node, token);
     ucp_request_param_t sp = {
         .op_attr_mask = UCP_OP_ATTR_FIELD_CALLBACK,
@@ -876,15 +901,16 @@ static void cape_ucx_send(const void *buf, size_t len, int dest, uint32_t token)
     };
     void *req = ucp_tag_send_nbx(ucp_endpoints[dest], buf, len, tag, &sp);
     cape_ucx_wait(req, 0, 0, NULL);
-    cape_profile.ucx_send_ns += cape_now_ns() - start_ns;
-    cape_profile.ucx_send_calls++;
-    cape_profile.ucx_send_bytes += (uint64_t)len;
+    CAPE_PROFILE_ADD_NS(ucx_send_ns, start_ns);
+    CAPE_PROFILE_INC(ucx_send_calls);
+    CAPE_PROFILE_ADD(ucx_send_bytes, (uint64_t)len);
 }
 
 /* Simple blocking recv via UCX tag. */
 static void cape_ucx_recv(void *buf, size_t len, int src, uint32_t token)
 {
-    uint64_t start_ns = cape_now_ns();
+    CAPE_PROFILE_NS_VAR(start_ns);
+    CAPE_PROFILE_NS_START(start_ns);
     ucp_tag_t tag = CAPE_UCX_TAG(src, token);
     ucp_request_param_t rp = {
         .op_attr_mask = UCP_OP_ATTR_FIELD_CALLBACK
@@ -894,9 +920,9 @@ static void cape_ucx_recv(void *buf, size_t len, int src, uint32_t token)
     };
     void *req = ucp_tag_recv_nbx(ucp_worker, buf, len, tag, CAPE_UCX_TAG_MASK, &rp);
     cape_ucx_wait(req, len, 1, NULL);
-    cape_profile.ucx_recv_ns += cape_now_ns() - start_ns;
-    cape_profile.ucx_recv_calls++;
-    cape_profile.ucx_recv_bytes += (uint64_t)len;
+    CAPE_PROFILE_ADD_NS(ucx_recv_ns, start_ns);
+    CAPE_PROFILE_INC(ucx_recv_calls);
+    CAPE_PROFILE_ADD(ucx_recv_bytes, (uint64_t)len);
 }
 
 /* Tag tokens for different message types to avoid collisions */
@@ -1007,13 +1033,14 @@ static void ucx_exchange_addresses_via_fs(const char *dir, const char *jobid,
         fs_publish_dir_entry(dir, path);
     }
 
-    uint64_t bootstrap_wait_start_ns = cape_now_ns();
+    CAPE_PROFILE_NS_VAR(bootstrap_wait_start_ns);
+    CAPE_PROFILE_NS_START(bootstrap_wait_start_ns);
     if (node == 0) {
         /* Master waits for all workers' addr+rdy files */
         for (int i = 1; i < num_nodes; i++) {
             snprintf(rdy_base, sizeof(rdy_base), "cape_ucx_%s_rdy_%d", jobid, i);
             while (!fs_entry_exists(dir, rdy_base)) {
-                cape_profile.ucx_bootstrap_wait_iters++;
+                CAPE_PROFILE_INC(ucx_bootstrap_wait_iters);
                 usleep(10000);
             }
         }
@@ -1026,11 +1053,11 @@ static void ucx_exchange_addresses_via_fs(const char *dir, const char *jobid,
     } else {
         /* Workers wait for the go marker to appear via a fresh READDIR. */
         while (!fs_entry_exists(dir, go_base)) {
-            cape_profile.ucx_bootstrap_wait_iters++;
+            CAPE_PROFILE_INC(ucx_bootstrap_wait_iters);
             usleep(10000);
         }
     }
-    cape_profile.ucx_bootstrap_wait_ns += cape_now_ns() - bootstrap_wait_start_ns;
+    CAPE_PROFILE_ADD_NS(ucx_bootstrap_wait_ns, bootstrap_wait_start_ns);
 
     ucs_status_t st;
     ucp_endpoints = malloc(num_nodes * sizeof(ucp_ep_h));
@@ -1306,7 +1333,7 @@ int main(int argc, char * argv[]){
 		return 1;
 	}
 
-	cape_profile.monitor_start_ns = cape_now_ns();
+	CAPE_PROFILE_SET(monitor_start_ns, cape_now_ns());
 	
 	exec_file = argv[1];
 
@@ -1388,12 +1415,14 @@ int main(int argc, char * argv[]){
 		}
 		if(WIFSTOPPED(status) && WSTOPSIG(status) == SIGTRAP) {
 				int dx = 0;
-				uint64_t trap_start_ns;
+				CAPE_PROFILE_NS_VAR(trap_start_ns);
+#ifdef CAPE_PROFILE
 				uint64_t trap_elapsed_ns;
+#endif
 				ptrace(PTRACE_GETREGS, child_id, NULL, &regs);
 				dx = regs.rdx;
-				trap_start_ns = cape_now_ns();
-				cape_profile.sigtrap_count++;
+				CAPE_PROFILE_NS_START(trap_start_ns);
+				CAPE_PROFILE_INC(sigtrap_count);
 				switch(dx){
 					case S_LOCK_PROCESS_MEMORY:  //Lock process 		
 						rc = lock_process_memory(child_id);
@@ -1516,9 +1545,11 @@ int main(int argc, char * argv[]){
 						dprintf("\nMonitor %ld: get breakpoint with unkown edx = %d", node, dx);
 						exit(1);
 				}
+#ifdef CAPE_PROFILE
 				trap_elapsed_ns = cape_now_ns() - trap_start_ns;
 				cape_profile.sigtrap_dispatch_ns += trap_elapsed_ns;
 				cape_profile_note_sigtrap(dx, trap_elapsed_ns);
+#endif
 			}//SIGTRAP
 		 else if(WIFSTOPPED(status)) {
 			int sig = WSTOPSIG(status);
@@ -1956,7 +1987,8 @@ int add_item_to_list_ckpt(struct shared_data_ckpt *p){
 	int * buff[PAGE_SIZE_DIV_4];
 	int shared_flag = 0;
 	unsigned long current_ckpt_struct, new_ckpt_struct;
-	uint64_t profile_start_ns = cape_now_ns();
+	CAPE_PROFILE_NS_VAR(profile_start_ns);
+	CAPE_PROFILE_NS_START(profile_start_ns);
 	current_ckpt_struct = NA; //Init current checkpoint structure
 	
 	
@@ -1980,8 +2012,8 @@ int add_item_to_list_ckpt(struct shared_data_ckpt *p){
 
 	if (list == NULL) {
 		fflush(stream);
-		cape_profile.generate_ckpt_ns += cape_now_ns() - profile_start_ns;
-		cape_profile.generate_ckpt_calls++;
+		CAPE_PROFILE_ADD_NS(generate_ckpt_ns, profile_start_ns);
+		CAPE_PROFILE_INC(generate_ckpt_calls);
 		return stream;
 	}
 
@@ -2172,8 +2204,8 @@ int add_item_to_list_ckpt(struct shared_data_ckpt *p){
 
 	}
 	fflush(stream);
-	cape_profile.generate_ckpt_ns += cape_now_ns() - profile_start_ns;
-	cape_profile.generate_ckpt_calls++;
+	CAPE_PROFILE_ADD_NS(generate_ckpt_ns, profile_start_ns);
+	CAPE_PROFILE_INC(generate_ckpt_calls);
 	return stream;
 }
 
