@@ -31,6 +31,7 @@
 #include <linux/sched.h>
 #include <linux/userfaultfd.h>
 #include <dirent.h>
+#include <sys/personality.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -1326,6 +1327,15 @@ int main(int argc, char * argv[]){
 			close(control_pair[0]);
 			snprintf(control_fd_text, sizeof(control_fd_text), "%d", control_pair[1]);
 			setenv(CAPE_DICKPT_ENV_SOCK_FD, control_fd_text, 1);
+			/* Disable ASLR before exec so the app's globals (bss/data/heap/
+			 * mmap) land at identical VAs on every rank. The personality
+			 * flag persists across execve, so the app sees a non-randomized
+			 * address space without needing to re-exec itself. */
+			{
+				int _p = personality(0xffffffff);
+				if (_p >= 0 && !(_p & ADDR_NO_RANDOMIZE))
+					personality((unsigned long)_p | ADDR_NO_RANDOMIZE);
+			}
 			ptrace ( PTRACE_TRACEME, NULL, NULL, NULL ) ; //This process will be traced
 			execv ( exec_file , &argv[1] );
 			perror (exec_file) ;
