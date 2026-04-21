@@ -9,13 +9,18 @@
 
 /* Only the result matrix c needs to be in the tracked region for checkpointing.
  * a and b are read-only during computation — keep them as globals to avoid
- * unnecessary write-protection overhead. Loop variables are local. */
+ * unnecessary write-protection overhead. Loop variables are local.
+ *
+ * With ASLR disabled (cape_dickpt_runtime.c constructor) and -no-pie, all
+ * globals land at the same VA on every rank, so we can register c directly
+ * instead of mapping it via dickpt_map_region. */
 static int a[MAX_N][MAX_N];
 static int b[MAX_N][MAX_N];
 
 struct ckpt_state {
 	int c[MAX_N][MAX_N];
 };
+static struct ckpt_state g_state;
 
 static unsigned long get_ms_of_day(void)
 {
@@ -85,12 +90,9 @@ int main(int argc, char *argv[])
 	if (reps <= 0)
 		reps = 1;
 
-	state = dickpt_map_region(sizeof(*state));
-	if (state == NULL) {
-		perror("dickpt_map_region");
-		return 1;
-	}
+	state = &g_state;
 	memset(state, 0, sizeof(*state));
+	dickpt_register_region(state, sizeof(*state));
 
 	node = dickpt_read_node();
 	num_nodes = dickpt_read_num_nodes();

@@ -34,8 +34,21 @@ if ! mkdir -p "${BUILD_DIR}/bin" "${BUILD_DIR}/obj" "${BUILD_DIR}/lib" 2>/dev/nu
 fi
 
 N_VALUES_STR="${N_VALUES_STR:-3000}"
+D_VALUES_STR="${D_VALUES_STR:-256}"
 REPS="${REPS:-1}"
+APP="${APP:-all}"
 read -r -a N_VALUES <<< "${N_VALUES_STR}"
+read -r -a D_VALUES <<< "${D_VALUES_STR}"
+
+# APP selects which benchmark(s) to run:
+#   all  → mul_manual + matvec + gradient
+#   1    → mul_manual    2 → matvec    3 → gradient
+#   1,3  → mul_manual + gradient
+if [ "${APP}" = "all" ]; then
+    APPS_LIST=(1 2 3)
+else
+    IFS=',' read -r -a APPS_LIST <<< "${APP}"
+fi
 BOOTSTRAP_ROOT="${BOOTSTRAP_ROOT:-${BUILD_DIR}/ucx_bootstrap}"
 mkdir -p "${BOOTSTRAP_ROOT}"
 
@@ -102,63 +115,102 @@ make -C "${PROJECT_DIR}" cleanall \
 make -C "${PROJECT_DIR}" dickpt "${MAKE_ARGS[@]}"
 
 MONITOR="${BUILD_DIR}/bin/cape_dickpt_monitor"
-APP="${BUILD_DIR}/bin/dickpt_mul_manual"
 
-CSV="${RESULTS_DIR}/dickpt_mamult_${JOB_TAG}.csv"
-echo "impl,n,rep,app_ms,job_id,nodes,ntasks" > "${CSV}"
+CSV="${RESULTS_DIR}/dickpt_bench_${JOB_TAG}.csv"
+echo "impl,app,n,d,rep,app_ms,job_id,nodes,ntasks" > "${CSV}"
 
-echo "Benchmarking DICKPT cape_mul_manual"
+echo "Benchmarking DICKPT"
+echo "APPs: ${APPS_LIST[*]}"
 echo "N values: ${N_VALUES[*]}"
-echo "Reps per N: ${REPS}"
+echo "D values (gradient only): ${D_VALUES[*]}"
+echo "Reps: ${REPS}"
 echo "Build dir: ${BUILD_DIR}"
 echo "CSV: ${CSV}"
 echo "MPI launch mode: ${SRUN_MPI_MODE}"
 
-echo "DICKPT now uses standard Linux syscalls (userfaultfd + process_vm_*) and does not require /dev/chardev90."
-
-for n in "${N_VALUES[@]}"; do
-    echo ""
-    echo "=== DICKPT n=${n} reps=${REPS} ==="
-
-    run_log="${BUILD_DIR}/run_dickpt_n${n}.log"
+run_one() {
+    local app_name="$1"; shift
+    local app_bin="$1"; shift
+    local n="$1"; shift
+    local d="$1"; shift   # may be empty
+    local tag="${app_name}_n${n}${d:+_d${d}}"
+    local run_log="${BUILD_DIR}/run_dickpt_${tag}.log"
     : > "${run_log}"
-    bootstrap_id="${JOB_TAG}_n${n}"
-    bootstrap_dir="${BOOTSTRAP_ROOT}/${bootstrap_id}"
+    local bootstrap_id="${JOB_TAG}_${tag}"
+    local bootstrap_dir="${BOOTSTRAP_ROOT}/${bootstrap_id}"
     rm -rf "${bootstrap_dir}"
     mkdir -p "${bootstrap_dir}"
 
+    echo ""
+    echo "=== DICKPT ${app_name} n=${n}${d:+ d=${d}} reps=${REPS} ==="
+
     set +e
-    CAPE_UCX_BOOTSTRAP_ID="${bootstrap_id}" \
-    CAPE_UCX_BOOTSTRAP_DIR="${bootstrap_dir}" \
-    srun --mpi="${SRUN_MPI_MODE}" \
-         --nodes="${SLURM_JOB_NUM_NODES}" \
-         --ntasks="${SLURM_NTASKS}" \
-         --ntasks-per-node=1 \
-         "${MONITOR}" "${APP}" "${n}" "${REPS}" 2>&1 | tee -a "${run_log}"
-    rc=${PIPESTATUS[0]}
+    if [ -n "${d}" ]; then
+        CAPE_UCX_BOOTSTRAP_ID="${bootstrap_id}" \
+        CAPE_UCX_BOOTSTRAP_DIR="${bootstrap_dir}" \
+        srun --mpi="${SRUN_MPI_MODE}" \
+             --nodes="${SLURM_JOB_NUM_NODES}" \
+             --ntasks="${SLURM_NTASKS}" \
+             --ntasks-per-node=1 \
+             "${MONITOR}" "${app_bin}" "${n}" "${d}" "${REPS}" 2>&1 | tee -a "${run_log}"
+    else
+        CAPE_UCX_BOOTSTRAP_ID="${bootstrap_id}" \
+        CAPE_UCX_BOOTSTRAP_DIR="${bootstrap_dir}" \
+        srun --mpi="${SRUN_MPI_MODE}" \
+             --nodes="${SLURM_JOB_NUM_NODES}" \
+             --ntasks="${SLURM_NTASKS}" \
+             --ntasks-per-node=1 \
+             "${MONITOR}" "${app_bin}" "${n}" "${REPS}" 2>&1 | tee -a "${run_log}"
+    fi
+    local rc=${PIPESTATUS[0]}
     set -e
     rm -rf "${bootstrap_dir}"
 
     if [ "${rc}" -ne 0 ]; then
-        echo "WARN: dickpt run failed for n=${n} (rc=${rc}). See ${run_log}" >&2
-        continue
+        echo "WARN: dickpt ${app_name} failed n=${n}${d:+ d=${d}} rc=${rc}" >&2
+        return
     fi
 
     awk -v impl="dickpt" \
+        -v app="${app_name}" \
         -v job="${SLURM_JOB_ID}" \
         -v nodes="${SLURM_JOB_NUM_NODES}" \
         -v tasks="${SLURM_NTASKS}" '
         /^RESULT / {
-            n=""; rep=""; ms="";
+            nn=""; dd=""; rep=""; ms="";
             for (i=1; i<=NF; i++) {
                 split($i, kv, "=");
-                if (kv[1] == "n")   n = kv[2];
+                if (kv[1] == "n")   nn = kv[2];
+                if (kv[1] == "d")   dd = kv[2];
                 if (kv[1] == "rep") rep = kv[2];
                 if (kv[1] == "ms")  ms = kv[2];
             }
-            if (n != "" && rep != "" && ms != "")
-                printf "%s,%s,%s,%s,%s,%s,%s\n", impl, n, rep, ms, job, nodes, tasks;
+            if (nn != "" && rep != "" && ms != "")
+                printf "%s,%s,%s,%s,%s,%s,%s,%s,%s\n",
+                       impl, app, nn, dd, rep, ms, job, nodes, tasks;
         }' "${run_log}" >> "${CSV}"
+}
+
+for id in "${APPS_LIST[@]}"; do
+    case "${id}" in
+        1) name="mul_manual"; bin="${BUILD_DIR}/bin/dickpt_mul_manual"      ;;
+        2) name="matvec";     bin="${BUILD_DIR}/bin/dickpt_matvec_manual"   ;;
+        3) name="gradient";   bin="${BUILD_DIR}/bin/dickpt_gradient_manual" ;;
+        *) echo "WARN: unknown APP id '${id}'" >&2; continue ;;
+    esac
+    if [ ! -x "${bin}" ]; then
+        echo "WARN: missing binary ${bin}" >&2
+        continue
+    fi
+    for n in "${N_VALUES[@]}"; do
+        if [ "${id}" = "3" ]; then
+            for d in "${D_VALUES[@]}"; do
+                run_one "${name}" "${bin}" "${n}" "${d}"
+            done
+        else
+            run_one "${name}" "${bin}" "${n}" ""
+        fi
+    done
 done
 
 echo ""

@@ -34,8 +34,21 @@ if ! mkdir -p "${BUILD_DIR}/bin" "${BUILD_DIR}/obj" "${BUILD_DIR}/lib" 2>/dev/nu
 fi
 
 N_VALUES_STR="${N_VALUES_STR:-3000}"
-REPS="${REPS:-5}"
+D_VALUES_STR="${D_VALUES_STR:-256}"
+REPS="${REPS:-1}"
+APP="${APP:-all}"
 read -r -a N_VALUES <<< "${N_VALUES_STR}"
+read -r -a D_VALUES <<< "${D_VALUES_STR}"
+
+# APP selects which benchmark(s) to run:
+#   all  → mamult + matvec + gradient
+#   1    → mamult    2 → matvec    3 → gradient
+#   1,3  → mamult + gradient
+if [ "${APP}" = "all" ]; then
+    APPS_LIST=(1 2 3)
+else
+    IFS=',' read -r -a APPS_LIST <<< "${APP}"
+fi
 
 module purge
 module load GCCcore/14.2.0
@@ -93,55 +106,103 @@ MAKE_ARGS=( \
     CC=gcc \
 )
 
-# Build timestamp app
-make -C "${PROJECT_DIR}" cape_mamult "${MAKE_ARGS[@]}"
+# Build requested timestamp apps
+for id in "${APPS_LIST[@]}"; do
+    case "${id}" in
+        1) make -C "${PROJECT_DIR}" cape_mamult   "${MAKE_ARGS[@]}" ;;
+        2) make -C "${PROJECT_DIR}" cape_matvec   "${MAKE_ARGS[@]}" ;;
+        3) make -C "${PROJECT_DIR}" cape_gradient "${MAKE_ARGS[@]}" ;;
+        *) echo "WARN: unknown APP id '${id}', skipping build" >&2 ;;
+    esac
+done
 
-CSV="${RESULTS_DIR}/ucx_mamult_${JOB_TAG}.csv"
-echo "impl,n,rep,app_ms,job_id,nodes,ntasks" > "${CSV}"
+CSV="${RESULTS_DIR}/ucx_bench_${JOB_TAG}.csv"
+echo "impl,app,n,d,rep,app_ms,job_id,nodes,ntasks" > "${CSV}"
 
-echo "Benchmarking UCX cape_mamult"
+echo "Benchmarking UCX timestamped cape"
+echo "APPs: ${APPS_LIST[*]}"
 echo "N values: ${N_VALUES[*]}"
-echo "Reps per N: ${REPS}"
+echo "D values (gradient only): ${D_VALUES[*]}"
+echo "Reps: ${REPS}"
 echo "Build dir: ${BUILD_DIR}"
 echo "CSV: ${CSV}"
 
-for n in "${N_VALUES[@]}"; do
-    echo ""
-    echo "=== UCX n=${n} reps=${REPS} ==="
-
-    run_log="${BUILD_DIR}/run_ucx_n${n}.log"
+run_one() {
+    local app_name="$1"; shift
+    local bin="$1"; shift
+    local n="$1"; shift
+    local d="$1"; shift   # may be empty for 2-arg apps
+    local tag="${app_name}_n${n}${d:+_d${d}}"
+    local run_log="${BUILD_DIR}/run_ucx_${tag}.log"
     : > "${run_log}"
 
+    echo ""
+    echo "=== UCX ${app_name} n=${n}${d:+ d=${d}} reps=${REPS} ==="
+
     set +e
-    UCX_RNDV_THRESH="${UCX_RNDV_THRESH:-65536}" \
-    srun --mpi=pmix \
-         --nodes="${SLURM_JOB_NUM_NODES}" \
-         --ntasks="${SLURM_NTASKS}" \
-         --ntasks-per-node=1 \
-         "${BUILD_DIR}/bin/cape_mamult" "${n}" "${REPS}" 2>&1 | tee -a "${run_log}"
-    rc=${PIPESTATUS[0]}
+    if [ -n "${d}" ]; then
+        UCX_RNDV_THRESH="${UCX_RNDV_THRESH:-65536}" \
+        srun --mpi=pmix \
+             --nodes="${SLURM_JOB_NUM_NODES}" \
+             --ntasks="${SLURM_NTASKS}" \
+             --ntasks-per-node=1 \
+             "${bin}" "${n}" "${d}" "${REPS}" 2>&1 | tee -a "${run_log}"
+    else
+        UCX_RNDV_THRESH="${UCX_RNDV_THRESH:-65536}" \
+        srun --mpi=pmix \
+             --nodes="${SLURM_JOB_NUM_NODES}" \
+             --ntasks="${SLURM_NTASKS}" \
+             --ntasks-per-node=1 \
+             "${bin}" "${n}" "${REPS}" 2>&1 | tee -a "${run_log}"
+    fi
+    local rc=${PIPESTATUS[0]}
     set -e
 
     if [ "${rc}" -ne 0 ]; then
-        echo "WARN: UCX run failed for n=${n} (rc=${rc}). See ${run_log}" >&2
-        continue
+        echo "WARN: UCX ${app_name} failed n=${n}${d:+ d=${d}} rc=${rc}" >&2
+        return
     fi
 
     awk -v impl="ucx" \
+        -v app="${app_name}" \
         -v job="${SLURM_JOB_ID}" \
         -v nodes="${SLURM_JOB_NUM_NODES}" \
         -v tasks="${SLURM_NTASKS}" '
         /^RESULT / {
-            n=""; rep=""; ms="";
+            nn=""; dd=""; rep=""; ms="";
             for (i=1; i<=NF; i++) {
                 split($i, kv, "=");
-                if (kv[1] == "n")   n = kv[2];
+                if (kv[1] == "n")   nn = kv[2];
+                if (kv[1] == "d")   dd = kv[2];
                 if (kv[1] == "rep") rep = kv[2];
                 if (kv[1] == "ms")  ms = kv[2];
             }
-            if (n != "" && rep != "" && ms != "")
-                printf "%s,%s,%s,%s,%s,%s,%s\n", impl, n, rep, ms, job, nodes, tasks;
+            if (nn != "" && rep != "" && ms != "")
+                printf "%s,%s,%s,%s,%s,%s,%s,%s,%s\n",
+                       impl, app, nn, dd, rep, ms, job, nodes, tasks;
         }' "${run_log}" >> "${CSV}"
+}
+
+for id in "${APPS_LIST[@]}"; do
+    case "${id}" in
+        1) name="mamult";   bin="${BUILD_DIR}/bin/cape_mamult"   ;;
+        2) name="matvec";   bin="${BUILD_DIR}/bin/cape_matvec"   ;;
+        3) name="gradient"; bin="${BUILD_DIR}/bin/cape_gradient" ;;
+        *) continue ;;
+    esac
+    if [ ! -x "${bin}" ]; then
+        echo "WARN: missing binary ${bin}" >&2
+        continue
+    fi
+    for n in "${N_VALUES[@]}"; do
+        if [ "${id}" = "3" ]; then
+            for d in "${D_VALUES[@]}"; do
+                run_one "${name}" "${bin}" "${n}" "${d}"
+            done
+        else
+            run_one "${name}" "${bin}" "${n}" ""
+        fi
+    done
 done
 
 echo ""

@@ -30,8 +30,20 @@ if ! mkdir -p "${BUILD_DIR}/bin" 2>/dev/null; then
 fi
 
 N_VALUES_STR="${N_VALUES_STR:-3000}"
+D_VALUES_STR="${D_VALUES_STR:-256}"
 REPS="${REPS:-1}"
+APP="${APP:-all}"
 read -r -a N_VALUES <<< "${N_VALUES_STR}"
+read -r -a D_VALUES <<< "${D_VALUES_STR}"
+
+# APP selects which benchmark(s) to run:
+#   all → mul_manual + matvec + gradient
+#   1=mul_manual  2=matvec  3=gradient    (comma-separated combos ok: 1,3)
+if [ "${APP}" = "all" ]; then
+    APPS_LIST=(1 2 3)
+else
+    IFS=',' read -r -a APPS_LIST <<< "${APP}"
+fi
 
 module purge
 module load GCCcore/14.2.0
@@ -45,60 +57,111 @@ if ! command -v mpicc >/dev/null 2>&1; then
     exit 1
 fi
 
-SRC="${PROJECT_DIR}/src/apps/mpi/mpi_mul_manual.c"
-APP="${BUILD_DIR}/bin/mpi_mul_manual"
-
-echo "Compiling ${SRC} -> ${APP}"
-mpicc -O2 -Wall -o "${APP}" "${SRC}"
-
+SRC_DIR="${PROJECT_DIR}/src/apps/mpi"
 SRUN_MPI_MODE="${SRUN_MPI_MODE:-pmix}"
 
-CSV="${RESULTS_DIR}/mpi_mamult_${JOB_TAG}.csv"
-echo "impl,n,rep,app_ms,job_id,nodes,ntasks" > "${CSV}"
+build_one() {
+    local src="$1"
+    local out="$2"
+    echo "Compiling ${src} -> ${out}"
+    mpicc -O2 -Wall -o "${out}" "${src}"
+}
 
-echo "Benchmarking pure MPI matrix multiplication"
+for id in "${APPS_LIST[@]}"; do
+    case "${id}" in
+        1) build_one "${SRC_DIR}/mpi_mul_manual.c" "${BUILD_DIR}/bin/mpi_mul_manual" ;;
+        2) build_one "${SRC_DIR}/mpi_matvec.c"     "${BUILD_DIR}/bin/mpi_matvec"     ;;
+        3) build_one "${SRC_DIR}/mpi_gradient.c"   "${BUILD_DIR}/bin/mpi_gradient"   ;;
+        *) echo "WARN: unknown APP id '${id}', skipping build" >&2 ;;
+    esac
+done
+
+CSV="${RESULTS_DIR}/mpi_bench_${JOB_TAG}.csv"
+echo "impl,app,n,d,rep,app_ms,job_id,nodes,ntasks" > "${CSV}"
+
+echo "Benchmarking pure MPI"
+echo "APPs: ${APPS_LIST[*]}"
 echo "N values: ${N_VALUES[*]}"
-echo "Reps per N: ${REPS}"
+echo "D values (gradient only): ${D_VALUES[*]}"
+echo "Reps: ${REPS}"
 echo "Build dir: ${BUILD_DIR}"
 echo "CSV: ${CSV}"
 echo "MPI launch mode: ${SRUN_MPI_MODE}"
 
-for n in "${N_VALUES[@]}"; do
-    echo ""
-    echo "=== MPI n=${n} reps=${REPS} ==="
-
-    run_log="${BUILD_DIR}/run_mpi_n${n}.log"
+run_one() {
+    local app_name="$1"; shift
+    local app_bin="$1"; shift
+    local n="$1"; shift
+    local d="$1"; shift   # may be empty
+    local tag="${app_name}_n${n}${d:+_d${d}}"
+    local run_log="${BUILD_DIR}/run_mpi_${tag}.log"
     : > "${run_log}"
 
+    echo ""
+    echo "=== MPI ${app_name} n=${n}${d:+ d=${d}} reps=${REPS} ==="
+
     set +e
-    srun --mpi="${SRUN_MPI_MODE}" \
-         --nodes="${SLURM_JOB_NUM_NODES}" \
-         --ntasks="${SLURM_NTASKS}" \
-         --ntasks-per-node=1 \
-         "${APP}" "${n}" "${REPS}" 2>&1 | tee -a "${run_log}"
-    rc=${PIPESTATUS[0]}
+    if [ -n "${d}" ]; then
+        srun --mpi="${SRUN_MPI_MODE}" \
+             --nodes="${SLURM_JOB_NUM_NODES}" \
+             --ntasks="${SLURM_NTASKS}" \
+             --ntasks-per-node=1 \
+             "${app_bin}" "${n}" "${d}" "${REPS}" 2>&1 | tee -a "${run_log}"
+    else
+        srun --mpi="${SRUN_MPI_MODE}" \
+             --nodes="${SLURM_JOB_NUM_NODES}" \
+             --ntasks="${SLURM_NTASKS}" \
+             --ntasks-per-node=1 \
+             "${app_bin}" "${n}" "${REPS}" 2>&1 | tee -a "${run_log}"
+    fi
+    local rc=${PIPESTATUS[0]}
     set -e
 
     if [ "${rc}" -ne 0 ]; then
-        echo "WARN: mpi run failed for n=${n} (rc=${rc}). See ${run_log}" >&2
-        continue
+        echo "WARN: mpi ${app_name} failed n=${n}${d:+ d=${d}} rc=${rc}" >&2
+        return
     fi
 
     awk -v impl="mpi" \
+        -v app="${app_name}" \
         -v job="${SLURM_JOB_ID}" \
         -v nodes="${SLURM_JOB_NUM_NODES}" \
         -v tasks="${SLURM_NTASKS}" '
         /^RESULT / {
-            n=""; rep=""; ms="";
+            nn=""; dd=""; rep=""; ms="";
             for (i=1; i<=NF; i++) {
                 split($i, kv, "=");
-                if (kv[1] == "n")   n = kv[2];
+                if (kv[1] == "n")   nn = kv[2];
+                if (kv[1] == "d")   dd = kv[2];
                 if (kv[1] == "rep") rep = kv[2];
                 if (kv[1] == "ms")  ms = kv[2];
             }
-            if (n != "" && rep != "" && ms != "")
-                printf "%s,%s,%s,%s,%s,%s,%s\n", impl, n, rep, ms, job, nodes, tasks;
+            if (nn != "" && rep != "" && ms != "")
+                printf "%s,%s,%s,%s,%s,%s,%s,%s,%s\n",
+                       impl, app, nn, dd, rep, ms, job, nodes, tasks;
         }' "${run_log}" >> "${CSV}"
+}
+
+for id in "${APPS_LIST[@]}"; do
+    case "${id}" in
+        1) name="mul_manual"; bin="${BUILD_DIR}/bin/mpi_mul_manual" ;;
+        2) name="matvec";     bin="${BUILD_DIR}/bin/mpi_matvec"     ;;
+        3) name="gradient";   bin="${BUILD_DIR}/bin/mpi_gradient"   ;;
+        *) continue ;;
+    esac
+    if [ ! -x "${bin}" ]; then
+        echo "WARN: missing binary ${bin}" >&2
+        continue
+    fi
+    for n in "${N_VALUES[@]}"; do
+        if [ "${id}" = "3" ]; then
+            for d in "${D_VALUES[@]}"; do
+                run_one "${name}" "${bin}" "${n}" "${d}"
+            done
+        else
+            run_one "${name}" "${bin}" "${n}" ""
+        fi
+    done
 done
 
 echo ""

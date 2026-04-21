@@ -2,6 +2,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <linux/userfaultfd.h>
 #include <poll.h>
 #include <stdint.h>
@@ -10,6 +11,7 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/personality.h>
 #include <sys/socket.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
@@ -17,6 +19,69 @@
 #include <unistd.h>
 
 #include "../../include/cape_dickpt_uffd.h"
+
+/*
+ * DICKPT requires the same virtual address for tracked regions on every node
+ * so that page-level checkpoint diffs (absolute VAs) can be injected into any
+ * rank's address space after allreduce. Three sources of VA divergence:
+ *
+ *   1. PIE loader relocation  → killed at link time with -no-pie -fno-pie
+ *      (applied by the makefile; globals then sit at linker-assigned VAs).
+ *   2. mmap_base randomization → killed by personality(ADDR_NO_RANDOMIZE).
+ *   3. Stack randomization     → same call disables it.
+ *
+ * The personality change only affects children of the current process, so we
+ * must set it and re-exec ourselves once, before main() runs and before any
+ * globals are consulted. A sentinel env var prevents an exec loop.
+ */
+#define DICKPT_ASLR_SENTINEL "DICKPT_NO_ASLR_ACTIVE"
+
+__attribute__((constructor(101)))
+static void dickpt_disable_aslr(void)
+{
+	if (getenv(DICKPT_ASLR_SENTINEL) != NULL)
+		return;
+
+	int p = personality(0xffffffff);
+	if (p < 0)
+		return;
+	if ((p & ADDR_NO_RANDOMIZE) == 0) {
+		if (personality((unsigned long)p | ADDR_NO_RANDOMIZE) < 0)
+			return;
+	}
+
+	if (setenv(DICKPT_ASLR_SENTINEL, "1", 1) != 0)
+		return;
+
+	char exe[PATH_MAX];
+	ssize_t r = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+	if (r <= 0)
+		return;
+	exe[r] = '\0';
+
+	/* Rebuild argv from /proc/self/cmdline (NUL-separated). */
+	static char cmdline[65536];
+	int fd = open("/proc/self/cmdline", O_RDONLY);
+	if (fd < 0)
+		return;
+	ssize_t n = read(fd, cmdline, sizeof(cmdline) - 1);
+	close(fd);
+	if (n <= 0)
+		return;
+	cmdline[n] = '\0';
+
+	static char *argv[1024];
+	int argc = 0;
+	for (ssize_t i = 0; i < n && argc < 1023; ) {
+		argv[argc++] = &cmdline[i];
+		i += (ssize_t)strlen(&cmdline[i]) + 1;
+	}
+	argv[argc] = NULL;
+
+	execv(exe, argv);
+	fprintf(stderr, "DICKPT: execv to disable ASLR failed: %s\n",
+		strerror(errno));
+}
 
 #ifndef UFFD_USER_MODE_ONLY
 #define UFFD_USER_MODE_ONLY 1

@@ -56,6 +56,12 @@ all: cape_mamult cape_reduction cape_nested_parallel_sections
 cape_mamult:
 	$(COMPILE) $(C_FOLDER)/apps/cape_mamult.c -o $(EXE_FOLDER)/cape_mamult $(LDFLAGS)
 
+cape_matvec:
+	$(COMPILE) $(C_FOLDER)/apps/cape_matvec.c -o $(EXE_FOLDER)/cape_matvec $(LDFLAGS)
+
+cape_gradient:
+	$(COMPILE) $(C_FOLDER)/apps/cape_gradient.c -o $(EXE_FOLDER)/cape_gradient $(LDFLAGS)
+
 cape_mamult2d:
 	$(COMPILE) $(C_FOLDER)/apps/cape_mamult2d.c -o $(EXE_FOLDER)/cape_mamult2d $(LDFLAGS)
 
@@ -101,7 +107,8 @@ cape_nested_parallel_sections:
 cape_test_heap:
 	$(COMPILE) $(C_FOLDER)/apps/cape_test_heap.c -o $(EXE_FOLDER)/cape_test_heap $(LDFLAGS)
 
-apps: cape_mamult cape_mamult2d cape_pi cape_prime cape_prime_number \
+apps: cape_mamult cape_mamult2d cape_matvec cape_gradient \
+      cape_pi cape_prime cape_prime_number \
       cape_reduction cape_for cape_for_nowait cape_parallel_for \
       cape_vector1 cape_vector2 cape_critical cape_critical2 \
       cape_sections_nowait cape_nested_parallel_sections cape_test_heap
@@ -118,7 +125,13 @@ apps: cape_mamult cape_mamult2d cape_pi cape_prime cape_prime_number \
 
 # Dickpt apps are plain binaries — no UCX, no cape.c library.
 # They only need the include dir for cape_dickpt.h / cape_signal.h.
-DICKPT_COMPILE = $(CC) -w -I./$(I_FOLDER)
+#
+# -no-pie / -fno-pie: build as non-PIE so the executable's text/data/bss
+# get linker-assigned fixed VAs. Combined with personality(ADDR_NO_RANDOMIZE)
+# in cape_dickpt_runtime.c, every rank sees identical VAs for globals —
+# required because DICKPT checkpoints carry absolute addresses that must be
+# injectable into any rank's address space.
+DICKPT_COMPILE = $(CC) -w -I./$(I_FOLDER) -no-pie -fno-pie
 DICKPT_RUNTIME = $(C_FOLDER)/apps/cape_dickpt_runtime.c
 
 # Monitor (needs UCX for inter-node communication)
@@ -129,8 +142,14 @@ dickpt_monitor:
 dickpt_mul_manual:
 	$(DICKPT_COMPILE) $(C_FOLDER)/apps/cape_mul_manual.c $(DICKPT_RUNTIME) -o $(EXE_FOLDER)/dickpt_mul_manual
 
+dickpt_matvec_manual:
+	$(DICKPT_COMPILE) $(C_FOLDER)/apps/cape_matvec_manual.c $(DICKPT_RUNTIME) -o $(EXE_FOLDER)/dickpt_matvec_manual
+
+dickpt_gradient_manual:
+	$(DICKPT_COMPILE) $(C_FOLDER)/apps/cape_gradient_manual.c $(DICKPT_RUNTIME) -o $(EXE_FOLDER)/dickpt_gradient_manual
+
 # Build monitor + all dickpt apps
-dickpt: dickpt_monitor dickpt_mul_manual
+dickpt: dickpt_monitor dickpt_mul_manual dickpt_matvec_manual dickpt_gradient_manual
 
 # ── Clean ─────────────────────────────────────────────────────────────────────
 cleanall:
@@ -138,7 +157,9 @@ cleanall:
 
 .PHONY: all apps cleanall \
         dickpt dickpt_monitor dickpt_mul_manual \
-        cape_mamult cape_mamult2d cape_pi cape_prime cape_prime_number \
+        dickpt_matvec_manual dickpt_gradient_manual \
+        cape_mamult cape_mamult2d cape_matvec cape_gradient \
+        cape_pi cape_prime cape_prime_number \
         cape_reduction cape_for cape_for_nowait cape_parallel_for \
         cape_vector1 cape_vector2 cape_critical cape_critical2 \
         cape_sections_nowait cape_nested_parallel_sections cape_test_heap
