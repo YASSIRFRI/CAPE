@@ -120,238 +120,11 @@ unsigned char *before_buffer;
 #define dprintf(fmt, args...) do { } while (0)
 #endif
 
-#ifdef CAPE_PROFILE
-typedef struct {
-	uint64_t monitor_start_ns;
-	uint64_t wait_for_child_ns;
-	uint64_t wait_blocking_ns;
-	uint64_t wait_tracked_ns;
-	uint64_t waitpid_ns;
-	uint64_t waitpid_calls;
-	uint64_t wait_loops;
-	uint64_t poll_ns;
-	uint64_t poll_calls;
-	uint64_t poll_timeouts;
-	uint64_t userfault_handle_ns;
-	uint64_t userfault_events;
-	uint64_t dirty_capture_ns;
-	uint64_t dirty_pages_captured;
-	uint64_t writeprotect_ns;
-	uint64_t writeprotect_calls;
-	uint64_t process_vm_read_ns;
-	uint64_t process_vm_read_calls;
-	uint64_t process_vm_read_bytes;
-	uint64_t process_vm_write_ns;
-	uint64_t process_vm_write_calls;
-	uint64_t process_vm_write_bytes;
-	uint64_t generate_ckpt_ns;
-	uint64_t generate_ckpt_calls;
-	uint64_t sigtrap_dispatch_ns;
-	uint64_t sigtrap_count;
-	uint64_t trap_lock_ns;
-	uint64_t trap_unlock_ns;
-	uint64_t trap_generate_ns;
-	uint64_t trap_send_ns;
-	uint64_t trap_receive_ns;
-	uint64_t trap_waitfor_ns;
-	uint64_t trap_broadcast_ns;
-	uint64_t trap_allreduce_ns;
-	uint64_t trap_other_ns;
-	uint64_t trap_lock_count;
-	uint64_t trap_unlock_count;
-	uint64_t trap_generate_count;
-	uint64_t trap_send_count;
-	uint64_t trap_receive_count;
-	uint64_t trap_waitfor_count;
-	uint64_t trap_broadcast_count;
-	uint64_t trap_allreduce_count;
-	uint64_t trap_other_count;
-	uint64_t ucx_wait_ns;
-	uint64_t ucx_progress_ns;
-	uint64_t ucx_progress_calls;
-	uint64_t ucx_send_ns;
-	uint64_t ucx_send_calls;
-	uint64_t ucx_send_bytes;
-	uint64_t ucx_recv_ns;
-	uint64_t ucx_recv_calls;
-	uint64_t ucx_recv_bytes;
-	uint64_t ucx_sendrecv_ns;
-	uint64_t ucx_sendrecv_calls;
-	uint64_t ucx_bootstrap_wait_ns;
-	uint64_t ucx_bootstrap_wait_iters;
-} cape_profile_t;
-
-static cape_profile_t cape_profile;
-
-static uint64_t cape_now_ns(void)
-{
-	struct timespec ts;
-
-	clock_gettime(CLOCK_MONOTONIC, &ts);
-	return ((uint64_t)ts.tv_sec * 1000000000ULL) + (uint64_t)ts.tv_nsec;
-}
-
-static double cape_ns_to_ms(uint64_t ns)
-{
-	return (double)ns / 1000000.0;
-}
-
-static double cape_pct(uint64_t part, uint64_t total)
-{
-	if (total == 0)
-		return 0.0;
-	return ((double)part * 100.0) / (double)total;
-}
-
-static void cape_profile_note_sigtrap(int trap_code, uint64_t elapsed_ns)
-{
-	switch (trap_code) {
-	case S_LOCK_PROCESS_MEMORY:
-		cape_profile.trap_lock_ns += elapsed_ns;
-		cape_profile.trap_lock_count++;
-		break;
-	case S_UNLOCK_PROCESS_MEMORY:
-		cape_profile.trap_unlock_ns += elapsed_ns;
-		cape_profile.trap_unlock_count++;
-		break;
-	case S_GENERATE_CHECKPOINT:
-	case S_GENERATE_TOTAL_CHECKPOINT:
-	case S_GENERATE_WORKSHARE_CHECKPOINT:
-		cape_profile.trap_generate_ns += elapsed_ns;
-		cape_profile.trap_generate_count++;
-		break;
-	case S_SEND_CHECKPOINT:
-		cape_profile.trap_send_ns += elapsed_ns;
-		cape_profile.trap_send_count++;
-		break;
-	case S_RECEIVE_CHECKPOINT:
-		cape_profile.trap_receive_ns += elapsed_ns;
-		cape_profile.trap_receive_count++;
-		break;
-	case S_WAIT_FOR_CHECKPOINT:
-		cape_profile.trap_waitfor_ns += elapsed_ns;
-		cape_profile.trap_waitfor_count++;
-		break;
-	case S_BROADCAST_CHECKPOINT:
-	case S_SCATTER_CHECKPOINT:
-		cape_profile.trap_broadcast_ns += elapsed_ns;
-		cape_profile.trap_broadcast_count++;
-		break;
-	case S_ALL_REDUCE:
-		cape_profile.trap_allreduce_ns += elapsed_ns;
-		cape_profile.trap_allreduce_count++;
-		break;
-	default:
-		cape_profile.trap_other_ns += elapsed_ns;
-		cape_profile.trap_other_count++;
-		break;
-	}
-}
-
-static void cape_profile_report(void)
-{
-	uint64_t total_ns;
-
-	if (cape_profile.monitor_start_ns == 0)
-		return;
-
-	total_ns = cape_now_ns() - cape_profile.monitor_start_ns;
-
-	fprintf(stderr,
-		"PROFILE rank=%lu total_ms=%.3f wait_ms=%.3f trap_ms=%.3f generate_ms=%.3f "
-		"ucx_wait_ms=%.3f userfault_ms=%.3f bootstrap_wait_ms=%.3f\n",
-		node,
-		cape_ns_to_ms(total_ns),
-		cape_ns_to_ms(cape_profile.wait_for_child_ns),
-		cape_ns_to_ms(cape_profile.sigtrap_dispatch_ns),
-		cape_ns_to_ms(cape_profile.generate_ckpt_ns),
-		cape_ns_to_ms(cape_profile.ucx_wait_ns),
-		cape_ns_to_ms(cape_profile.userfault_handle_ns),
-		cape_ns_to_ms(cape_profile.ucx_bootstrap_wait_ns));
-
-	fprintf(stderr,
-		"PROFILE_WAIT rank=%lu tracked_ms=%.3f blocking_ms=%.3f waitpid_ms=%.3f "
-		"poll_ms=%.3f poll_calls=%llu poll_timeouts=%llu loops=%llu\n",
-		node,
-		cape_ns_to_ms(cape_profile.wait_tracked_ns),
-		cape_ns_to_ms(cape_profile.wait_blocking_ns),
-		cape_ns_to_ms(cape_profile.waitpid_ns),
-		cape_ns_to_ms(cape_profile.poll_ns),
-		(unsigned long long)cape_profile.poll_calls,
-		(unsigned long long)cape_profile.poll_timeouts,
-		(unsigned long long)cape_profile.wait_loops);
-
-	fprintf(stderr,
-		"PROFILE_SIGTRAP rank=%lu total=%llu total_ms=%.3f generate_ms=%.3f send_ms=%.3f "
-		"receive_ms=%.3f waitfor_ms=%.3f broadcast_ms=%.3f allreduce_ms=%.3f other_ms=%.3f\n",
-		node,
-		(unsigned long long)cape_profile.sigtrap_count,
-		cape_ns_to_ms(cape_profile.sigtrap_dispatch_ns),
-		cape_ns_to_ms(cape_profile.trap_generate_ns),
-		cape_ns_to_ms(cape_profile.trap_send_ns),
-		cape_ns_to_ms(cape_profile.trap_receive_ns),
-		cape_ns_to_ms(cape_profile.trap_waitfor_ns),
-		cape_ns_to_ms(cape_profile.trap_broadcast_ns),
-		cape_ns_to_ms(cape_profile.trap_allreduce_ns),
-		cape_ns_to_ms(cape_profile.trap_other_ns));
-
-	fprintf(stderr,
-		"PROFILE_UCX rank=%lu send_ms=%.3f recv_ms=%.3f sendrecv_ms=%.3f wait_ms=%.3f "
-		"progress_ms=%.3f send_calls=%llu recv_calls=%llu sendrecv_calls=%llu "
-		"sent_bytes=%llu recv_bytes=%llu progress_calls=%llu\n",
-		node,
-		cape_ns_to_ms(cape_profile.ucx_send_ns),
-		cape_ns_to_ms(cape_profile.ucx_recv_ns),
-		cape_ns_to_ms(cape_profile.ucx_sendrecv_ns),
-		cape_ns_to_ms(cape_profile.ucx_wait_ns),
-		cape_ns_to_ms(cape_profile.ucx_progress_ns),
-		(unsigned long long)cape_profile.ucx_send_calls,
-		(unsigned long long)cape_profile.ucx_recv_calls,
-		(unsigned long long)cape_profile.ucx_sendrecv_calls,
-		(unsigned long long)cape_profile.ucx_send_bytes,
-		(unsigned long long)cape_profile.ucx_recv_bytes,
-		(unsigned long long)cape_profile.ucx_progress_calls);
-
-	fprintf(stderr,
-		"PROFILE_MEM rank=%lu uffd_events=%llu dirty_pages=%llu read_ms=%.3f write_ms=%.3f "
-		"read_bytes=%llu write_bytes=%llu writeprotect_ms=%.3f generate_calls=%llu\n",
-		node,
-		(unsigned long long)cape_profile.userfault_events,
-		(unsigned long long)cape_profile.dirty_pages_captured,
-		cape_ns_to_ms(cape_profile.process_vm_read_ns),
-		cape_ns_to_ms(cape_profile.process_vm_write_ns),
-		(unsigned long long)cape_profile.process_vm_read_bytes,
-		(unsigned long long)cape_profile.process_vm_write_bytes,
-		cape_ns_to_ms(cape_profile.writeprotect_ns),
-		(unsigned long long)cape_profile.generate_ckpt_calls);
-
-	fprintf(stderr,
-		"PROFILE_SHARE rank=%lu wait_pct=%.1f trap_pct=%.1f generate_pct=%.1f "
-		"ucx_wait_pct=%.1f userfault_pct=%.1f\n",
-		node,
-		cape_pct(cape_profile.wait_for_child_ns, total_ns),
-		cape_pct(cape_profile.sigtrap_dispatch_ns, total_ns),
-		cape_pct(cape_profile.generate_ckpt_ns, total_ns),
-		cape_pct(cape_profile.ucx_wait_ns, total_ns),
-		cape_pct(cape_profile.userfault_handle_ns, total_ns));
-}
-#define CAPE_PROFILE_NS_VAR(name) uint64_t name
-#define CAPE_PROFILE_NS_START(name) do { (name) = cape_now_ns(); } while (0)
-#define CAPE_PROFILE_SET(field, value) do { cape_profile.field = (value); } while (0)
-#define CAPE_PROFILE_INC(field) do { cape_profile.field++; } while (0)
-#define CAPE_PROFILE_ADD(field, value) do { cape_profile.field += (value); } while (0)
-#define CAPE_PROFILE_ADD_NS(field, start) \
-	do { cape_profile.field += cape_now_ns() - (start); } while (0)
-#else
-#define cape_profile_note_sigtrap(trap_code, elapsed_ns) do { } while (0)
-#define cape_profile_report() do { } while (0)
 #define CAPE_PROFILE_NS_VAR(name)
 #define CAPE_PROFILE_NS_START(name) do { } while (0)
-#define CAPE_PROFILE_SET(field, value) do { } while (0)
 #define CAPE_PROFILE_INC(field) do { } while (0)
 #define CAPE_PROFILE_ADD(field, value) do { } while (0)
 #define CAPE_PROFILE_ADD_NS(field, start) do { } while (0)
-#endif
 
 static FILE *open_binary_memstream(unsigned char **bufloc, size_t *sizeloc)
 {
@@ -1313,8 +1086,6 @@ int main(int argc, char * argv[]){
 		return 1;
 	}
 
-	CAPE_PROFILE_SET(monitor_start_ns, cape_now_ns());
-	
 	exec_file = argv[1];
 
 	cape_ucx_init();
@@ -1390,13 +1161,8 @@ int main(int argc, char * argv[]){
 		}
 		if(WIFSTOPPED(status) && WSTOPSIG(status) == SIGTRAP) {
 				int dx = 0;
-				CAPE_PROFILE_NS_VAR(trap_start_ns);
-#ifdef CAPE_PROFILE
-				uint64_t trap_elapsed_ns;
-#endif
 				ptrace(PTRACE_GETREGS, child_id, NULL, &regs);
 				dx = regs.rdx;
-				CAPE_PROFILE_NS_START(trap_start_ns);
 				CAPE_PROFILE_INC(sigtrap_count);
 				switch(dx){
 					case S_LOCK_PROCESS_MEMORY:  //Lock process 		
@@ -1520,11 +1286,6 @@ int main(int argc, char * argv[]){
 						dprintf("\nMonitor %ld: get breakpoint with unkown edx = %d", node, dx);
 						exit(1);
 				}
-#ifdef CAPE_PROFILE
-				trap_elapsed_ns = cape_now_ns() - trap_start_ns;
-				cape_profile.sigtrap_dispatch_ns += trap_elapsed_ns;
-				cape_profile_note_sigtrap(dx, trap_elapsed_ns);
-#endif
 			}//SIGTRAP
 		 else if(WIFSTOPPED(status)) {
 			int sig = WSTOPSIG(status);
@@ -1544,7 +1305,6 @@ int main(int argc, char * argv[]){
 	if (control_fd >= 0)
 		close(control_fd);
 	free(tracked_ranges);
-	cape_profile_report();
 	cape_ucx_finalize();
 	return 0;
 }
