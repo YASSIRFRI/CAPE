@@ -39,7 +39,7 @@ endif
 
 # ── Compiler & flags ─────────────────────────────────────────────────────────
 CC      ?= cc
-CFLAGS   = -I./$(I_FOLDER) -I$(UCX_SRC) -I$(UCX_GEN) $(PMIX_FLAGS) $(PROF_FLAGS) $(COMP_FLAGS)
+CFLAGS   = -O2 -I./$(I_FOLDER) -I$(UCX_SRC) -I$(UCX_GEN) $(PMIX_FLAGS) $(PROF_FLAGS) $(COMP_FLAGS)
 LDFLAGS  = -L$(UCX_LIB) -lucp -lucs $(PMIX_LINK) $(COMP_LINK) -Wl,-rpath,$(UCX_LIB)
 
 # ══════════════════════════════════════════════════════════════════════════════
