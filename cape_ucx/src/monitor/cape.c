@@ -58,6 +58,30 @@ static unsigned long prof_sendrecv_count      = 0;
 static unsigned long prof_bytes_sent          = 0;
 static unsigned long prof_bytes_received      = 0;
 
+/* ---- Wider region profiling ------------------------------------------ */
+static double prof_cape_begin_ns      = 0.0;
+static double prof_cape_end_ns        = 0.0;   /* full cape_end wall time */
+static double prof_ckpt_stop_ns       = 0.0;
+static double prof_release_ckpt_ns    = 0.0;
+static double prof_sync_ckpt_ns       = 0.0;   /* allreduce + inject wall */
+static double prof_compute_ns         = 0.0;   /* between ckpt_start and cape_end */
+static double prof_declare_var_ns     = 0.0;
+static double prof_enter_exit_func_ns = 0.0;
+
+static unsigned long prof_cape_begin_count   = 0;
+static unsigned long prof_cape_end_count     = 0;
+static unsigned long prof_ckpt_stop_count    = 0;
+static unsigned long prof_release_count      = 0;
+static unsigned long prof_sync_count         = 0;
+static unsigned long prof_compute_count      = 0;
+static unsigned long prof_declare_var_count  = 0;
+static unsigned long prof_enter_exit_count   = 0;
+
+/* Mark when parallel compute starts (ckpt_start returns or cape_begin
+ * finishes) so cape_end can attribute elapsed time to the user's compute. */
+static double prof_compute_start_ns   = 0.0;
+static int    prof_compute_started    = 0;
+
 #define CAPE_PROFILE_MAX_STEPS    128
 #define CAPE_PROFILE_MAX_ARRIVALS 64
 
@@ -2131,13 +2155,16 @@ int inject_checkpoint(char *data_ckpt, size_t file_size){
 }
 
 void release_checkpoint(){
+	PROF_START(_t_rel);
 	if (after_ckpt_stream != NULL){
 		fclose(after_ckpt_stream);
 		after_ckpt_stream = NULL;
 	}
-	free(after_ckpt);	
+	free(after_ckpt);
 	after_ckpt = NULL;
 	after_ckpt_size = 0;
+	PROF_ACC(prof_release_ckpt_ns, _t_rel);
+	PROF_INC(prof_release_count);
 }
 
 
@@ -2358,8 +2385,12 @@ int cape_declare_variable(void *addr,
 						  unsigned char dtype,
 						  unsigned int n_elements,
 						  unsigned char ispointer){
-
-	if (__is_inside_parallel_region__) return 0;
+	PROF_START(_t_decl);
+	if (__is_inside_parallel_region__) {
+		PROF_ACC(prof_declare_var_ns, _t_decl);
+		PROF_INC(prof_declare_var_count);
+		return 0;
+	}
 
 	Var v;
 	v.addr = (unsigned long)(uintptr_t)addr;
@@ -2395,7 +2426,9 @@ int cape_declare_variable(void *addr,
 	}
 	v.size = size;
 	int val;
-	val = add_active_variable(&__active_variable_head, &__active_variable_tail, v);	
+	val = add_active_variable(&__active_variable_head, &__active_variable_tail, v);
+	PROF_ACC(prof_declare_var_ns, _t_decl);
+	PROF_INC(prof_declare_var_count);
 	return val;
 }
 
@@ -2706,7 +2739,16 @@ void cape_finalize(){
 	    "  UCX recv wait (network lat)   : %10.3f ms  (x%lu sendrecvs)\n"
 	    "  UCX send wait (send compl)    : %10.3f ms\n"
 	    "  allreduce arrival (realtime)  : first=%13.3f ms  last=%13.3f ms  span=%10.3f ms  (x%lu)\n"
-	    "  Data transferred: sent=%lu B  recv=%lu B\n",
+	    "  Data transferred: sent=%lu B  recv=%lu B\n"
+	    "  -- wider regions --\n"
+	    "  cape_begin   (wall)            : %10.3f ms  (x%lu)\n"
+	    "  cape_end     (wall, full)      : %10.3f ms  (x%lu)\n"
+	    "  ckpt_stop    (wall)            : %10.3f ms  (x%lu)\n"
+	    "  release_ckpt (wall)            : %10.3f ms  (x%lu)\n"
+	    "  cape_sync_ckpt (allreduce+inj) : %10.3f ms  (x%lu)\n"
+	    "  USER COMPUTE between ckpts     : %10.3f ms  (x%lu)\n"
+	    "  declare_variable (total)        : %10.3f ms  (x%lu)\n"
+	    "  __enter_func+__exit_func       : %10.3f ms  (x%lu)\n",
 	    __node__,
 	    prof_ckpt_start_ns    / 1e6, prof_ckpt_start_count,
 	    prof_generate_ckpt_ns / 1e6, prof_generate_ckpt_count,
@@ -2721,7 +2763,15 @@ void cape_finalize(){
 	    prof_allreduce_arrival_first_rt_ns / 1e6,
 	    prof_allreduce_arrival_last_rt_ns / 1e6,
 	    arrival_span_ms, prof_allreduce_arrival_count,
-	    prof_bytes_sent, prof_bytes_received);
+	    prof_bytes_sent, prof_bytes_received,
+	    prof_cape_begin_ns    / 1e6, prof_cape_begin_count,
+	    prof_cape_end_ns      / 1e6, prof_cape_end_count,
+	    prof_ckpt_stop_ns     / 1e6, prof_ckpt_stop_count,
+	    prof_release_ckpt_ns  / 1e6, prof_release_count,
+	    prof_sync_ckpt_ns     / 1e6, prof_sync_count,
+	    prof_compute_ns       / 1e6, prof_compute_count,
+	    prof_declare_var_ns   / 1e6, prof_declare_var_count,
+	    prof_enter_exit_func_ns / 1e6, prof_enter_exit_count);
 
 	if (shown_arrivals > 0) {
 		fprintf(stderr, "  allreduce arrivals by epoch (realtime ms):\n");
@@ -2806,6 +2856,7 @@ void cape_finalize(){
  * ---------------------------------------------------------------------
  */
 void cape_begin(unsigned char name_directive, long first, long second){
+	PROF_START(_t_begin);
 	switch(name_directive){
 		case PARALLEL:
 			open_parallel_window();
@@ -2838,11 +2889,19 @@ void cape_begin(unsigned char name_directive, long first, long second){
 			break;
 		default:
 			break;
-	}	
+	}
+	PROF_ACC(prof_cape_begin_ns, _t_begin);
+	PROF_INC(prof_cape_begin_count);
+#ifdef CAPE_PROFILE
+	/* mark start of user compute window */
+	prof_compute_start_ns = cape_get_ns();
+	prof_compute_started = 1;
+#endif
 }
 
 static int cape_sync_checkpoint()
 {
+	PROF_START(_t_sync);
 	if (require_allreduce(EXIT_CHECKPOINT) < 0) {
 		fprintf(stderr, "CAPE: allreduce checkpoint merge failed on node %d\n", __node__);
 		return -1;
@@ -2851,6 +2910,8 @@ static int cape_sync_checkpoint()
 		fprintf(stderr, "CAPE: checkpoint injection failed on node %d\n", __node__);
 		return -1;
 	}
+	PROF_ACC(prof_sync_ckpt_ns, _t_sync);
+	PROF_INC(prof_sync_count);
 	return 0;
 }
 /*
@@ -2858,7 +2919,15 @@ static int cape_sync_checkpoint()
  * Release variables environments of a block
  * ---------------------------------------------------------------------
 */
-void cape_end(unsigned char name_directive, unsigned char ops_flag){	
+void cape_end(unsigned char name_directive, unsigned char ops_flag){
+	PROF_START(_t_end);
+#ifdef CAPE_PROFILE
+	if (prof_compute_started) {
+		prof_compute_ns += _t_end - prof_compute_start_ns;
+		prof_compute_count++;
+		prof_compute_started = 0;
+	}
+#endif
 	switch(name_directive){
 		case FOR:
 			__time_stamp__ = __right__;			
@@ -2915,11 +2984,13 @@ void cape_end(unsigned char name_directive, unsigned char ops_flag){
 			break;
 		default:
 			break;
-	}		
+	}
+	PROF_ACC(prof_cape_end_ns, _t_end);
+	PROF_INC(prof_cape_end_count);
 }
 /*
  * --------------------------------------------------------------------
- * Copy data into ckpt_data in FILE in memory 
+ * Copy data into ckpt_data in FILE in memory
  * Structure of data {(addr, data), ....}
  * ---------------------------------------------------------------------
  */
@@ -2931,6 +3002,10 @@ int ckpt_start(){
 	if(__var_list_head == NULL) {
 		PROF_ACC(prof_ckpt_start_ns, _t_ckpt_start);
 		PROF_INC(prof_ckpt_start_count);
+#ifdef CAPE_PROFILE
+		prof_compute_start_ns = cape_get_ns();
+		prof_compute_started = 1;
+#endif
 		return 0;
 	}
 		
@@ -2958,6 +3033,11 @@ int ckpt_start(){
 	//printf("Size of CKPT_DATA_FILE: %ld", ckpt_data_size);
 	PROF_ACC(prof_ckpt_start_ns, _t_ckpt_start);
 	PROF_INC(prof_ckpt_start_count);
+#ifdef CAPE_PROFILE
+	/* subsequent compute window (FOR loop repeat) begins now */
+	prof_compute_start_ns = cape_get_ns();
+	prof_compute_started = 1;
+#endif
 }
 /*
  * --------------------------------------------------------------------
@@ -3009,11 +3089,14 @@ int ckpt_start_2(){
  * ---------------------------------------------------------------------
  */
 void ckpt_stop(){
+	PROF_START(_t_stop);
 	if (ckpt_data_size > 0){
 		fclose(ckpt_data_stream);
 		free(ckpt_data);
-		ckpt_data_size = 0;	
+		ckpt_data_size = 0;
 	}
+	PROF_ACC(prof_ckpt_stop_ns, _t_stop);
+	PROF_INC(prof_ckpt_stop_count);
 }
 
 void ckpt_stop_2(){
@@ -3063,7 +3146,10 @@ void CAPE_DEBUG()
  * --------------------------------------------------------------------
  */
 void __enter_func(){
+	PROF_START(_t_ef);
 	__activate_func_level__ ++;
+	PROF_ACC(prof_enter_exit_func_ns, _t_ef);
+	PROF_INC(prof_enter_exit_count);
 }
 /*
  * -------------------------------------------------------------------
@@ -3072,10 +3158,13 @@ void __enter_func(){
  * --------------------------------------------------------------------
  */
 void __exit_func(){
+	PROF_START(_t_xf);
 	remove_active_variables(&__active_variable_head,
 							&__active_variable_tail,
-							__activate_func_level__);	
+							__activate_func_level__);
 	__activate_func_level__ --;
+	PROF_ACC(prof_enter_exit_func_ns, _t_xf);
+	PROF_INC(prof_enter_exit_count);
 }
 
 void require_generate_checkpoint(char ops_flag){
