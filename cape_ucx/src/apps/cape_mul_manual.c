@@ -5,7 +5,7 @@
 #include "../../include/cape_dickpt.h"
 
 #define DEFAULT_N 1024
-#define MAX_N 3200
+#define MAX_N 6400
 
 /* Only the result matrix c needs to be in the tracked region for checkpointing.
  * a and b are read-only during computation — keep them as globals to avoid
