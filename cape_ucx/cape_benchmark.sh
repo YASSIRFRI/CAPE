@@ -73,27 +73,26 @@ echo "Benchmarking CAPE (timestamped)"
 echo "Nodes: ${NODES_LIST[*]}  Reps/cell: ${REPS}"
 echo "Results dir: ${RESULTS_DIR}"
 
-# args: app_name bin n d_or_empty nnodes rep
+TOTAL_NODES="${SLURM_JOB_NUM_NODES:-16}"
+
 run_one() {
     local app="$1" bin="$2" n="$3" d="$4" nn="$5" rep="$6"
     local tag="cape_${app}_n${n}${d:+_d${d}}_nodes${nn}_rep${rep}"
     local log="${RESULTS_DIR}/${tag}.log"
     : > "${log}"
-    echo "=== ${tag} ==="
-    set +e
+    echo "[launch] ${tag}"
+    local rc=0
     if [ -n "${d}" ]; then
         UCX_RNDV_THRESH="${UCX_RNDV_THRESH:-65536}" \
-        srun --mpi=pmix --nodes="${nn}" --ntasks="${nn}" --ntasks-per-node=1 \
-             "${bin}" "${n}" "${d}" 1 2>&1 | tee -a "${log}"
+        srun --exclusive --mpi=pmix --nodes="${nn}" --ntasks="${nn}" --ntasks-per-node=1 \
+             "${bin}" "${n}" "${d}" 1 >>"${log}" 2>&1 || rc=$?
     else
         UCX_RNDV_THRESH="${UCX_RNDV_THRESH:-65536}" \
-        srun --mpi=pmix --nodes="${nn}" --ntasks="${nn}" --ntasks-per-node=1 \
-             "${bin}" "${n}" 1 2>&1 | tee -a "${log}"
+        srun --exclusive --mpi=pmix --nodes="${nn}" --ntasks="${nn}" --ntasks-per-node=1 \
+             "${bin}" "${n}" 1 >>"${log}" 2>&1 || rc=$?
     fi
-    local rc=${PIPESTATUS[0]}
-    set -e
     if [ "${rc}" -ne 0 ]; then
-        echo "WARN: ${tag} failed rc=${rc}" >&2
+        echo "[fail] ${tag} rc=${rc}" >&2
         return
     fi
     awk -v impl="cape" -v app="${app}" -v nn="${nn}" -v rep="${rep}" \
@@ -103,15 +102,38 @@ run_one() {
             for (i=1;i<=NF;i++) { split($i,kv,"="); if(kv[1]=="n")n=kv[2]; if(kv[1]=="d")dd=kv[2]; if(kv[1]=="ms")ms=kv[2]; }
             if (n!="" && ms!="") printf "%s,%s,%s,%s,%s,%s,%s,%s\n", impl,app,n,dd,nn,rep,ms,job;
         }' "${log}" >> "${CSV}"
+    echo "[done]   ${tag}"
+}
+
+# Run a flat list of "app|bin|n|d|rep" jobs at node-count nn with bounded concurrency.
+run_batch() {
+    local nn="$1"; shift
+    local slots=$(( TOTAL_NODES / nn ))
+    [ "${slots}" -lt 1 ] && slots=1
+    echo ""
+    echo "### Phase nodes=${nn}  parallel=${slots}  jobs=$#"
+    local active=0
+    for j in "$@"; do
+        IFS='|' read -r _app _bin _n _d _rep <<< "${j}"
+        run_one "${_app}" "${_bin}" "${_n}" "${_d}" "${nn}" "${_rep}" &
+        active=$(( active + 1 ))
+        if [ "${active}" -ge "${slots}" ]; then
+            wait -n
+            active=$(( active - 1 ))
+        fi
+    done
+    wait
 }
 
 for nn in "${NODES_LIST[@]}"; do
-    for n in "${N_MAMULT[@]}";  do for r in $(seq 1 ${REPS}); do run_one mamult   "${BUILD_DIR}/bin/cape_mamult"   "${n}" ""  "${nn}" "${r}"; done; done
-    for n in "${N_MATVEC[@]}";  do for r in $(seq 1 ${REPS}); do run_one matvec   "${BUILD_DIR}/bin/cape_matvec"   "${n}" ""  "${nn}" "${r}"; done; done
+    JOBS=()
+    for n in "${N_MAMULT[@]}"; do for r in $(seq 1 ${REPS}); do JOBS+=("mamult|${BUILD_DIR}/bin/cape_mamult|${n}||${r}"); done; done
+    for n in "${N_MATVEC[@]}"; do for r in $(seq 1 ${REPS}); do JOBS+=("matvec|${BUILD_DIR}/bin/cape_matvec|${n}||${r}"); done; done
     for pair in "${GRADIENT_PAIRS[@]}"; do
         n="${pair%:*}"; d="${pair#*:}"
-        for r in $(seq 1 ${REPS}); do run_one gradient "${BUILD_DIR}/bin/cape_gradient" "${n}" "${d}" "${nn}" "${r}"; done
+        for r in $(seq 1 ${REPS}); do JOBS+=("gradient|${BUILD_DIR}/bin/cape_gradient|${n}|${d}|${r}"); done
     done
+    run_batch "${nn}" "${JOBS[@]}"
 done
 
 echo ""

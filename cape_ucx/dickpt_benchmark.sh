@@ -77,6 +77,8 @@ echo "Benchmarking DICKPT"
 echo "Nodes: ${NODES_LIST[*]}  Reps/cell: ${REPS}  MPI mode: ${SRUN_MPI_MODE}"
 echo "Results dir: ${RESULTS_DIR}"
 
+TOTAL_NODES="${SLURM_JOB_NUM_NODES:-16}"
+
 run_one() {
     local app="$1" bin="$2" n="$3" d="$4" nn="$5" rep="$6"
     local tag="dickpt_${app}_n${n}${d:+_d${d}}_nodes${nn}_rep${rep}"
@@ -85,22 +87,20 @@ run_one() {
     local bid="${JOB_TAG}_${tag}"
     local bdir="${BOOTSTRAP_ROOT}/${bid}"
     rm -rf "${bdir}"; mkdir -p "${bdir}"
-    echo "=== ${tag} ==="
-    set +e
+    echo "[launch] ${tag}"
+    local rc=0
     if [ -n "${d}" ]; then
         CAPE_UCX_BOOTSTRAP_ID="${bid}" CAPE_UCX_BOOTSTRAP_DIR="${bdir}" \
-        srun --mpi="${SRUN_MPI_MODE}" --nodes="${nn}" --ntasks="${nn}" --ntasks-per-node=1 \
-             "${MONITOR}" "${bin}" "${n}" "${d}" 1 2>&1 | tee -a "${log}"
+        srun --exclusive --mpi="${SRUN_MPI_MODE}" --nodes="${nn}" --ntasks="${nn}" --ntasks-per-node=1 \
+             "${MONITOR}" "${bin}" "${n}" "${d}" 1 >>"${log}" 2>&1 || rc=$?
     else
         CAPE_UCX_BOOTSTRAP_ID="${bid}" CAPE_UCX_BOOTSTRAP_DIR="${bdir}" \
-        srun --mpi="${SRUN_MPI_MODE}" --nodes="${nn}" --ntasks="${nn}" --ntasks-per-node=1 \
-             "${MONITOR}" "${bin}" "${n}" 1 2>&1 | tee -a "${log}"
+        srun --exclusive --mpi="${SRUN_MPI_MODE}" --nodes="${nn}" --ntasks="${nn}" --ntasks-per-node=1 \
+             "${MONITOR}" "${bin}" "${n}" 1 >>"${log}" 2>&1 || rc=$?
     fi
-    local rc=${PIPESTATUS[0]}
-    set -e
     rm -rf "${bdir}"
     if [ "${rc}" -ne 0 ]; then
-        echo "WARN: ${tag} failed rc=${rc}" >&2; return
+        echo "[fail] ${tag} rc=${rc}" >&2; return
     fi
     awk -v impl="dickpt" -v app="${app}" -v nn="${nn}" -v rep="${rep}" \
         -v job="${SLURM_JOB_ID:-local}" '
@@ -109,15 +109,37 @@ run_one() {
             for (i=1;i<=NF;i++) { split($i,kv,"="); if(kv[1]=="n")n=kv[2]; if(kv[1]=="d")dd=kv[2]; if(kv[1]=="ms")ms=kv[2]; }
             if (n!="" && ms!="") printf "%s,%s,%s,%s,%s,%s,%s,%s\n", impl,app,n,dd,nn,rep,ms,job;
         }' "${log}" >> "${CSV}"
+    echo "[done]   ${tag}"
+}
+
+run_batch() {
+    local nn="$1"; shift
+    local slots=$(( TOTAL_NODES / nn ))
+    [ "${slots}" -lt 1 ] && slots=1
+    echo ""
+    echo "### Phase nodes=${nn}  parallel=${slots}  jobs=$#"
+    local active=0
+    for j in "$@"; do
+        IFS='|' read -r _app _bin _n _d _rep <<< "${j}"
+        run_one "${_app}" "${_bin}" "${_n}" "${_d}" "${nn}" "${_rep}" &
+        active=$(( active + 1 ))
+        if [ "${active}" -ge "${slots}" ]; then
+            wait -n
+            active=$(( active - 1 ))
+        fi
+    done
+    wait
 }
 
 for nn in "${NODES_LIST[@]}"; do
-    for n in "${N_MAMULT[@]}";  do for r in $(seq 1 ${REPS}); do run_one mul_manual "${BUILD_DIR}/bin/dickpt_mul_manual"      "${n}" ""  "${nn}" "${r}"; done; done
-    for n in "${N_MATVEC[@]}";  do for r in $(seq 1 ${REPS}); do run_one matvec     "${BUILD_DIR}/bin/dickpt_matvec_manual"   "${n}" ""  "${nn}" "${r}"; done; done
+    JOBS=()
+    for n in "${N_MAMULT[@]}"; do for r in $(seq 1 ${REPS}); do JOBS+=("mul_manual|${BUILD_DIR}/bin/dickpt_mul_manual|${n}||${r}"); done; done
+    for n in "${N_MATVEC[@]}"; do for r in $(seq 1 ${REPS}); do JOBS+=("matvec|${BUILD_DIR}/bin/dickpt_matvec_manual|${n}||${r}"); done; done
     for pair in "${GRADIENT_PAIRS[@]}"; do
         n="${pair%:*}"; d="${pair#*:}"
-        for r in $(seq 1 ${REPS}); do run_one gradient "${BUILD_DIR}/bin/dickpt_gradient_manual" "${n}" "${d}" "${nn}" "${r}"; done
+        for r in $(seq 1 ${REPS}); do JOBS+=("gradient|${BUILD_DIR}/bin/dickpt_gradient_manual|${n}|${d}|${r}"); done
     done
+    run_batch "${nn}" "${JOBS[@]}"
 done
 
 echo ""
