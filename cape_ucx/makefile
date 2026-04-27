@@ -123,11 +123,23 @@ apps: cape_mamult cape_mamult2d cape_matvec cape_gradient \
 # in cape_dickpt_runtime.c, every rank sees identical VAs for globals —
 # required because DICKPT checkpoints carry absolute addresses that must be
 # injectable into any rank's address space.
-# Workaround for binutils that can't decompress zstd-compressed .debug_info
-# sections in the system libgcc.a (kills the link at -O2 once helpers like
-# __muldi3 are pulled in). --strip-debug makes ld drop debug sections
-# instead of trying to decompress them.
-DICKPT_COMPILE = $(CC) -w -O2 -mno-red-zone -I./$(I_FOLDER) -no-pie -fno-pie -Wl,--strip-debug
+# Workaround for /usr/bin/ld being too old to decompress zstd-compressed
+# .debug_info in libgcc.a (kills the link at -O2 once helpers like __muldi3
+# are pulled in). We discover a newer binutils via the module system at
+# make-time and point gcc at its `ld` with -B<dir>/.
+DICKPT_BINUTILS_BIN := $(shell bash -c '\
+    for f in /etc/profile.d/lmod.sh /etc/profile.d/z00_lmod.sh /etc/profile.d/modules.sh /usr/share/lmod/lmod/init/bash; do \
+        [ -r $$f ] && . $$f; \
+    done; \
+    module load binutils/2.42-GCCcore-14.2.0 >/dev/null 2>&1 && echo $$EBROOTBINUTILS/bin')
+ifeq ($(DICKPT_BINUTILS_BIN),)
+$(warning [dickpt] could not auto-load binutils/2.42-GCCcore-14.2.0; link may fail with /usr/bin/ld decompress error)
+DICKPT_LD_PREFIX :=
+else
+$(info [dickpt] using ld from $(DICKPT_BINUTILS_BIN))
+DICKPT_LD_PREFIX := -B$(DICKPT_BINUTILS_BIN)/
+endif
+DICKPT_COMPILE = $(CC) -w -O2 -mno-red-zone -I./$(I_FOLDER) -no-pie -fno-pie $(DICKPT_LD_PREFIX)
 DICKPT_RUNTIME = $(C_FOLDER)/apps/cape_dickpt_runtime.c
 
 # Monitor (needs UCX for inter-node communication)
@@ -136,12 +148,15 @@ dickpt_monitor:
 
 # Dickpt application targets
 dickpt_mul_manual:
+	@mkdir -p $(EXE_FOLDER)
 	$(DICKPT_COMPILE) $(C_FOLDER)/apps/cape_mul_manual.c $(DICKPT_RUNTIME) -o $(EXE_FOLDER)/dickpt_mul_manual
 
 dickpt_matvec_manual:
+	@mkdir -p $(EXE_FOLDER)
 	$(DICKPT_COMPILE) $(C_FOLDER)/apps/cape_matvec_manual.c $(DICKPT_RUNTIME) -o $(EXE_FOLDER)/dickpt_matvec_manual
 
 dickpt_gradient_manual:
+	@mkdir -p $(EXE_FOLDER)
 	$(DICKPT_COMPILE) $(C_FOLDER)/apps/cape_gradient_manual.c $(DICKPT_RUNTIME) -o $(EXE_FOLDER)/dickpt_gradient_manual
 
 # Build monitor + all dickpt apps
