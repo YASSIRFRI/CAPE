@@ -1196,13 +1196,11 @@ int main(int argc, char * argv[]){
 
 	exec_file = argv[1];
 
-	cape_ucx_init();
-
 	if (socketpair(AF_UNIX, SOCK_SEQPACKET, 0, control_pair) == -1) {
 		perror("socketpair");
 		return 1;
 	}
-	
+
 
 	//fork a process to run CAPE program
 	switch ( child_id = fork ( ) ) {
@@ -1229,6 +1227,13 @@ int main(int argc, char * argv[]){
 		default :	/* Parent */
 			control_fd = control_pair[0];
 			close(control_pair[1]);
+			/* Initialise UCX in the parent AFTER the fork. Doing it before
+			 * the fork left UCX's memory-registration cache pointing at
+			 * pre-fork physical pages that get broken by COW the first
+			 * time we write to a checkpoint buffer, forcing UCX onto a
+			 * slow per-send memcpy fallback (~20× slowdown vs cape.c).
+			 * Only the parent talks UCX; the child execs the app. */
+			cape_ucx_init();
 			break;
 	}
 	
