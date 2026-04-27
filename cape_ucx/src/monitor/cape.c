@@ -2503,21 +2503,31 @@ static void ucx_exchange_addresses_via_fs(const char *dir, const char *jobid,
 	char path[512];
 	FILE *f;
 
-	/* Write own address */
+	const size_t expected_size = sizeof(size_t) + local_addr_len;
+
+	/* Write own address (fsync before signaling ready, otherwise peers on a
+	 * network FS may see the rdy flag before our addr bytes are visible and
+	 * read garbage as the peer length/contents). */
 	snprintf(path, sizeof(path), "%s/cape_ucx_%s_addr_%d", dir, jobid, __node__);
 	f = fopen(path, "wb");
 	if (!f) { perror("CAPE UCX: write addr file"); exit(1); }
-	fwrite(&local_addr_len, sizeof(size_t), 1, f);
-	fwrite(local_addr, local_addr_len, 1, f);
+	if (fwrite(&local_addr_len, sizeof(size_t), 1, f) != 1 ||
+	    fwrite(local_addr, local_addr_len, 1, f) != 1) {
+		perror("CAPE UCX: short write on addr file"); exit(1);
+	}
+	fflush(f);
+	fsync(fileno(f));
 	fclose(f);
 
-	/* Signal ready */
+	/* Signal ready (only after the addr bytes are durable). */
 	snprintf(path, sizeof(path), "%s/cape_ucx_%s_rdy_%d", dir, jobid, __node__);
 	f = fopen(path, "w");
 	if (!f) { perror("CAPE UCX: write rdy file"); exit(1); }
+	fflush(f);
+	fsync(fileno(f));
 	fclose(f);
 
-	/* Wait for all peers */
+	/* Wait for all peers' rdy flags */
 	for (int i = 0; i < __nnodes__; i++) {
 		snprintf(path, sizeof(path), "%s/cape_ucx_%s_rdy_%d", dir, jobid, i);
 		while (access(path, F_OK) != 0)
@@ -2529,12 +2539,52 @@ static void ucx_exchange_addresses_via_fs(const char *dir, const char *jobid,
 	ucp_endpoints = malloc(__nnodes__ * sizeof(ucp_ep_h));
 	for (int i = 0; i < __nnodes__; i++) {
 		snprintf(path, sizeof(path), "%s/cape_ucx_%s_addr_%d", dir, jobid, i);
+
+		/* On a network FS the addr file may exist but not yet contain all
+		 * bytes from the peer when we observe the rdy flag. Wait until at
+		 * least sizeof(size_t) is visible, then trust the embedded length
+		 * and wait for the rest. */
+		struct stat stbuf;
+		while (stat(path, &stbuf) != 0 || (size_t)stbuf.st_size < sizeof(size_t))
+			usleep(10000);
+
 		f = fopen(path, "rb");
 		if (!f) { perror("CAPE UCX: read peer addr file"); exit(1); }
-		size_t peer_len;
-		fread(&peer_len, sizeof(size_t), 1, f);
+		size_t peer_len = 0;
+		if (fread(&peer_len, sizeof(size_t), 1, f) != 1) {
+			fprintf(stderr, "CAPE UCX: short read of peer %d length\n", i);
+			exit(1);
+		}
+		if (peer_len == 0 || peer_len > (1u << 20)) {
+			fprintf(stderr, "CAPE UCX: implausible peer %d addr length %zu\n",
+			        i, peer_len);
+			exit(1);
+		}
+		fclose(f);
+
+		const size_t want = sizeof(size_t) + peer_len;
+		while (stat(path, &stbuf) != 0 || (size_t)stbuf.st_size < want)
+			usleep(10000);
+
+		f = fopen(path, "rb");
+		if (!f) { perror("CAPE UCX: reopen peer addr file"); exit(1); }
+		size_t verify_len = 0;
+		if (fread(&verify_len, sizeof(size_t), 1, f) != 1 || verify_len != peer_len) {
+			fprintf(stderr, "CAPE UCX: peer %d length changed (%zu -> %zu)\n",
+			        i, peer_len, verify_len);
+			exit(1);
+		}
 		ucp_address_t *peer_addr = malloc(peer_len);
-		fread(peer_addr, peer_len, 1, f);
+		size_t got = 0;
+		while (got < peer_len) {
+			size_t n = fread((char *)peer_addr + got, 1, peer_len - got, f);
+			if (n == 0) {
+				if (feof(f)) usleep(10000);
+				else { perror("CAPE UCX: read peer addr"); exit(1); }
+				clearerr(f);
+			}
+			got += n;
+		}
 		fclose(f);
 
 		ucp_ep_params_t ep_params;
@@ -2544,8 +2594,8 @@ static void ucx_exchange_addresses_via_fs(const char *dir, const char *jobid,
 		st = ucp_ep_create(ucp_worker, &ep_params, &ucp_endpoints[i]);
 		free(peer_addr);
 		if (st != UCS_OK) {
-			fprintf(stderr, "CAPE UCX: ucp_ep_create(%d) failed: %s\n",
-			        i, ucs_status_string(st));
+			fprintf(stderr, "CAPE UCX: ucp_ep_create(%d) failed: %s peer_len=%zu local_len=%zu\n",
+			        i, ucs_status_string(st), peer_len, local_addr_len);
 			exit(1);
 		}
 	}
