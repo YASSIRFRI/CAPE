@@ -187,33 +187,8 @@ static void cape_register_userfault_ranges(int uffd)
 		reg.range.start = cape_ranges[i].start;
 		reg.range.len = cape_ranges[i].len;
 		reg.mode = UFFDIO_REGISTER_MODE_WP;
-		if (ioctl(uffd, UFFDIO_REGISTER, &reg) == -1) {
-			fprintf(stderr,
-			        "dickpt: UFFDIO_REGISTER failed for range #%zu "
-			        "[0x%llx, 0x%llx) len=%llu errno=%d (%s)\n",
-			        i,
-			        (unsigned long long)reg.range.start,
-			        (unsigned long long)(reg.range.start + reg.range.len),
-			        (unsigned long long)reg.range.len,
-			        errno, strerror(errno));
-			/* Dump the relevant /proc/self/maps lines so we can see
-			 * what VMA the range falls in (or crosses). */
-			FILE *m = fopen("/proc/self/maps", "r");
-			if (m) {
-				char line[512];
-				while (fgets(line, sizeof(line), m)) {
-					unsigned long long s, e;
-					if (sscanf(line, "%llx-%llx", &s, &e) == 2 &&
-					    e > reg.range.start &&
-					    s < reg.range.start + reg.range.len) {
-						fputs("  vma: ", stderr);
-						fputs(line, stderr);
-					}
-				}
-				fclose(m);
-			}
+		if (ioctl(uffd, UFFDIO_REGISTER, &reg) == -1)
 			cape_die_errno("ioctl(UFFDIO_REGISTER)");
-		}
 	}
 }
 

@@ -120,11 +120,86 @@ unsigned char *before_buffer;
 #define dprintf(fmt, args...) do { } while (0)
 #endif
 
+#ifdef CAPE_PROFILE
+typedef struct {
+	/* counters */
+	unsigned long process_vm_read_calls, process_vm_write_calls;
+	unsigned long process_vm_read_bytes, process_vm_write_bytes;
+	unsigned long writeprotect_calls;
+	unsigned long dirty_pages_captured;
+	unsigned long userfault_events;
+	unsigned long waitpid_calls, wait_loops;
+	unsigned long poll_calls, poll_timeouts;
+	unsigned long ucx_progress_calls;
+	unsigned long ucx_sendrecv_calls;
+	unsigned long ucx_send_calls, ucx_recv_calls;
+	unsigned long ucx_send_bytes, ucx_recv_bytes;
+	unsigned long ucx_bootstrap_wait_iters;
+	unsigned long sigtrap_count;
+	unsigned long generate_ckpt_calls;
+	/* ns timers */
+	unsigned long long process_vm_read_ns, process_vm_write_ns;
+	unsigned long long writeprotect_ns;
+	unsigned long long dirty_capture_ns;
+	unsigned long long userfault_handle_ns;
+	unsigned long long waitpid_ns;
+	unsigned long long wait_blocking_ns, wait_for_child_ns, wait_tracked_ns;
+	unsigned long long poll_ns;
+	unsigned long long ucx_progress_ns;
+	unsigned long long ucx_sendrecv_ns;
+	unsigned long long ucx_send_ns, ucx_recv_ns;
+	unsigned long long ucx_wait_ns;
+	unsigned long long ucx_bootstrap_wait_ns;
+	unsigned long long generate_ckpt_ns;
+} cape_profile_t;
+
+static cape_profile_t cape_profile;
+
+#define CAPE_PROFILE_NS_VAR(name) struct timespec name
+#define CAPE_PROFILE_NS_START(name) clock_gettime(CLOCK_MONOTONIC, &(name))
+#define CAPE_PROFILE_INC(field) ((void)(cape_profile.field++))
+#define CAPE_PROFILE_ADD(field, value) ((void)(cape_profile.field += (value)))
+#define CAPE_PROFILE_ADD_NS(field, start) do { \
+	struct timespec _now_ts; \
+	clock_gettime(CLOCK_MONOTONIC, &_now_ts); \
+	cape_profile.field += (unsigned long long)( \
+		(_now_ts.tv_sec - (start).tv_sec) * 1000000000ULL \
+		+ (_now_ts.tv_nsec - (start).tv_nsec)); \
+} while (0)
+
+static void cape_profile_report(void)
+{
+	fprintf(stderr, "\n[DICKPT PROFILE] Node %ld  (ms = ns/1e6)\n", node);
+#define P_NS(name) fprintf(stderr, "  %-30s : %10.3f ms\n", #name, cape_profile.name / 1e6)
+#define P_CNT(name) fprintf(stderr, "  %-30s : %lu\n", #name, cape_profile.name)
+	P_NS(wait_for_child_ns); P_NS(wait_blocking_ns); P_NS(wait_tracked_ns);
+	P_NS(waitpid_ns); P_CNT(waitpid_calls); P_CNT(wait_loops);
+	P_NS(poll_ns); P_CNT(poll_calls); P_CNT(poll_timeouts);
+	P_NS(userfault_handle_ns); P_CNT(userfault_events);
+	P_CNT(dirty_pages_captured); P_NS(dirty_capture_ns);
+	P_NS(writeprotect_ns); P_CNT(writeprotect_calls);
+	P_NS(process_vm_read_ns); P_CNT(process_vm_read_calls); P_CNT(process_vm_read_bytes);
+	P_NS(process_vm_write_ns); P_CNT(process_vm_write_calls); P_CNT(process_vm_write_bytes);
+	P_NS(generate_ckpt_ns); P_CNT(generate_ckpt_calls);
+	P_NS(ucx_progress_ns); P_CNT(ucx_progress_calls);
+	P_NS(ucx_sendrecv_ns); P_CNT(ucx_sendrecv_calls);
+	P_NS(ucx_send_ns); P_CNT(ucx_send_calls); P_CNT(ucx_send_bytes);
+	P_NS(ucx_recv_ns); P_CNT(ucx_recv_calls); P_CNT(ucx_recv_bytes);
+	P_NS(ucx_wait_ns);
+	P_NS(ucx_bootstrap_wait_ns); P_CNT(ucx_bootstrap_wait_iters);
+	P_CNT(sigtrap_count);
+	fflush(stderr);
+#undef P_NS
+#undef P_CNT
+}
+#else
 #define CAPE_PROFILE_NS_VAR(name)
 #define CAPE_PROFILE_NS_START(name) do { } while (0)
 #define CAPE_PROFILE_INC(field) do { } while (0)
 #define CAPE_PROFILE_ADD(field, value) do { } while (0)
 #define CAPE_PROFILE_ADD_NS(field, start) do { } while (0)
+static inline void cape_profile_report(void) {}
+#endif
 
 static FILE *open_binary_memstream(unsigned char **bufloc, size_t *sizeloc)
 {
@@ -1183,27 +1258,16 @@ int main(int argc, char * argv[]){
 
 	ptrace(PTRACE_CONT, child_id, NULL, NULL ) ;
 
-	fprintf(stderr, "[mon %ld] entering main loop, child_pid=%d\n", node, child_id);
-	fflush(stderr);
 	//Monitor CAPE program
 	while(1) {
 		if (cape_wait_for_child_event(child_id, &status) == -1) {
-			fprintf(stderr, "[mon %ld] EXIT: cape_wait_for_child_event returned -1, errno=%d (%s)\n",
-			        node, errno, strerror(errno));
-			fflush(stderr);
 			perror("waitpid");
 			break;
 		}
 		if(WIFEXITED(status)) {
-			fprintf(stderr, "[mon %ld] EXIT: child exited normally, code=%d\n",
-			        node, WEXITSTATUS(status));
-			fflush(stderr);
 			break;
 		}
 		if(WIFSIGNALED(status)) {
-			fprintf(stderr, "[mon %ld] EXIT: child terminated by signal %d (%s)\n",
-			        node, WTERMSIG(status), strsignal(WTERMSIG(status)));
-			fflush(stderr);
 			break;
 		}
 		if(WIFSTOPPED(status) && WSTOPSIG(status) == SIGTRAP) {
@@ -1330,21 +1394,15 @@ int main(int argc, char * argv[]){
 						}
 						break;										
 					default:
-						fprintf(stderr, "[mon %ld] EXIT: unknown int3 edx=%d (rip=0x%llx)\n",
-						        node, dx, (unsigned long long)regs.rip);
-						fflush(stderr);
 						dprintf("\nMonitor %ld: get breakpoint with unkown edx = %d", node, dx);
 						exit(1);
 				}
 			}//SIGTRAP
 		 else if(WIFSTOPPED(status)) {
 			int sig = WSTOPSIG(status);
-			fprintf(stderr, "[mon %ld] child stopped by signal %d (%s)\n",
-			        node, sig, strsignal(sig));
-			fflush(stderr);
 			if (sig == SIGSEGV) {
-				fprintf(stderr, "[mon %ld] EXIT: child SIGSEGV — killing and returning 1\n", node);
-				fflush(stderr);
+				fprintf(stderr,
+					"Monitor %ld: child received SIGSEGV\n", node);
 				kill(child_id, SIGKILL);
 				return 1;
 			}
@@ -1359,6 +1417,7 @@ int main(int argc, char * argv[]){
 		close(control_fd);
 	free(tracked_ranges);
 	cape_ucx_finalize();
+	cape_profile_report();
 	return 0;
 }
 
