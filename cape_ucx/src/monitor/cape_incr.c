@@ -1183,16 +1183,27 @@ int main(int argc, char * argv[]){
 
 	ptrace(PTRACE_CONT, child_id, NULL, NULL ) ;
 
+	fprintf(stderr, "[mon %ld] entering main loop, child_pid=%d\n", node, child_id);
+	fflush(stderr);
 	//Monitor CAPE program
 	while(1) {
 		if (cape_wait_for_child_event(child_id, &status) == -1) {
+			fprintf(stderr, "[mon %ld] EXIT: cape_wait_for_child_event returned -1, errno=%d (%s)\n",
+			        node, errno, strerror(errno));
+			fflush(stderr);
 			perror("waitpid");
 			break;
 		}
 		if(WIFEXITED(status)) {
+			fprintf(stderr, "[mon %ld] EXIT: child exited normally, code=%d\n",
+			        node, WEXITSTATUS(status));
+			fflush(stderr);
 			break;
 		}
 		if(WIFSIGNALED(status)) {
+			fprintf(stderr, "[mon %ld] EXIT: child terminated by signal %d (%s)\n",
+			        node, WTERMSIG(status), strsignal(WTERMSIG(status)));
+			fflush(stderr);
 			break;
 		}
 		if(WIFSTOPPED(status) && WSTOPSIG(status) == SIGTRAP) {
@@ -1318,16 +1329,22 @@ int main(int argc, char * argv[]){
 							exit(1);
 						}
 						break;										
-					default:						
+					default:
+						fprintf(stderr, "[mon %ld] EXIT: unknown int3 edx=%d (rip=0x%llx)\n",
+						        node, dx, (unsigned long long)regs.rip);
+						fflush(stderr);
 						dprintf("\nMonitor %ld: get breakpoint with unkown edx = %d", node, dx);
 						exit(1);
 				}
 			}//SIGTRAP
 		 else if(WIFSTOPPED(status)) {
 			int sig = WSTOPSIG(status);
+			fprintf(stderr, "[mon %ld] child stopped by signal %d (%s)\n",
+			        node, sig, strsignal(sig));
+			fflush(stderr);
 			if (sig == SIGSEGV) {
-				fprintf(stderr,
-					"Monitor %ld: child received SIGSEGV\n", node);
+				fprintf(stderr, "[mon %ld] EXIT: child SIGSEGV — killing and returning 1\n", node);
+				fflush(stderr);
 				kill(child_id, SIGKILL);
 				return 1;
 			}
