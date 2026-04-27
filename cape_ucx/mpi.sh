@@ -37,10 +37,11 @@ read -r -a N_VALUES <<< "${N_VALUES_STR}"
 read -r -a D_VALUES <<< "${D_VALUES_STR}"
 
 # APP selects which benchmark(s) to run:
-#   all → mul_manual + matvec + gradient
-#   1=mul_manual  2=matvec  3=gradient    (comma-separated combos ok: 1,3)
+#   all -> mul_manual + matvec + gradient + memwrite
+#   1=mul_manual  2=matvec  3=gradient  4=memwrite
+#   comma-separated combos are ok: 1,4
 if [ "${APP}" = "all" ]; then
-    APPS_LIST=(1 2 3)
+    APPS_LIST=(1 2 3 4)
 else
     IFS=',' read -r -a APPS_LIST <<< "${APP}"
 fi
@@ -72,6 +73,7 @@ for id in "${APPS_LIST[@]}"; do
         1) build_one "${SRC_DIR}/mpi_mul_manual.c" "${BUILD_DIR}/bin/mpi_mul_manual" ;;
         2) build_one "${SRC_DIR}/mpi_matvec.c"     "${BUILD_DIR}/bin/mpi_matvec"     ;;
         3) build_one "${SRC_DIR}/mpi_gradient.c"   "${BUILD_DIR}/bin/mpi_gradient"   ;;
+        4) build_one "${SRC_DIR}/mpi_memwrite.c"   "${BUILD_DIR}/bin/mpi_memwrite"   ;;
         *) echo "WARN: unknown APP id '${id}', skipping build" >&2 ;;
     esac
 done
@@ -147,6 +149,7 @@ for id in "${APPS_LIST[@]}"; do
         1) name="mul_manual"; bin="${BUILD_DIR}/bin/mpi_mul_manual" ;;
         2) name="matvec";     bin="${BUILD_DIR}/bin/mpi_matvec"     ;;
         3) name="gradient";   bin="${BUILD_DIR}/bin/mpi_gradient"   ;;
+        4) name="memwrite";   bin="${BUILD_DIR}/bin/mpi_memwrite"   ;;
         *) continue ;;
     esac
     if [ ! -x "${bin}" ]; then

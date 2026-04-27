@@ -179,6 +179,7 @@
     void cape_set_time_stamp(int time_stamp);
     int cape_get_node();
     int cape_get_node_num();
+    int cape_get_num_nodes();
     int cape_get_nodes();
     int cape_get_left(int n, int start);
     int cape_get_right(int n, int start);

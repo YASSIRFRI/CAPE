@@ -41,11 +41,11 @@ read -r -a N_VALUES <<< "${N_VALUES_STR}"
 read -r -a D_VALUES <<< "${D_VALUES_STR}"
 
 # APP selects which benchmark(s) to run:
-#   all  → mamult + matvec + gradient
-#   1    → mamult    2 → matvec    3 → gradient
-#   1,3  → mamult + gradient
+#   all  -> mamult + matvec + gradient + memwrite
+#   1    -> mamult    2 -> matvec    3 -> gradient    4 -> memwrite
+#   1,4  -> mamult + memwrite
 if [ "${APP}" = "all" ]; then
-    APPS_LIST=(1 2 3)
+    APPS_LIST=(1 2 3 4)
 else
     IFS=',' read -r -a APPS_LIST <<< "${APP}"
 fi
@@ -112,6 +112,7 @@ for id in "${APPS_LIST[@]}"; do
         1) make -C "${PROJECT_DIR}" cape_mamult   "${MAKE_ARGS[@]}" ;;
         2) make -C "${PROJECT_DIR}" cape_matvec   "${MAKE_ARGS[@]}" ;;
         3) make -C "${PROJECT_DIR}" cape_gradient "${MAKE_ARGS[@]}" ;;
+        4) make -C "${PROJECT_DIR}" cape_memwrite "${MAKE_ARGS[@]}" ;;
         *) echo "WARN: unknown APP id '${id}', skipping build" >&2 ;;
     esac
 done
@@ -188,6 +189,7 @@ for id in "${APPS_LIST[@]}"; do
         1) name="mamult";   bin="${BUILD_DIR}/bin/cape_mamult"   ;;
         2) name="matvec";   bin="${BUILD_DIR}/bin/cape_matvec"   ;;
         3) name="gradient"; bin="${BUILD_DIR}/bin/cape_gradient" ;;
+        4) name="memwrite"; bin="${BUILD_DIR}/bin/cape_memwrite" ;;
         *) continue ;;
     esac
     if [ ! -x "${bin}" ]; then

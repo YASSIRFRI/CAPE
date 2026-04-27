@@ -42,11 +42,11 @@ read -r -a N_VALUES <<< "${N_VALUES_STR}"
 read -r -a D_VALUES <<< "${D_VALUES_STR}"
 
 # APP selects which benchmark(s) to run:
-#   all  → mul_manual + matvec + gradient
-#   1    → mul_manual    2 → matvec    3 → gradient
-#   1,3  → mul_manual + gradient
+#   all  -> mul_manual + matvec + gradient + memwrite
+#   1    -> mul_manual    2 -> matvec    3 -> gradient    4 -> memwrite
+#   1,4  -> mul_manual + memwrite
 if [ "${APP}" = "all" ]; then
-    APPS_LIST=(1 2 3)
+    APPS_LIST=(1 2 3 4)
 else
     IFS=',' read -r -a APPS_LIST <<< "${APP}"
 fi
@@ -198,6 +198,7 @@ for id in "${APPS_LIST[@]}"; do
         1) name="mul_manual"; bin="${BUILD_DIR}/bin/dickpt_mul_manual"      ;;
         2) name="matvec";     bin="${BUILD_DIR}/bin/dickpt_matvec_manual"   ;;
         3) name="gradient";   bin="${BUILD_DIR}/bin/dickpt_gradient_manual" ;;
+        4) name="memwrite";   bin="${BUILD_DIR}/bin/dickpt_memwrite_manual" ;;
         *) echo "WARN: unknown APP id '${id}'" >&2; continue ;;
     esac
     if [ ! -x "${bin}" ]; then

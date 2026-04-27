@@ -24,6 +24,7 @@ mkdir -p "${BUILD_DIR}/bin" 2>/dev/null || { BUILD_DIR="/tmp/${USER}/cape_build_
 N_MAMULT=(${N_MAMULT:-3000 6400})
 N_MATVEC=(${N_MATVEC:-2048 4096})
 GRADIENT_PAIRS=(${GRADIENT_PAIRS:-"4096:256" "8192:512"})
+N_MEMWRITE=(${N_MEMWRITE:-1048576})
 NODES_LIST=(${NODES_LIST:-4 8 16})
 REPS="${REPS:-5}"
 
@@ -43,6 +44,7 @@ echo "Building MPI binaries"
 mpicc -O2 -Wall -o "${BUILD_DIR}/bin/mpi_mul_manual" "${SRC_DIR}/mpi_mul_manual.c"
 mpicc -O2 -Wall -o "${BUILD_DIR}/bin/mpi_matvec"     "${SRC_DIR}/mpi_matvec.c"
 mpicc -O2 -Wall -o "${BUILD_DIR}/bin/mpi_gradient"   "${SRC_DIR}/mpi_gradient.c"
+mpicc -O2 -Wall -o "${BUILD_DIR}/bin/mpi_memwrite"   "${SRC_DIR}/mpi_memwrite.c"
 
 CSV="${RESULTS_DIR}/mpi_summary_${JOB_TAG}.csv"
 echo "impl,app,n,d,nodes,rep,app_ms,job_id" > "${CSV}"
@@ -107,6 +109,7 @@ for nn in "${NODES_LIST[@]}"; do
         n="${pair%:*}"; d="${pair#*:}"
         for r in $(seq 1 ${REPS}); do JOBS+=("gradient|${BUILD_DIR}/bin/mpi_gradient|${n}|${d}|${r}"); done
     done
+    for n in "${N_MEMWRITE[@]}"; do for r in $(seq 1 ${REPS}); do JOBS+=("memwrite|${BUILD_DIR}/bin/mpi_memwrite|${n}||${r}"); done; done
     run_batch "${nn}" "${JOBS[@]}"
 done
 

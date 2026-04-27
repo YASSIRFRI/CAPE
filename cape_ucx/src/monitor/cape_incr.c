@@ -700,12 +700,29 @@ static void cape_ucx_recv(void *buf, size_t len, int src, uint32_t token)
 
 static const char *cape_ucx_bootstrap_id(void)
 {
-    const char *jobid = getenv("CAPE_UCX_BOOTSTRAP_ID");
-    if (!jobid || !*jobid)
-        jobid = getenv("SLURM_JOB_ID");
-    if (!jobid || !*jobid)
-        jobid = "local";
-    return jobid;
+    /* Cached so callers can hold the returned pointer for the lifetime of
+     * the process. Built as SLURM_JOB_ID + "_" + SLURM_STEP_ID so concurrent
+     * srun steps inside one allocation (e.g. 4 parallel reps from the
+     * benchmark script) get distinct rendezvous files. */
+    static char buf[64];
+    static int cached = 0;
+    const char *override;
+
+    if (cached)
+        return buf;
+
+    override = getenv("CAPE_UCX_BOOTSTRAP_ID");
+    if (override && *override) {
+        snprintf(buf, sizeof(buf), "%s", override);
+    } else {
+        const char *job  = getenv("SLURM_JOB_ID");
+        const char *step = getenv("SLURM_STEP_ID");
+        if (!job  || !*job)  job  = "local";
+        if (!step || !*step) step = "0";
+        snprintf(buf, sizeof(buf), "%s_%s", job, step);
+    }
+    cached = 1;
+    return buf;
 }
 
 static const char *cape_ucx_bootstrap_dir(void)

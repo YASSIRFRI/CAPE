@@ -39,7 +39,7 @@ OMP_CFLAGS = -O2 -fopenmp
 COMPILE  = $(CC) -w $(CFLAGS) $(C_FOLDER)/monitor/cape.c
 
 # ── Default target ────────────────────────────────────────────────────────────
-all: cape_mamult cape_reduction cape_nested_parallel_sections 
+all: cape_mamult cape_reduction cape_nested_parallel_sections cape_memwrite
 
 # ── Per-application targets (timestamp) ──────────────────────────────────────
 cape_mamult:
@@ -50,6 +50,9 @@ cape_matvec:
 
 cape_gradient:
 	$(COMPILE) $(C_FOLDER)/apps/cape_gradient.c -o $(EXE_FOLDER)/cape_gradient $(LDFLAGS)
+
+cape_memwrite:
+	$(COMPILE) $(C_FOLDER)/apps/cape_memwrite.c -o $(EXE_FOLDER)/cape_memwrite $(LDFLAGS)
 
 cape_mamult2d:
 	$(COMPILE) $(C_FOLDER)/apps/cape_mamult2d.c -o $(EXE_FOLDER)/cape_mamult2d $(LDFLAGS)
@@ -99,7 +102,7 @@ cape_test_heap:
 omp_gradient:
 	$(CC) -w $(OMP_CFLAGS) $(C_FOLDER)/omp_apps/omp_gradient.c -o $(EXE_FOLDER)/omp_gradient
 
-apps: cape_mamult cape_mamult2d cape_matvec cape_gradient \
+apps: cape_mamult cape_mamult2d cape_matvec cape_gradient cape_memwrite \
       cape_pi cape_prime cape_prime_number \
       cape_reduction cape_for cape_for_nowait cape_parallel_for \
       cape_vector1 cape_vector2 cape_critical cape_critical2 \
@@ -129,7 +132,7 @@ apps: cape_mamult cape_mamult2d cape_matvec cape_gradient \
 # make-time and point gcc at its `ld` with -B<dir>/.
 # Only run binutils discovery (and print the [dickpt] info lines) when an
 # actual dickpt target is being built. Cape targets don't need this.
-DICKPT_TARGETS := dickpt dickpt_monitor dickpt_mul_manual dickpt_matvec_manual dickpt_gradient_manual
+DICKPT_TARGETS := dickpt dickpt_monitor dickpt_mul_manual dickpt_matvec_manual dickpt_gradient_manual dickpt_memwrite_manual
 ifneq ($(filter $(DICKPT_TARGETS),$(MAKECMDGOALS)),)
 ifneq ($(EBROOTBINUTILS),)
 DICKPT_BINUTILS_BIN := $(EBROOTBINUTILS)/bin
@@ -172,8 +175,12 @@ dickpt_gradient_manual:
 	@mkdir -p $(EXE_FOLDER)
 	$(DICKPT_COMPILE) $(C_FOLDER)/apps/cape_gradient_manual.c $(DICKPT_RUNTIME) -o $(EXE_FOLDER)/dickpt_gradient_manual
 
+dickpt_memwrite_manual:
+	@mkdir -p $(EXE_FOLDER)
+	$(DICKPT_COMPILE) $(C_FOLDER)/apps/cape_memwrite_manual.c $(DICKPT_RUNTIME) -o $(EXE_FOLDER)/dickpt_memwrite_manual
+
 # Build monitor + all dickpt apps
-dickpt: dickpt_monitor dickpt_mul_manual dickpt_matvec_manual dickpt_gradient_manual
+dickpt: dickpt_monitor dickpt_mul_manual dickpt_matvec_manual dickpt_gradient_manual dickpt_memwrite_manual
 
 # ── Clean ─────────────────────────────────────────────────────────────────────
 cleanall:
@@ -181,8 +188,8 @@ cleanall:
 
 .PHONY: all apps cleanall \
         dickpt dickpt_monitor dickpt_mul_manual \
-        dickpt_matvec_manual dickpt_gradient_manual \
-        cape_mamult cape_mamult2d cape_matvec cape_gradient \
+        dickpt_matvec_manual dickpt_gradient_manual dickpt_memwrite_manual \
+        cape_mamult cape_mamult2d cape_matvec cape_gradient cape_memwrite \
         cape_pi cape_prime cape_prime_number \
         cape_reduction cape_for cape_for_nowait cape_parallel_for \
         cape_vector1 cape_vector2 cape_critical cape_critical2 omp_gradient \
