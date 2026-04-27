@@ -127,18 +127,32 @@ apps: cape_mamult cape_mamult2d cape_matvec cape_gradient \
 # .debug_info in libgcc.a (kills the link at -O2 once helpers like __muldi3
 # are pulled in). We discover a newer binutils via the module system at
 # make-time and point gcc at its `ld` with -B<dir>/.
+# Prefer EBROOTBINUTILS from the calling env (set when GCCcore is module-loaded,
+# which auto-loads its paired binutils). Fall back to running `module load` in a
+# subshell with lmod sourced — useful when make is invoked without the parent
+# having loaded the toolchain.
+ifneq ($(EBROOTBINUTILS),)
+DICKPT_BINUTILS_BIN := $(EBROOTBINUTILS)/bin
+DICKPT_BINUTILS_SRC := EBROOTBINUTILS env
+else
 DICKPT_BINUTILS_BIN := $(shell bash -c '\
     for f in /etc/profile.d/lmod.sh /etc/profile.d/z00_lmod.sh /etc/profile.d/modules.sh /usr/share/lmod/lmod/init/bash; do \
         [ -r $$f ] && . $$f; \
     done; \
     module load binutils/2.42-GCCcore-14.2.0 >/dev/null 2>&1 && echo $$EBROOTBINUTILS/bin')
+DICKPT_BINUTILS_SRC := module-load fallback
+endif
 ifeq ($(DICKPT_BINUTILS_BIN),)
-$(warning [dickpt] could not auto-load binutils/2.42-GCCcore-14.2.0; link may fail with /usr/bin/ld decompress error)
+$(warning [dickpt] could NOT locate a newer binutils — link will likely fail with /usr/bin/ld decompress error)
+$(warning [dickpt]   EBROOTBINUTILS='$(EBROOTBINUTILS)'  PATH='$(PATH)')
 DICKPT_LD_PREFIX :=
 else
-$(info [dickpt] using ld from $(DICKPT_BINUTILS_BIN))
+$(info [dickpt] binutils bin: $(DICKPT_BINUTILS_BIN)  (source: $(DICKPT_BINUTILS_SRC)))
+$(info [dickpt] ld at that path: $(shell ls -l $(DICKPT_BINUTILS_BIN)/ld 2>&1))
+$(info [dickpt] ld --version: $(shell $(DICKPT_BINUTILS_BIN)/ld --version 2>&1 | head -1))
 DICKPT_LD_PREFIX := -B$(DICKPT_BINUTILS_BIN)/
 endif
+$(info [dickpt] gcc -print-prog-name=ld (with -B): $(shell $(CC) $(DICKPT_LD_PREFIX) -print-prog-name=ld 2>&1))
 DICKPT_COMPILE = $(CC) -w -O2 -mno-red-zone -I./$(I_FOLDER) -no-pie -fno-pie $(DICKPT_LD_PREFIX)
 DICKPT_RUNTIME = $(C_FOLDER)/apps/cape_dickpt_runtime.c
 
