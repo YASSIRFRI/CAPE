@@ -20,7 +20,7 @@ static int b[MAX_N][MAX_N];
 struct ckpt_state {
 	int c[MAX_N][MAX_N];
 };
-static struct ckpt_state g_state;
+static struct ckpt_state g_state __attribute__((aligned(4096)));
 
 static unsigned long get_ms_of_day(void)
 {
