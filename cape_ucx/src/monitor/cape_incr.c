@@ -380,7 +380,18 @@ int cape_wait_for_child_event(pid_t pid, int *status)
 			int timeout = 1;
 
 			CAPE_PROFILE_NS_START(poll_start_ns);
-			nfds = epoll_wait(epoll_fd, evs, 2, timeout);
+			if (epoll_fd < 0) {
+				/* userfaultfd setup hasn't happened yet (app is still
+				 * starting up and about to sendmsg its uffd to us).
+				 * Just sleep briefly and loop back to waitpid — do NOT
+				 * touch epoll_fd here or we'd EBADF-out, exit, and
+				 * close the control socket while the app is mid-sendmsg. */
+				struct timespec ts = { 0, 1 * 1000 * 1000 }; /* 1 ms */
+				nanosleep(&ts, NULL);
+				nfds = 0;
+			} else {
+				nfds = epoll_wait(epoll_fd, evs, 2, timeout);
+			}
 			CAPE_PROFILE_ADD_NS(poll_ns, poll_start_ns);
 			CAPE_PROFILE_INC(poll_calls);
 			if (nfds == 0)
