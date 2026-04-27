@@ -158,7 +158,8 @@ DICKPT_RUNTIME = $(C_FOLDER)/apps/cape_dickpt_runtime.c
 
 # Monitor (needs UCX for inter-node communication)
 dickpt_monitor:
-	$(CC) -w $(CFLAGS) $(C_FOLDER)/monitor/cape_incr.c -o $(EXE_FOLDER)/cape_dickpt_monitor $(LDFLAGS)
+	@mkdir -p $(EXE_FOLDER)
+	$(CC) -w $(CFLAGS) $(DICKPT_LD_PREFIX) $(C_FOLDER)/monitor/cape_incr.c -o $(EXE_FOLDER)/cape_dickpt_monitor $(LDFLAGS)
 
 # Dickpt application targets
 dickpt_mul_manual:
