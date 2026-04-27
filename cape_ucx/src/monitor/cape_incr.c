@@ -338,8 +338,16 @@ int cape_wait_for_child_event(pid_t pid, int *status)
 	if (userfault_fd < 0 || !tracking_is_enabled)
 	{
 		CAPE_PROFILE_NS_VAR(wait_start_ns);
+		pid_t rc;
 		CAPE_PROFILE_NS_START(wait_start_ns);
-		pid_t rc = waitpid(pid, status, 0);
+		/* Retry on EINTR — otherwise any signal delivered to the monitor
+		 * before tracking is enabled (e.g. between fork and the app's
+		 * first int3) causes us to return -1, the main loop to break,
+		 * and control_fd[0] to close while the app is mid-sendmsg →
+		 * "sendmsg(userfaultfd setup) failed: Broken pipe". */
+		do {
+			rc = waitpid(pid, status, 0);
+		} while (rc == -1 && errno == EINTR);
 
 		CAPE_PROFILE_ADD_NS(wait_for_child_ns, wait_start_ns);
 		CAPE_PROFILE_ADD_NS(wait_blocking_ns, wait_start_ns);

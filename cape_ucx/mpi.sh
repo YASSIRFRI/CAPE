@@ -30,10 +30,12 @@ if ! mkdir -p "${BUILD_DIR}/bin" 2>/dev/null; then
 fi
 
 N_VALUES_STR="${N_VALUES_STR:-3000}"
+MEM_N_VALUES_STR="${MEM_N_VALUES_STR:-1048576}"
 D_VALUES_STR="${D_VALUES_STR:-256}"
 REPS="${REPS:-1}"
 APP="${APP:-1}"
 read -r -a N_VALUES <<< "${N_VALUES_STR}"
+read -r -a MEM_N_VALUES <<< "${MEM_N_VALUES_STR}"
 read -r -a D_VALUES <<< "${D_VALUES_STR}"
 
 # APP selects which benchmark(s) to run:
@@ -84,6 +86,7 @@ echo "impl,app,n,d,rep,app_ms,job_id,nodes,ntasks" > "${CSV}"
 echo "Benchmarking pure MPI"
 echo "APPs: ${APPS_LIST[*]}"
 echo "N values: ${N_VALUES[*]}"
+echo "Memwrite N values: ${MEM_N_VALUES[*]}"
 echo "D values (gradient only): ${D_VALUES[*]}"
 echo "Reps: ${REPS}"
 echo "Build dir: ${BUILD_DIR}"
@@ -156,7 +159,12 @@ for id in "${APPS_LIST[@]}"; do
         echo "WARN: missing binary ${bin}" >&2
         continue
     fi
-    for n in "${N_VALUES[@]}"; do
+    if [ "${id}" = "4" ]; then
+        RUN_N_VALUES=("${MEM_N_VALUES[@]}")
+    else
+        RUN_N_VALUES=("${N_VALUES[@]}")
+    fi
+    for n in "${RUN_N_VALUES[@]}"; do
         if [ "${id}" = "3" ]; then
             for d in "${D_VALUES[@]}"; do
                 run_one "${name}" "${bin}" "${n}" "${d}"
