@@ -641,9 +641,9 @@ static void cape_recv_cb(void *request, ucs_status_t status,
     r->completed = 1;
 }
 
-/* Block until a non-blocking UCX request finishes.
- * Uses ucp_worker_wait (epoll-based) instead of busy-polling
- * ucp_worker_progress to avoid wasting CPU cycles. */
+/* Busy-spin ucp_worker_progress until the request completes. UCX is
+ * designed for this; calling ucp_worker_wait between progress calls
+ * adds per-iteration epoll latency that destroys bandwidth. */
 static void cape_ucx_wait(void *req, size_t expect_len, int check_len,
                           ucp_tag_t *out_tag)
 {
@@ -660,18 +660,11 @@ static void cape_ucx_wait(void *req, size_t expect_len, int check_len,
     }
     cape_ucx_req_t *r = (cape_ucx_req_t *)req;
     while (!r->completed) {
-        CAPE_PROFILE_NS_VAR(progress_start_ns);
-        CAPE_PROFILE_NS_START(progress_start_ns);
-        /* First try to make progress — completions may already be queued */
-        if (ucp_worker_progress(ucp_worker) == 0) {
-            /* No events to process — block until the transport signals
-             * activity via epoll instead of spinning. */
-            ucp_worker_wait(ucp_worker);
-        }
-        CAPE_PROFILE_ADD_NS(ucx_progress_ns, progress_start_ns);
+        ucp_worker_progress(ucp_worker);
         CAPE_PROFILE_INC(ucx_progress_calls);
     }
     CAPE_PROFILE_ADD_NS(ucx_wait_ns, wait_start_ns);
+    CAPE_PROFILE_ADD_NS(ucx_progress_ns, wait_start_ns);
     if (out_tag)
         *out_tag = r->sender_tag;
     if (r->status != UCS_OK) {
@@ -1015,7 +1008,11 @@ static void cape_ucx_init(void)
     ucp_params.field_mask   = UCP_PARAM_FIELD_FEATURES
                             | UCP_PARAM_FIELD_REQUEST_SIZE
                             | UCP_PARAM_FIELD_REQUEST_INIT;
-    ucp_params.features     = UCP_FEATURE_TAG | UCP_FEATURE_WAKEUP;
+    /* Tag-matching only — WAKEUP would force ucp_worker_wait/epoll
+     * blocking semantics in cape_ucx_wait, which adds ~1ms latency per
+     * progress iteration and kills bandwidth. We busy-spin progress,
+     * matching what cape.c does. */
+    ucp_params.features     = UCP_FEATURE_TAG;
     ucp_params.request_size = sizeof(cape_ucx_req_t);
     ucp_params.request_init = cape_ucx_req_init;
 
