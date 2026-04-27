@@ -135,7 +135,7 @@ apps: cape_mamult cape_mamult2d cape_matvec cape_gradient \
 # in cape_dickpt_runtime.c, every rank sees identical VAs for globals —
 # required because DICKPT checkpoints carry absolute addresses that must be
 # injectable into any rank's address space.
-DICKPT_COMPILE = $(CC) -w -I./$(I_FOLDER) -no-pie -fno-pie
+DICKPT_COMPILE = $(CC) -w -O2 -I./$(I_FOLDER) -no-pie -fno-pie
 DICKPT_RUNTIME = $(C_FOLDER)/apps/cape_dickpt_runtime.c
 
 # Monitor (needs UCX for inter-node communication)
