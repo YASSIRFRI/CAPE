@@ -2746,13 +2746,19 @@ void cape_init(){
 	}
 #else
 	/* Use shared filesystem for rendezvous.
-	 * SLURM_JOB_ID namespaces the files so concurrent jobs don't collide.
-	 * SLURM_SUBMIT_DIR is the shared NFS directory sbatch was run from.   */
-	const char *jobid  = getenv("SLURM_JOB_ID");
+	 * Namespace files by SLURM_JOB_ID + SLURM_STEP_ID so concurrent srun
+	 * steps inside the same allocation (e.g. parallel reps from the
+	 * benchmark script) don't all write to the same _addr_<rank> file.
+	 * SLURM_SUBMIT_DIR is the shared NFS directory sbatch was run from. */
+	const char *job_str  = getenv("SLURM_JOB_ID");
+	const char *step_str = getenv("SLURM_STEP_ID");
 	const char *sharedir = getenv("SLURM_SUBMIT_DIR");
-	if (!jobid)    jobid    = "local";
+	char jobid_buf[64];
+	if (!job_str)  job_str  = "local";
+	if (!step_str) step_str = "0";
 	if (!sharedir) sharedir = ".";
-	ucx_exchange_addresses_via_fs(sharedir, jobid, local_addr, local_addr_len);
+	snprintf(jobid_buf, sizeof(jobid_buf), "%s_%s", job_str, step_str);
+	ucx_exchange_addresses_via_fs(sharedir, jobid_buf, local_addr, local_addr_len);
 #endif
 
 	ucp_worker_release_address(ucp_worker, local_addr);
@@ -2888,15 +2894,20 @@ void cape_finalize(){
 #ifdef USE_PMIX
 	PMIx_Finalize(NULL, 0);
 #else
-	/* Remove this rank's rendezvous files */
-	const char *jobid    = getenv("SLURM_JOB_ID");
+	/* Remove this rank's rendezvous files (must match the jobid scheme used
+	 * in cape_init: SLURM_JOB_ID + "_" + SLURM_STEP_ID). */
+	const char *job_str  = getenv("SLURM_JOB_ID");
+	const char *step_str = getenv("SLURM_STEP_ID");
 	const char *sharedir = getenv("SLURM_SUBMIT_DIR");
-	if (!jobid)    jobid    = "local";
+	if (!job_str)  job_str  = "local";
+	if (!step_str) step_str = "0";
 	if (!sharedir) sharedir = ".";
+	char jobid_buf[64];
+	snprintf(jobid_buf, sizeof(jobid_buf), "%s_%s", job_str, step_str);
 	char path[512];
-	snprintf(path, sizeof(path), "%s/cape_ucx_%s_addr_%d", sharedir, jobid, __node__);
+	snprintf(path, sizeof(path), "%s/cape_ucx_%s_addr_%d", sharedir, jobid_buf, __node__);
 	unlink(path);
-	snprintf(path, sizeof(path), "%s/cape_ucx_%s_rdy_%d",  sharedir, jobid, __node__);
+	snprintf(path, sizeof(path), "%s/cape_ucx_%s_rdy_%d",  sharedir, jobid_buf, __node__);
 	unlink(path);
 #endif
 }
