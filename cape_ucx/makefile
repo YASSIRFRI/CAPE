@@ -127,10 +127,10 @@ apps: cape_mamult cape_mamult2d cape_matvec cape_gradient \
 # .debug_info in libgcc.a (kills the link at -O2 once helpers like __muldi3
 # are pulled in). We discover a newer binutils via the module system at
 # make-time and point gcc at its `ld` with -B<dir>/.
-# Prefer EBROOTBINUTILS from the calling env (set when GCCcore is module-loaded,
-# which auto-loads its paired binutils). Fall back to running `module load` in a
-# subshell with lmod sourced — useful when make is invoked without the parent
-# having loaded the toolchain.
+# Only run binutils discovery (and print the [dickpt] info lines) when an
+# actual dickpt target is being built. Cape targets don't need this.
+DICKPT_TARGETS := dickpt dickpt_monitor dickpt_mul_manual dickpt_matvec_manual dickpt_gradient_manual
+ifneq ($(filter $(DICKPT_TARGETS),$(MAKECMDGOALS)),)
 ifneq ($(EBROOTBINUTILS),)
 DICKPT_BINUTILS_BIN := $(EBROOTBINUTILS)/bin
 DICKPT_BINUTILS_SRC := EBROOTBINUTILS env
@@ -148,11 +148,9 @@ $(warning [dickpt]   EBROOTBINUTILS='$(EBROOTBINUTILS)'  PATH='$(PATH)')
 DICKPT_LD_PREFIX :=
 else
 $(info [dickpt] binutils bin: $(DICKPT_BINUTILS_BIN)  (source: $(DICKPT_BINUTILS_SRC)))
-$(info [dickpt] ld at that path: $(shell ls -l $(DICKPT_BINUTILS_BIN)/ld 2>&1))
-$(info [dickpt] ld --version: $(shell $(DICKPT_BINUTILS_BIN)/ld --version 2>&1 | head -1))
 DICKPT_LD_PREFIX := -B$(DICKPT_BINUTILS_BIN)/
 endif
-$(info [dickpt] gcc -print-prog-name=ld (with -B): $(shell $(CC) $(DICKPT_LD_PREFIX) -print-prog-name=ld 2>&1))
+endif
 DICKPT_COMPILE = $(CC) -w -O2 -mno-red-zone -I./$(I_FOLDER) -no-pie -fno-pie $(DICKPT_LD_PREFIX)
 DICKPT_RUNTIME = $(C_FOLDER)/apps/cape_dickpt_runtime.c
 
