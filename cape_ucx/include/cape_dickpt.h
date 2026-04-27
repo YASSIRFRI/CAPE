@@ -36,38 +36,35 @@ static inline void __cape_signal(int code)
     );
 }
 
-/* Send a long value to the monitor via rax, with signal code in rdx */
+/* Send a long value to the monitor via rax, with signal code in rdx.
+ * Use named-register variables so the compiler cannot alias `code` onto
+ * %rax (which would be clobbered by the val load before edx is set). */
 static inline void __cape_signal_val(int code, unsigned long val)
 {
+    register unsigned long _val asm("rax") = val;
+    register unsigned long _code asm("rdx") = (unsigned long)(unsigned int)code;
     __asm__ volatile (
-        "push %%rax          \n\t"
-        "push %%rdx          \n\t"
-        "movq %0, %%rax      \n\t"
-        "movl %1, %%edx      \n\t"
-        "int  $3             \n\t"
-        "pop  %%rdx          \n\t"
-        "pop  %%rax          \n\t"
-        : /* no outputs */
-        : "r"(val), "r"(code)
+        "int $3"
+        : "+r"(_val), "+r"(_code)
+        :
         : "memory"
     );
 }
 
-/* Read a value back from the monitor via rdx */
+/* Read a value back from the monitor via rdx. Use a named-register
+ * variable bound to %rdx so input (code) and output (response) share
+ * the right register without the compiler aliasing other inputs onto
+ * %rdx and getting clobbered. */
 static inline unsigned long __cape_signal_read(int code)
 {
-    unsigned long result;
+    register unsigned long _rdx asm("rdx") = (unsigned long)(unsigned int)code;
     __asm__ volatile (
-        "push %%rdx          \n\t"
-        "movl %1, %%edx      \n\t"
-        "int  $3             \n\t"
-        "movq %%rdx, %0      \n\t"
-        "pop  %%rdx          \n\t"
-        : "=r"(result)
-        : "r"(code)
+        "int $3"
+        : "+r"(_rdx)
+        :
         : "memory"
     );
-    return result;
+    return _rdx;
 }
 
 /* ── CAPE dickpt API ───────────────────────────────────────────────────── */
