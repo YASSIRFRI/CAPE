@@ -25,22 +25,10 @@ else
 PROF_FLAGS =
 endif
 
-# ── Compression (build with COMPRESS=1 to enable, e.g. make cape_mamult COMPRESS=1)
-# Requires zlib (-lz).  Compresses checkpoint data before exchange to reduce
-# communication cost.  Only compresses when the result is smaller than the input.
-COMPRESS ?= 0
-ifeq ($(COMPRESS),1)
-COMP_FLAGS = -DCAPE_COMPRESS
-COMP_LINK  = -lz
-else
-COMP_FLAGS =
-COMP_LINK  =
-endif
-
 # ── Compiler & flags ─────────────────────────────────────────────────────────
 CC      ?= cc
-CFLAGS   = -O2 -I./$(I_FOLDER) -I$(UCX_SRC) -I$(UCX_GEN) $(PMIX_FLAGS) $(PROF_FLAGS) $(COMP_FLAGS)
-LDFLAGS  = -L$(UCX_LIB) -lucp -lucs $(PMIX_LINK) $(COMP_LINK) -Wl,-rpath,$(UCX_LIB)
+CFLAGS   = -O2 -I./$(I_FOLDER) -I$(UCX_SRC) -I$(UCX_GEN) $(PMIX_FLAGS) $(PROF_FLAGS)
+LDFLAGS  = -L$(UCX_LIB) -lucp -lucs $(PMIX_LINK) -Wl,-rpath,$(UCX_LIB)
 OMP_CFLAGS = -O2 -fopenmp
 
 # ══════════════════════════════════════════════════════════════════════════════
