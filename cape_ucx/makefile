@@ -123,7 +123,19 @@ apps: cape_mamult cape_mamult2d cape_matvec cape_gradient \
 # in cape_dickpt_runtime.c, every rank sees identical VAs for globals —
 # required because DICKPT checkpoints carry absolute addresses that must be
 # injectable into any rank's address space.
-DICKPT_COMPILE = $(CC) -w -O2 -mno-red-zone -shared-libgcc -I./$(I_FOLDER) -no-pie -fno-pie
+# Workaround for binutils that can't decompress zstd-compressed .debug_info
+# sections in the system libgcc.a (which kills the link at -O2 once libgcc
+# helpers like __muldi3 are pulled in). We copy libgcc.a to a private dir,
+# strip its debug sections, and point gcc at it via -B<dir>/.
+DICKPT_LIBGCC_DIR := /tmp/$(shell id -un)/cape_dickpt_libgcc
+DICKPT_LIBGCC     := $(DICKPT_LIBGCC_DIR)/libgcc.a
+
+$(DICKPT_LIBGCC):
+	@mkdir -p $(DICKPT_LIBGCC_DIR)
+	@cp $$($(CC) -print-libgcc-file-name) $@
+	@strip --strip-debug $@ 2>/dev/null || objcopy --strip-debug $@
+
+DICKPT_COMPILE = $(CC) -w -O2 -mno-red-zone -B$(DICKPT_LIBGCC_DIR)/ -I./$(I_FOLDER) -no-pie -fno-pie
 DICKPT_RUNTIME = $(C_FOLDER)/apps/cape_dickpt_runtime.c
 
 # Monitor (needs UCX for inter-node communication)
@@ -131,13 +143,13 @@ dickpt_monitor:
 	$(CC) -w $(CFLAGS) $(C_FOLDER)/monitor/cape_incr.c -o $(EXE_FOLDER)/cape_dickpt_monitor $(LDFLAGS)
 
 # Dickpt application targets
-dickpt_mul_manual:
+dickpt_mul_manual: $(DICKPT_LIBGCC)
 	$(DICKPT_COMPILE) $(C_FOLDER)/apps/cape_mul_manual.c $(DICKPT_RUNTIME) -o $(EXE_FOLDER)/dickpt_mul_manual
 
-dickpt_matvec_manual:
+dickpt_matvec_manual: $(DICKPT_LIBGCC)
 	$(DICKPT_COMPILE) $(C_FOLDER)/apps/cape_matvec_manual.c $(DICKPT_RUNTIME) -o $(EXE_FOLDER)/dickpt_matvec_manual
 
-dickpt_gradient_manual:
+dickpt_gradient_manual: $(DICKPT_LIBGCC)
 	$(DICKPT_COMPILE) $(C_FOLDER)/apps/cape_gradient_manual.c $(DICKPT_RUNTIME) -o $(EXE_FOLDER)/dickpt_gradient_manual
 
 # Build monitor + all dickpt apps
