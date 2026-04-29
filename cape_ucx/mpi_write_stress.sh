@@ -21,7 +21,7 @@ mkdir -p "${RESULTS_DIR}" 2>/dev/null || { RESULTS_DIR="/tmp/${USER}/mpi_write_s
 BUILD_DIR="${BUILD_DIR:-${SLURM_SUBMIT_DIR:-/tmp/${USER}}/cape_build_mpi_ws_${JOB_TAG}}"
 mkdir -p "${BUILD_DIR}/bin" 2>/dev/null || { BUILD_DIR="/tmp/${USER}/cape_build_mpi_ws_${JOB_TAG}"; mkdir -p "${BUILD_DIR}/bin"; }
 
-N_LIST=(${N_LIST:-1048576})
+N_LIST=(${N_LIST:-524288})
 PHASES_LIST=(${PHASES_LIST:-8})
 NODES_LIST=(${NODES_LIST:-4 8 16 32})
 REPS="${REPS:-5}"

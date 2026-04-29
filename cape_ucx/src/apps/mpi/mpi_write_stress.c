@@ -12,8 +12,8 @@
 #include <string.h>
 #include <limits.h>
 
-#define DEFAULT_N       (1U << 20)
-#define MAX_N           (1U << 20)
+#define DEFAULT_N       (1U << 19)
+#define MAX_N           (1U << 19)
 #define DEFAULT_PHASES  8
 #define MAX_PHASES      32
 #define WRITES_PER_CELL 4U

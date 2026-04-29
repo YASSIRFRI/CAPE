@@ -23,7 +23,7 @@ mkdir -p "${BUILD_DIR}/bin" "${BUILD_DIR}/obj" "${BUILD_DIR}/lib" 2>/dev/null ||
   { BUILD_DIR="/tmp/${USER}/cape_build_ucx_ws_${JOB_TAG}"; mkdir -p "${BUILD_DIR}/bin" "${BUILD_DIR}/obj" "${BUILD_DIR}/lib"; }
 
 # Sweep configuration
-N_LIST=(${N_LIST:-1048576})            # 4 MB / node default (1<<20 cells)
+N_LIST=(${N_LIST:-524288})             # 2 MB / node default (1<<19 cells)
 PHASES_LIST=(${PHASES_LIST:-8})  # multiple checkpoints per run
 NODES_LIST=(${NODES_LIST:-4 8 16 32})
 REPS="${REPS:-5}"

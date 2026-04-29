@@ -15,8 +15,8 @@
 #include <sys/time.h>
 #include "../../include/cape_dickpt.h"
 
-#define DEFAULT_N       (1U << 20)
-#define MAX_N           (1U << 20)
+#define DEFAULT_N       (1U << 19)
+#define MAX_N           (1U << 19)
 #define MAX_NODES       32
 #define DEFAULT_PHASES  8
 #define MAX_PHASES      32
