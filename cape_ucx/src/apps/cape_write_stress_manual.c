@@ -100,15 +100,15 @@ static int verify_full(const struct ckpt_state *state, int n,
 {
 	int errors = 0;
 	unsigned long r;
-	int p;
+	int p = 0;
 
 	for (r = 0; r < num_nodes; r++) {
 		unsigned int got = checksum_row(state->rows[r], n);
-		unsigned int expected = 0;
+		unsigned int expected;
 
-		for (p = 0; p < phases; p++)
-			expected ^= run_phase(NULL, n,
-					      (unsigned int)r, rep, p, 0);
+		(void)p;
+		expected = run_phase(NULL, n, (unsigned int)r, rep,
+				     phases - 1, 0);
 
 		if (got != expected) {
 			fprintf(stderr,
@@ -168,6 +168,8 @@ int main(int argc, char *argv[])
 		t0 = get_ms_of_day();
 
 		for (p = 0; p < phases; p++) {
+			memset(state->rows[node], 0,
+			       (size_t)n * sizeof(state->rows[node][0]));
 			dickpt_start_ckpt();
 			run_phase(state->rows[node], n,
 				  (unsigned int)node, rep, p, 1);

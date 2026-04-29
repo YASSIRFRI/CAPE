@@ -100,6 +100,8 @@ static void write_stress_phase(int n, int rep, int phase)
 	cape_begin(PARALLEL_FOR, 0, n);
 	ckpt_start();
 	node = cape_get_node_num();
+	memset(mem_rows[node], 0,
+	       (size_t)n * sizeof(mem_rows[node][0]));
 	run_phase(mem_rows[node], n, (unsigned int)node, rep, phase, 1);
 	__pc__ = (unsigned long)__get_pc();
 	cape_end(PARALLEL_FOR, FALSE);
@@ -110,15 +112,13 @@ static int verify_full(int n, int num_nodes, unsigned long node, int rep,
 		       int phases)
 {
 	int errors = 0;
-	int r, p;
+	int r;
 
 	for (r = 0; r < num_nodes; r++) {
 		unsigned int got = checksum_row(mem_rows[r], n);
-		unsigned int expected = 0;
-
-		for (p = 0; p < phases; p++)
-			expected ^= run_phase(NULL, n,
-					      (unsigned int)r, rep, p, 0);
+		unsigned int expected =
+			run_phase(NULL, n, (unsigned int)r, rep,
+				  phases - 1, 0);
 
 		if (got != expected) {
 			fprintf(stderr,

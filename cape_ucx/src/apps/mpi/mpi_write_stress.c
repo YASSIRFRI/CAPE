@@ -82,16 +82,14 @@ static int verify_full(const unsigned int *rows, int n, int num_ranks,
 		       int rank, int rep, int phases)
 {
 	int errors = 0;
-	int r, p;
+	int r;
 
 	for (r = 0; r < num_ranks; r++) {
 		const unsigned int *row = rows + ((size_t)r * (size_t)n);
 		unsigned int got = checksum_row(row, n);
-		unsigned int expected = 0;
-
-		for (p = 0; p < phases; p++)
-			expected ^= run_phase(NULL, n,
-					      (unsigned int)r, rep, p, 0);
+		unsigned int expected =
+			run_phase(NULL, n, (unsigned int)r, rep,
+				  phases - 1, 0);
 
 		if (got != expected) {
 			fprintf(stderr,
@@ -170,6 +168,7 @@ int main(int argc, char *argv[])
 		t0 = get_ms_of_day();
 
 		for (p = 0; p < phases; p++) {
+			memset(local_row, 0, (size_t)n * sizeof(*local_row));
 			run_phase(local_row, n,
 				  (unsigned int)rank, rep, p, 1);
 			MPI_Allgather(local_row, n, MPI_UNSIGNED,

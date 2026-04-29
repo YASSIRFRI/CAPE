@@ -22,7 +22,7 @@ BUILD_DIR="${BUILD_DIR:-${SLURM_SUBMIT_DIR:-/tmp/${USER}}/cape_build_mpi_ws_${JO
 mkdir -p "${BUILD_DIR}/bin" 2>/dev/null || { BUILD_DIR="/tmp/${USER}/cape_build_mpi_ws_${JOB_TAG}"; mkdir -p "${BUILD_DIR}/bin"; }
 
 N_LIST=(${N_LIST:-4194304})
-PHASES_LIST=(${PHASES_LIST:-1 2 4 8})
+PHASES_LIST=(${PHASES_LIST:-8})
 NODES_LIST=(${NODES_LIST:-4 8 16 32})
 REPS="${REPS:-5}"
 
