@@ -106,28 +106,31 @@ static void write_stress_phase(int n, int rep, int phase)
 }
 
 static int verify(int n, int num_nodes, unsigned long node, int rep,
-		  int phase)
+		  int phases)
 {
 	int errors = 0;
-	int r;
+	int r, p;
 
 	for (r = 0; r < num_nodes; r++) {
 		unsigned int got = checksum_row(mem_rows[r], n);
-		unsigned int expected =
-			run_phase(NULL, n, (unsigned int)r, rep, phase, 0);
+		unsigned int expected = 0;
+
+		for (p = 0; p < phases; p++)
+			expected ^= run_phase(NULL, n,
+					      (unsigned int)r, rep, p, 0);
 
 		if (got != expected) {
 			fprintf(stderr,
-				"VERIFY FAIL node=%lu rep=%d row=%d phase=%d got=0x%08x expected=0x%08x\n",
-				node, rep, r, phase, got, expected);
+				"VERIFY FAIL node=%lu rep=%d row=%d got=0x%08x expected=0x%08x\n",
+				node, rep, r, got, expected);
 			if (++errors >= 10)
 				return errors;
 		}
 	}
 
 	if (errors == 0 && node == 0)
-		printf("VERIFY OK  rep=%d phase=%d (%d rows x %d cells, %u writes/cell/phase)\n",
-		       rep, phase, num_nodes, n, WRITES_PER_CELL);
+		printf("VERIFY OK  rep=%d (%d rows x %d cells, %d phases, %u writes/cell/phase)\n",
+		       rep, num_nodes, n, phases, WRITES_PER_CELL);
 	return errors;
 }
 
@@ -170,14 +173,18 @@ int main(int argc, char **argv)
 	}
 
 	for (rep = 1; rep <= reps; rep++) {
+		/* Zero once per rep, NOT per phase. Per-phase zeroing
+		 * touches every cape-tracked page, which traps through
+		 * userfaultfd → ~256K monitor round-trips that swamp the
+		 * actual work. cape_end's timestamp-based merge already
+		 * propagates per-cell writes across phases correctly. */
+		zero_state(n, num_nodes);
 		t0 = get_ms_of_day();
-		for (p = 0; p < phases; p++) {
-			zero_state(n, num_nodes);
+		for (p = 0; p < phases; p++)
 			write_stress_phase(n, rep, p);
-		}
 		t1 = get_ms_of_day();
 
-		if (verify(n, num_nodes, node, rep, phases - 1) != 0) {
+		if (verify(n, num_nodes, node, rep, phases) != 0) {
 			cape_finalize();
 			return 1;
 		}
