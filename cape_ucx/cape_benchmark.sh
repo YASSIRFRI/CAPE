@@ -33,9 +33,9 @@ REPS="${REPS:-5}"
 module purge
 module load GCCcore/14.2.0
 module load UCX/1.18.0-GCCcore-14.2.0
-# OpenMPI brings PMIx into scope — without it cape falls back to the
-# slow shared-FS bootstrap (~30 s stall at 32 nodes).
-module load OpenMPI/5.0.3-GCC-13.3.0 2>/dev/null || module load OpenMPI 2>/dev/null || true
+# PMIx is required for the fast in-memory bootstrap. Without it cape
+# falls back to the shared-FS bootstrap (~30 s stall at 32 nodes).
+module load PMIx/5.0.6-GCCcore-14.2.0 2>/dev/null || module load PMIx 2>/dev/null || true
 
 if [ -n "${EBROOTUCX:-}" ]; then
     UCX_INC="${EBROOTUCX}/include"; UCX_LIB="${EBROOTUCX}/lib"

@@ -34,6 +34,9 @@ CAPE_UCX_DIAG_SLOW_MS="${CAPE_UCX_DIAG_SLOW_MS:-1000}"
 module purge
 module load GCCcore/14.2.0
 module load UCX/1.18.0-GCCcore-14.2.0
+# PMIx is required for the fast in-memory bootstrap. Without it cape
+# falls back to the shared-FS bootstrap (~30 s stall at 32 nodes).
+module load PMIx/5.0.6-GCCcore-14.2.0 2>/dev/null || module load PMIx 2>/dev/null || true
 
 if [ -n "${EBROOTUCX:-}" ]; then
     UCX_INC="${EBROOTUCX}/include"; UCX_LIB="${EBROOTUCX}/lib"
