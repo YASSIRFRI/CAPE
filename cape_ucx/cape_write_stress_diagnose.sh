@@ -28,6 +28,8 @@ NODES="${NODES:-32}"
 REPS="${REPS:-5}"
 PROFILE="${PROFILE:-1}"
 UCX_RNDV_THRESH_VALUE="${UCX_RNDV_THRESH:-65536}"
+CAPE_UCX_DIAG="${CAPE_UCX_DIAG:-1}"
+CAPE_UCX_DIAG_SLOW_MS="${CAPE_UCX_DIAG_SLOW_MS:-1000}"
 
 module purge
 module load GCCcore/14.2.0
@@ -86,6 +88,8 @@ echo "impl,app,n,phases,nodes,rep,app_ms,job_id" > "${CSV}"
     echo "nodes=${NODES}"
     echo "reps=${REPS}"
     echo "profile=${PROFILE}"
+    echo "cape_ucx_diag=${CAPE_UCX_DIAG}"
+    echo "cape_ucx_diag_slow_ms=${CAPE_UCX_DIAG_SLOW_MS}"
     echo "srun_mpi_mode=${SRUN_MPI_MODE}"
     echo "ucx_inc=${UCX_INC}"
     echo "ucx_lib=${UCX_LIB}"
@@ -97,8 +101,11 @@ echo "impl,app,n,phases,nodes,rep,app_ms,job_id" > "${CSV}"
     echo "=== ucx_info -v ==="
     ucx_info -v 2>&1 || true
     echo ""
+    echo "=== selected ucx_info -c ==="
+    ucx_info -c 2>&1 | grep -E '^(UCX_(TLS|NET_DEVICES|SHM_DEVICES|RNDV|PROTO|IB_|RC_|UD_|REG_|MEMTYPE|MAX_RNDV|SOCKADDR|WIREUP))' || true
+    echo ""
     echo "=== selected environment ==="
-    env | sort | grep -E '^(UCX|SLURM|PMI|PMIX|OMPI|EBROOT|PROFILE|N=|PHASES=|REPS=|NODES=|SRUN_MPI_MODE=)' || true
+    env | sort | grep -E '^(CAPE_UCX|UCX|SLURM|PMI|PMIX|OMPI|EBROOT|PROFILE|N=|PHASES=|REPS=|NODES=|SRUN_MPI_MODE=)' || true
 } > "${META}" 2>&1
 
 srun --mpi="${SRUN_MPI_MODE}" --nodes="${NODES}" --ntasks="${NODES}" --ntasks-per-node=1 \
@@ -107,6 +114,7 @@ srun --mpi="${SRUN_MPI_MODE}" --nodes="${NODES}" --ntasks="${NODES}" --ntasks-pe
 echo "Diagnosing CAPE write_stress"
 echo "Nodes: ${NODES}  N: ${N}  Phases: ${PHASES}  Reps: ${REPS}  PROFILE=${PROFILE}  MPI mode: ${SRUN_MPI_MODE}"
 echo "UCX_RNDV_THRESH=${UCX_RNDV_THRESH_VALUE}"
+echo "CAPE_UCX_DIAG=${CAPE_UCX_DIAG}  CAPE_UCX_DIAG_SLOW_MS=${CAPE_UCX_DIAG_SLOW_MS}"
 echo "Results dir: ${RESULTS_DIR}"
 
 extract_profile_focus() {
@@ -115,6 +123,7 @@ extract_profile_focus() {
         echo ""
         echo "===== ${tag} ====="
         awk '
+            /^\[CAPE UCX DIAG\]/ ||
             /^\[CAPE PROFILE\] Node/ ||
             /allreduce    \(total\)/ ||
             /size exchange \(sendrecv\)/ ||
@@ -123,6 +132,17 @@ extract_profile_focus() {
             /other \(malloc\/free\/overhead\)/ ||
             /UCX recv wait/ ||
             /UCX send wait/ ||
+            /-- UCX init\/bootstrap --/ ||
+            /cape_init   \(total\)/ ||
+            /ucp_config_read/ ||
+            /ucp_init/ ||
+            /ucp_worker_create/ ||
+            /ucp_worker_get_address/ ||
+            /fs bootstrap total/ ||
+            /write_addr=/ ||
+            /pmix bootstrap total/ ||
+            /put_commit=/ ||
+            /ucp_ep_create total/ ||
             /allreduce arrival \(realtime\)/ ||
             /cape_end     \(wall, full\)/ ||
             /cape_sync_ckpt \(allreduce\+inj\)/ ||
@@ -140,6 +160,8 @@ run_one() {
     echo "[launch] ${tag}"
     local rc=0
     UCX_RNDV_THRESH="${UCX_RNDV_THRESH_VALUE}" \
+    CAPE_UCX_DIAG="${CAPE_UCX_DIAG}" \
+    CAPE_UCX_DIAG_SLOW_MS="${CAPE_UCX_DIAG_SLOW_MS}" \
     srun --exclusive --mpi="${SRUN_MPI_MODE}" --nodes="${NODES}" --ntasks="${NODES}" --ntasks-per-node=1 \
          "${BIN}" "${N}" "${PHASES}" 1 >>"${log}" 2>&1 || rc=$?
     extract_profile_focus "${tag}" "${log}"

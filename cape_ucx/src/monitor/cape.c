@@ -14,6 +14,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <time.h>
+#include <stdarg.h>
 #ifdef CAPE_COMPRESS
 #include <zlib.h>
 #endif
@@ -49,6 +50,21 @@ static double prof_merge_ckpt_ns      = 0.0;
 static double prof_inject_ckpt_ns     = 0.0;
 static double prof_ucx_recv_wait_ns   = 0.0;
 static double prof_ucx_send_wait_ns   = 0.0;
+static double prof_cape_init_ns       = 0.0;
+static double prof_ucx_config_ns      = 0.0;
+static double prof_ucp_init_ns        = 0.0;
+static double prof_ucp_worker_ns      = 0.0;
+static double prof_ucp_worker_addr_ns = 0.0;
+static double prof_ucx_bootstrap_fs_ns        = 0.0;
+static double prof_ucx_bootstrap_fs_addr_ns   = 0.0;
+static double prof_ucx_bootstrap_fs_rdy_ns    = 0.0;
+static double prof_ucx_bootstrap_fs_wait_ns   = 0.0;
+static double prof_ucx_bootstrap_fs_read_ns   = 0.0;
+static double prof_ucx_bootstrap_ep_create_ns = 0.0;
+static double prof_ucx_bootstrap_pmix_ns      = 0.0;
+static double prof_ucx_bootstrap_pmix_put_ns  = 0.0;
+static double prof_ucx_bootstrap_pmix_fence_ns = 0.0;
+static double prof_ucx_bootstrap_pmix_get_ns  = 0.0;
 
 static unsigned long prof_ckpt_start_count    = 0;
 static unsigned long prof_generate_ckpt_count = 0;
@@ -57,6 +73,8 @@ static unsigned long prof_inject_ckpt_count   = 0;
 static unsigned long prof_sendrecv_count      = 0;
 static unsigned long prof_bytes_sent          = 0;
 static unsigned long prof_bytes_received      = 0;
+static unsigned long prof_ucx_bootstrap_ep_create_count = 0;
+static unsigned long prof_ucx_bootstrap_fs_wait_iters   = 0;
 
 /* ---- Wider region profiling ------------------------------------------ */
 static double prof_cape_begin_ns      = 0.0;
@@ -257,6 +275,77 @@ char buffer[4096];
 char __ckpt_data_file[100];
 int __ckpt_data_size = 0;
 
+#ifdef CAPE_PROFILE
+static int cape_ucx_diag_configured = 0;
+static int cape_ucx_diag_enabled = 0;
+static double cape_ucx_diag_slow_ns = 1000.0 * 1e6;
+
+static const char *cape_env_or_dash(const char *name)
+{
+	const char *value = getenv(name);
+	return (value && value[0]) ? value : "-";
+}
+
+static void cape_ucx_diag_configure(void)
+{
+	const char *enabled;
+	const char *slow_ms;
+	double ms;
+
+	if (cape_ucx_diag_configured)
+		return;
+	cape_ucx_diag_configured = 1;
+
+	enabled = getenv("CAPE_UCX_DIAG");
+	if (enabled && enabled[0] &&
+	    strcmp(enabled, "0") != 0 &&
+	    strcmp(enabled, "false") != 0 &&
+	    strcmp(enabled, "no") != 0) {
+		cape_ucx_diag_enabled = 1;
+	}
+
+	slow_ms = getenv("CAPE_UCX_DIAG_SLOW_MS");
+	if (slow_ms && slow_ms[0]) {
+		ms = atof(slow_ms);
+		if (ms > 0.0)
+			cape_ucx_diag_slow_ns = ms * 1e6;
+	}
+}
+
+static int cape_ucx_diag_on(void)
+{
+	cape_ucx_diag_configure();
+	return cape_ucx_diag_enabled;
+}
+
+static int cape_ucx_diag_is_slow(double ns)
+{
+	cape_ucx_diag_configure();
+	return cape_ucx_diag_enabled && ns >= cape_ucx_diag_slow_ns;
+}
+
+static const char *cape_ucx_diag_phase_name(int phase)
+{
+	if (phase == CAPE_SR_PHASE_SIZE)
+		return "size";
+	if (phase == CAPE_SR_PHASE_DATA)
+		return "data";
+	return "none";
+}
+
+static void cape_ucx_diag_log(const char *fmt, ...)
+{
+	va_list ap;
+
+	if (!cape_ucx_diag_on())
+		return;
+	fprintf(stderr, "[CAPE UCX DIAG] node=%d/%d ", __node__, __nnodes__);
+	va_start(ap, fmt);
+	vfprintf(stderr, fmt, ap);
+	va_end(ap);
+}
+#endif
+
 /**********UCX + PMIx State ********************************************/
 #ifdef USE_PMIX
 static pmix_proc_t   pmix_myproc;
@@ -399,10 +488,39 @@ static void cape_ucx_sendrecv(
     PROF_START(_t_recv_wait);
     cape_ucx_wait(rreq, recvlen, 1, &matched_tag);
     PROF_RECORD_RECV_WAIT(_recv_wait_ns, _t_recv_wait);
+#ifdef CAPE_PROFILE
+    if (cape_ucx_diag_is_slow(_recv_wait_ns)) {
+        cape_ucx_diag_log(
+            "slow_recv_wait_ms=%.3f phase=%s step=%d partner=%d epoch=%u "
+            "dest=%d src=%d token=0x%x sendlen=%zu recvlen=%zu "
+            "recv_tag=0x%lx matched_tag=0x%lx\n",
+            _recv_wait_ns / 1e6,
+            cape_ucx_diag_phase_name(prof_sr_phase),
+            prof_sr_step, prof_sr_partner, prof_sr_epoch,
+            dest, src, (unsigned)token, sendlen, recvlen,
+            (unsigned long)recv_tag, (unsigned long)matched_tag);
+    }
+#endif
 
     PROF_START(_t_send_wait);
     cape_ucx_wait(sreq, 0, 0, NULL);
+#ifdef CAPE_PROFILE
+    double _send_wait_ns = cape_get_ns() - _t_send_wait;
+    prof_ucx_send_wait_ns += _send_wait_ns;
+    if (cape_ucx_diag_is_slow(_send_wait_ns)) {
+        cape_ucx_diag_log(
+            "slow_send_wait_ms=%.3f phase=%s step=%d partner=%d epoch=%u "
+            "dest=%d src=%d token=0x%x sendlen=%zu recvlen=%zu "
+            "send_tag=0x%lx\n",
+            _send_wait_ns / 1e6,
+            cape_ucx_diag_phase_name(prof_sr_phase),
+            prof_sr_step, prof_sr_partner, prof_sr_epoch,
+            dest, src, (unsigned)token, sendlen, recvlen,
+            (unsigned long)send_tag);
+    }
+#else
     PROF_RECORD_SEND_WAIT(_t_send_wait);
+#endif
 
     PROF_INC(prof_sendrecv_count);
     PROF_ADD(prof_bytes_sent, sendlen);
@@ -2502,12 +2620,18 @@ static void ucx_exchange_addresses_via_fs(const char *dir, const char *jobid,
 {
 	char path[512];
 	FILE *f;
+#ifdef CAPE_PROFILE
+	double _fs_total_start = cape_get_ns();
+#endif
 
 	const size_t expected_size = sizeof(size_t) + local_addr_len;
 
 	/* Write own address (fsync before signaling ready, otherwise peers on a
 	 * network FS may see the rdy flag before our addr bytes are visible and
 	 * read garbage as the peer length/contents). */
+#ifdef CAPE_PROFILE
+	double _addr_write_start = cape_get_ns();
+#endif
 	snprintf(path, sizeof(path), "%s/cape_ucx_%s_addr_%d", dir, jobid, __node__);
 	f = fopen(path, "wb");
 	if (!f) { perror("CAPE UCX: write addr file"); exit(1); }
@@ -2518,26 +2642,70 @@ static void ucx_exchange_addresses_via_fs(const char *dir, const char *jobid,
 	fflush(f);
 	fsync(fileno(f));
 	fclose(f);
+#ifdef CAPE_PROFILE
+	double _addr_write_ns = cape_get_ns() - _addr_write_start;
+	prof_ucx_bootstrap_fs_addr_ns += _addr_write_ns;
+	if (cape_ucx_diag_is_slow(_addr_write_ns)) {
+		cape_ucx_diag_log("fs_write_addr_ms=%.3f dir=%s job=%s bytes=%zu\n",
+		                  _addr_write_ns / 1e6, dir, jobid, expected_size);
+	}
+#endif
 
 	/* Signal ready (only after the addr bytes are durable). */
+#ifdef CAPE_PROFILE
+	double _rdy_write_start = cape_get_ns();
+#endif
 	snprintf(path, sizeof(path), "%s/cape_ucx_%s_rdy_%d", dir, jobid, __node__);
 	f = fopen(path, "w");
 	if (!f) { perror("CAPE UCX: write rdy file"); exit(1); }
 	fflush(f);
 	fsync(fileno(f));
 	fclose(f);
+#ifdef CAPE_PROFILE
+	double _rdy_write_ns = cape_get_ns() - _rdy_write_start;
+	prof_ucx_bootstrap_fs_rdy_ns += _rdy_write_ns;
+	if (cape_ucx_diag_is_slow(_rdy_write_ns)) {
+		cape_ucx_diag_log("fs_write_rdy_ms=%.3f dir=%s job=%s\n",
+		                  _rdy_write_ns / 1e6, dir, jobid);
+	}
+#endif
 
 	/* Wait for all peers' rdy flags */
+#ifdef CAPE_PROFILE
+	double _wait_all_start = cape_get_ns();
+#endif
 	for (int i = 0; i < __nnodes__; i++) {
+#ifdef CAPE_PROFILE
+		double _wait_peer_start = cape_get_ns();
+		unsigned long _wait_peer_iters = 0;
+#endif
 		snprintf(path, sizeof(path), "%s/cape_ucx_%s_rdy_%d", dir, jobid, i);
-		while (access(path, F_OK) != 0)
+		while (access(path, F_OK) != 0) {
+#ifdef CAPE_PROFILE
+			_wait_peer_iters++;
+			prof_ucx_bootstrap_fs_wait_iters++;
+#endif
 			usleep(10000); /* 10 ms */
+		}
+#ifdef CAPE_PROFILE
+		double _wait_peer_ns = cape_get_ns() - _wait_peer_start;
+		if (cape_ucx_diag_is_slow(_wait_peer_ns)) {
+			cape_ucx_diag_log("fs_wait_rdy_ms=%.3f peer=%d iters=%lu path=%s\n",
+			                  _wait_peer_ns / 1e6, i, _wait_peer_iters, path);
+		}
+#endif
 	}
+#ifdef CAPE_PROFILE
+	prof_ucx_bootstrap_fs_wait_ns += cape_get_ns() - _wait_all_start;
+#endif
 
 	/* Create endpoints */
 	ucs_status_t st;
 	ucp_endpoints = malloc(__nnodes__ * sizeof(ucp_ep_h));
 	for (int i = 0; i < __nnodes__; i++) {
+#ifdef CAPE_PROFILE
+		double _read_start = cape_get_ns();
+#endif
 		snprintf(path, sizeof(path), "%s/cape_ucx_%s_addr_%d", dir, jobid, i);
 
 		/* On a network FS the addr file may exist but not yet contain all
@@ -2586,12 +2754,32 @@ static void ucx_exchange_addresses_via_fs(const char *dir, const char *jobid,
 			got += n;
 		}
 		fclose(f);
+#ifdef CAPE_PROFILE
+		double _read_ns = cape_get_ns() - _read_start;
+		prof_ucx_bootstrap_fs_read_ns += _read_ns;
+		if (cape_ucx_diag_is_slow(_read_ns)) {
+			cape_ucx_diag_log("fs_read_addr_ms=%.3f peer=%d peer_len=%zu path=%s\n",
+			                  _read_ns / 1e6, i, peer_len, path);
+		}
+#endif
 
 		ucp_ep_params_t ep_params;
 		memset(&ep_params, 0, sizeof(ep_params));
 		ep_params.field_mask = UCP_EP_PARAM_FIELD_REMOTE_ADDRESS;
 		ep_params.address    = peer_addr;
+#ifdef CAPE_PROFILE
+		double _ep_start = cape_get_ns();
+#endif
 		st = ucp_ep_create(ucp_worker, &ep_params, &ucp_endpoints[i]);
+#ifdef CAPE_PROFILE
+		double _ep_ns = cape_get_ns() - _ep_start;
+		prof_ucx_bootstrap_ep_create_ns += _ep_ns;
+		prof_ucx_bootstrap_ep_create_count++;
+		if (cape_ucx_diag_is_slow(_ep_ns)) {
+			cape_ucx_diag_log("ucp_ep_create_ms=%.3f peer=%d peer_len=%zu local_len=%zu\n",
+			                  _ep_ns / 1e6, i, peer_len, local_addr_len);
+		}
+#endif
 		free(peer_addr);
 		if (st != UCS_OK) {
 			fprintf(stderr, "CAPE UCX: ucp_ep_create(%d) failed: %s peer_len=%zu local_len=%zu\n",
@@ -2599,9 +2787,28 @@ static void ucx_exchange_addresses_via_fs(const char *dir, const char *jobid,
 			exit(1);
 		}
 	}
+#ifdef CAPE_PROFILE
+	double _fs_total_ns = cape_get_ns() - _fs_total_start;
+	prof_ucx_bootstrap_fs_ns += _fs_total_ns;
+	cape_ucx_diag_log(
+	    "fs_bootstrap_total_ms=%.3f write_addr_ms=%.3f write_rdy_ms=%.3f "
+	    "wait_rdy_ms=%.3f read_addr_ms=%.3f ep_create_ms=%.3f wait_iters=%lu dir=%s job=%s\n",
+	    _fs_total_ns / 1e6,
+	    prof_ucx_bootstrap_fs_addr_ns / 1e6,
+	    prof_ucx_bootstrap_fs_rdy_ns / 1e6,
+	    prof_ucx_bootstrap_fs_wait_ns / 1e6,
+	    prof_ucx_bootstrap_fs_read_ns / 1e6,
+	    prof_ucx_bootstrap_ep_create_ns / 1e6,
+	    prof_ucx_bootstrap_fs_wait_iters,
+	    dir, jobid);
+#endif
 }
 
 void cape_init(){
+#ifdef CAPE_PROFILE
+	double _cape_init_start = cape_get_ns();
+	cape_ucx_diag_configure();
+#endif
 	/* Keep default CAPE messages on eager path unless user explicitly overrides.
 	 * This avoids rendezvous metadata appearing in the receive buffer on some
 	 * UCX/IB setups when checkpoint payload is around 10KB. */
@@ -2652,6 +2859,19 @@ void cape_init(){
 	__node__   = atoi(rank_str);
 	__nnodes__ = atoi(size_str);
 #endif
+#ifdef CAPE_PROFILE
+	cape_ucx_diag_log(
+	    "init_rank rank=%d size=%d UCX_RNDV_THRESH=%s UCX_TLS=%s "
+	    "UCX_NET_DEVICES=%s UCX_IB_REG_METHODS=%s UCX_REG_NONBLOCK_MEM_TYPES=%s "
+	    "UCX_PROTO_ENABLE=%s\n",
+	    __node__, __nnodes__,
+	    cape_env_or_dash("UCX_RNDV_THRESH"),
+	    cape_env_or_dash("UCX_TLS"),
+	    cape_env_or_dash("UCX_NET_DEVICES"),
+	    cape_env_or_dash("UCX_IB_REG_METHODS"),
+	    cape_env_or_dash("UCX_REG_NONBLOCK_MEM_TYPES"),
+	    cape_env_or_dash("UCX_PROTO_ENABLE"));
+#endif
 
 	/* ------------------------------------------------------------------
 	 * 2. Initialise UCX context.
@@ -2666,8 +2886,24 @@ void cape_init(){
 	ucp_params.request_init = cape_ucx_req_init;
 
 	ucp_config_t *config;
+#ifdef CAPE_PROFILE
+	double _config_start = cape_get_ns();
+#endif
 	ucp_config_read(NULL, NULL, &config);
+#ifdef CAPE_PROFILE
+	double _config_ns = cape_get_ns() - _config_start;
+	prof_ucx_config_ns += _config_ns;
+#endif
+#ifdef CAPE_PROFILE
+	double _ucp_init_start = cape_get_ns();
+#endif
 	ucs_status_t st = ucp_init(&ucp_params, config, &ucp_context);
+#ifdef CAPE_PROFILE
+	double _ucp_init_ns = cape_get_ns() - _ucp_init_start;
+	prof_ucp_init_ns += _ucp_init_ns;
+	cape_ucx_diag_log("ucp_config_ms=%.3f ucp_init_ms=%.3f\n",
+	                  _config_ns / 1e6, _ucp_init_ns / 1e6);
+#endif
 	ucp_config_release(config);
 	if (st != UCS_OK) {
 		fprintf(stderr, "CAPE UCX: ucp_init failed: %s\n",
@@ -2682,7 +2918,15 @@ void cape_init(){
 	memset(&wp, 0, sizeof(wp));
 	wp.field_mask  = UCP_WORKER_PARAM_FIELD_THREAD_MODE;
 	wp.thread_mode = UCS_THREAD_MODE_SINGLE;
+#ifdef CAPE_PROFILE
+	double _worker_start = cape_get_ns();
+#endif
 	st = ucp_worker_create(ucp_context, &wp, &ucp_worker);
+#ifdef CAPE_PROFILE
+	double _worker_ns = cape_get_ns() - _worker_start;
+	prof_ucp_worker_ns += _worker_ns;
+	cape_ucx_diag_log("ucp_worker_create_ms=%.3f\n", _worker_ns / 1e6);
+#endif
 	if (st != UCS_OK) {
 		fprintf(stderr, "CAPE UCX: ucp_worker_create failed: %s\n",
 		        ucs_status_string(st));
@@ -2696,9 +2940,21 @@ void cape_init(){
 	 * ------------------------------------------------------------------ */
 	ucp_address_t *local_addr;
 	size_t         local_addr_len;
+#ifdef CAPE_PROFILE
+	double _worker_addr_start = cape_get_ns();
+#endif
 	ucp_worker_get_address(ucp_worker, &local_addr, &local_addr_len);
+#ifdef CAPE_PROFILE
+	double _worker_addr_ns = cape_get_ns() - _worker_addr_start;
+	prof_ucp_worker_addr_ns += _worker_addr_ns;
+	cape_ucx_diag_log("ucp_worker_get_address_ms=%.3f local_addr_len=%zu\n",
+	                  _worker_addr_ns / 1e6, local_addr_len);
+#endif
 
 #ifdef USE_PMIX
+#ifdef CAPE_PROFILE
+	double _pmix_bootstrap_start = cape_get_ns();
+#endif
 	char pmix_key[64];
 	snprintf(pmix_key, sizeof(pmix_key), "cape_ucx_addr_%d", __node__);
 
@@ -2708,6 +2964,9 @@ void cape_init(){
 	kval.data.bo.bytes = (char *)local_addr;
 	kval.data.bo.size  = local_addr_len;
 
+#ifdef CAPE_PROFILE
+	double _pmix_put_start = cape_get_ns();
+#endif
 	pst = PMIx_Put(PMIX_GLOBAL, pmix_key, &kval);
 	if (pst != PMIX_SUCCESS) {
 		fprintf(stderr, "CAPE UCX: PMIx_Put failed: %s\n",
@@ -2715,7 +2974,14 @@ void cape_init(){
 		exit(1);
 	}
 	PMIx_Commit();
+#ifdef CAPE_PROFILE
+	prof_ucx_bootstrap_pmix_put_ns += cape_get_ns() - _pmix_put_start;
+	double _pmix_fence_start = cape_get_ns();
+#endif
 	PMIx_Fence(&wildcard, 1, NULL, 0);
+#ifdef CAPE_PROFILE
+	prof_ucx_bootstrap_pmix_fence_ns += cape_get_ns() - _pmix_fence_start;
+#endif
 
 	ucp_endpoints = malloc(__nnodes__ * sizeof(ucp_ep_h));
 	for (int i = 0; i < __nnodes__; i++) {
@@ -2726,7 +2992,13 @@ void cape_init(){
 
 		snprintf(pmix_key, sizeof(pmix_key), "cape_ucx_addr_%d", i);
 		pmix_value_t *peer_val;
+#ifdef CAPE_PROFILE
+		double _pmix_get_start = cape_get_ns();
+#endif
 		pst = PMIx_Get(&peer, pmix_key, NULL, 0, &peer_val);
+#ifdef CAPE_PROFILE
+		prof_ucx_bootstrap_pmix_get_ns += cape_get_ns() - _pmix_get_start;
+#endif
 		if (pst != PMIX_SUCCESS) {
 			fprintf(stderr, "CAPE UCX: PMIx_Get(addr, rank=%d) failed: %s\n",
 			        i, PMIx_Error_string(pst));
@@ -2736,7 +3008,19 @@ void cape_init(){
 		memset(&ep_params, 0, sizeof(ep_params));
 		ep_params.field_mask = UCP_EP_PARAM_FIELD_REMOTE_ADDRESS;
 		ep_params.address    = (ucp_address_t *)peer_val->data.bo.bytes;
+#ifdef CAPE_PROFILE
+		double _ep_start = cape_get_ns();
+#endif
 		st = ucp_ep_create(ucp_worker, &ep_params, &ucp_endpoints[i]);
+#ifdef CAPE_PROFILE
+		double _ep_ns = cape_get_ns() - _ep_start;
+		prof_ucx_bootstrap_ep_create_ns += _ep_ns;
+		prof_ucx_bootstrap_ep_create_count++;
+		if (cape_ucx_diag_is_slow(_ep_ns)) {
+			cape_ucx_diag_log("ucp_ep_create_ms=%.3f peer=%d peer_len=%zu local_len=%zu\n",
+			                  _ep_ns / 1e6, i, peer_val->data.bo.size, local_addr_len);
+		}
+#endif
 		PMIX_VALUE_RELEASE(peer_val);
 		if (st != UCS_OK) {
 			fprintf(stderr, "CAPE UCX: ucp_ep_create(%d) failed: %s\n",
@@ -2744,6 +3028,16 @@ void cape_init(){
 			exit(1);
 		}
 	}
+#ifdef CAPE_PROFILE
+	prof_ucx_bootstrap_pmix_ns += cape_get_ns() - _pmix_bootstrap_start;
+	cape_ucx_diag_log(
+	    "pmix_bootstrap_total_ms=%.3f put_commit_ms=%.3f fence_ms=%.3f get_ms=%.3f ep_create_ms=%.3f\n",
+	    prof_ucx_bootstrap_pmix_ns / 1e6,
+	    prof_ucx_bootstrap_pmix_put_ns / 1e6,
+	    prof_ucx_bootstrap_pmix_fence_ns / 1e6,
+	    prof_ucx_bootstrap_pmix_get_ns / 1e6,
+	    prof_ucx_bootstrap_ep_create_ns / 1e6);
+#endif
 #else
 	/* Use shared filesystem for rendezvous.
 	 * Namespace files by SLURM_JOB_ID + SLURM_STEP_ID so concurrent srun
@@ -2762,6 +3056,10 @@ void cape_init(){
 #endif
 
 	ucp_worker_release_address(ucp_worker, local_addr);
+#ifdef CAPE_PROFILE
+	prof_cape_init_ns += cape_get_ns() - _cape_init_start;
+	cape_ucx_diag_log("cape_init_total_ms=%.3f\n", prof_cape_init_ns / 1e6);
+#endif
 }
 
 /*
@@ -2794,6 +3092,17 @@ void cape_finalize(){
 	    "    other (malloc/free/overhead) : %10.3f ms\n"
 	    "  UCX recv wait (network lat)   : %10.3f ms  (x%lu sendrecvs)\n"
 	    "  UCX send wait (send compl)    : %10.3f ms\n"
+	    "  -- UCX init/bootstrap --\n"
+	    "  cape_init   (total)            : %10.3f ms\n"
+	    "    ucp_config_read              : %10.3f ms\n"
+	    "    ucp_init                     : %10.3f ms\n"
+	    "    ucp_worker_create            : %10.3f ms\n"
+	    "    ucp_worker_get_address       : %10.3f ms\n"
+	    "    fs bootstrap total           : %10.3f ms\n"
+	    "      write_addr=%10.3f  write_rdy=%10.3f  wait_rdy=%10.3f  read_addr=%10.3f  wait_iters=%lu\n"
+	    "    pmix bootstrap total         : %10.3f ms\n"
+	    "      put_commit=%10.3f  fence=%10.3f  get=%10.3f\n"
+	    "    ucp_ep_create total          : %10.3f ms  (x%lu)\n"
 	    "  allreduce arrival (realtime)  : first=%13.3f ms  last=%13.3f ms  span=%10.3f ms  (x%lu)\n"
 	    "  Data transferred: sent=%lu B  recv=%lu B\n"
 	    "  -- wider regions --\n"
@@ -2816,6 +3125,23 @@ void cape_finalize(){
 	    allreduce_other_ns      / 1e6,
 	    prof_ucx_recv_wait_ns  / 1e6, prof_sendrecv_count,
 	    prof_ucx_send_wait_ns  / 1e6,
+	    prof_cape_init_ns / 1e6,
+	    prof_ucx_config_ns / 1e6,
+	    prof_ucp_init_ns / 1e6,
+	    prof_ucp_worker_ns / 1e6,
+	    prof_ucp_worker_addr_ns / 1e6,
+	    prof_ucx_bootstrap_fs_ns / 1e6,
+	    prof_ucx_bootstrap_fs_addr_ns / 1e6,
+	    prof_ucx_bootstrap_fs_rdy_ns / 1e6,
+	    prof_ucx_bootstrap_fs_wait_ns / 1e6,
+	    prof_ucx_bootstrap_fs_read_ns / 1e6,
+	    prof_ucx_bootstrap_fs_wait_iters,
+	    prof_ucx_bootstrap_pmix_ns / 1e6,
+	    prof_ucx_bootstrap_pmix_put_ns / 1e6,
+	    prof_ucx_bootstrap_pmix_fence_ns / 1e6,
+	    prof_ucx_bootstrap_pmix_get_ns / 1e6,
+	    prof_ucx_bootstrap_ep_create_ns / 1e6,
+	    prof_ucx_bootstrap_ep_create_count,
 	    prof_allreduce_arrival_first_rt_ns / 1e6,
 	    prof_allreduce_arrival_last_rt_ns / 1e6,
 	    arrival_span_ms, prof_allreduce_arrival_count,
