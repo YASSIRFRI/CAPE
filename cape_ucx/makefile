@@ -54,6 +54,9 @@ cape_gradient:
 cape_memwrite:
 	$(COMPILE) $(C_FOLDER)/apps/cape_memwrite.c -o $(EXE_FOLDER)/cape_memwrite $(LDFLAGS)
 
+cape_write_stress:
+	$(COMPILE) $(C_FOLDER)/apps/cape_write_stress.c -o $(EXE_FOLDER)/cape_write_stress $(LDFLAGS)
+
 cape_mamult2d:
 	$(COMPILE) $(C_FOLDER)/apps/cape_mamult2d.c -o $(EXE_FOLDER)/cape_mamult2d $(LDFLAGS)
 
@@ -132,7 +135,7 @@ apps: cape_mamult cape_mamult2d cape_matvec cape_gradient cape_memwrite \
 # make-time and point gcc at its `ld` with -B<dir>/.
 # Only run binutils discovery (and print the [dickpt] info lines) when an
 # actual dickpt target is being built. Cape targets don't need this.
-DICKPT_TARGETS := dickpt dickpt_monitor dickpt_mul_manual dickpt_matvec_manual dickpt_gradient_manual dickpt_memwrite_manual
+DICKPT_TARGETS := dickpt dickpt_monitor dickpt_mul_manual dickpt_matvec_manual dickpt_gradient_manual dickpt_memwrite_manual dickpt_write_stress
 ifneq ($(filter $(DICKPT_TARGETS),$(MAKECMDGOALS)),)
 ifneq ($(EBROOTBINUTILS),)
 DICKPT_BINUTILS_BIN := $(EBROOTBINUTILS)/bin
@@ -179,8 +182,12 @@ dickpt_memwrite_manual:
 	@mkdir -p $(EXE_FOLDER)
 	$(DICKPT_COMPILE) $(C_FOLDER)/apps/cape_memwrite_manual.c $(DICKPT_RUNTIME) -o $(EXE_FOLDER)/dickpt_memwrite_manual
 
+dickpt_write_stress:
+	@mkdir -p $(EXE_FOLDER)
+	$(DICKPT_COMPILE) $(C_FOLDER)/apps/cape_write_stress_manual.c $(DICKPT_RUNTIME) -o $(EXE_FOLDER)/dickpt_write_stress
+
 # Build monitor + all dickpt apps
-dickpt: dickpt_monitor dickpt_mul_manual dickpt_matvec_manual dickpt_gradient_manual dickpt_memwrite_manual
+dickpt: dickpt_monitor dickpt_mul_manual dickpt_matvec_manual dickpt_gradient_manual dickpt_memwrite_manual dickpt_write_stress
 
 # ── Clean ─────────────────────────────────────────────────────────────────────
 cleanall:
@@ -189,7 +196,9 @@ cleanall:
 .PHONY: all apps cleanall \
         dickpt dickpt_monitor dickpt_mul_manual \
         dickpt_matvec_manual dickpt_gradient_manual dickpt_memwrite_manual \
+        dickpt_write_stress \
         cape_mamult cape_mamult2d cape_matvec cape_gradient cape_memwrite \
+        cape_write_stress \
         cape_pi cape_prime cape_prime_number \
         cape_reduction cape_for cape_for_nowait cape_parallel_for \
         cape_vector1 cape_vector2 cape_critical cape_critical2 omp_gradient \
