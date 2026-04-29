@@ -1051,6 +1051,12 @@ FILE *generate_checkpoint(VarList *vlist,
 	//open checkpoint file
 	timestamp = tsp;
 	stream = open_memstream(&after_ckpt, &after_ckpt_size);
+	/* open_memstream defaults to a tiny (~1 KB) stdio buffer and calls
+	 * its cookie_write (which realloc+memcpys the user buffer) every
+	 * time that fills. Bump the stdio buffer way up so cookie_write
+	 * fires once per ~4 MB instead of thousands of times — kills the
+	 * dominant cost of generate_checkpoint at scale. */
+	setvbuf(stream, NULL, _IOFBF, 4 * 1024 * 1024);
 	
 	//write time stamp into checkpoint file
 	fwrite(&timestamp, sizeof(unsigned long), 1, stream);
@@ -1236,11 +1242,16 @@ int merge_data(char *s1, unsigned int pos_s1, unsigned size_s1,
 	while ((p1 < end_s1) && (p2 < end_s2)){
 		//printf("\n Node %ld: (0x%lx - %ld ) + (0x%lx - %ld)", __node__, addr1, len1, addr2, len2) ;
 		if (addr1 <= addr2){
-			fwrite(&addr1, sizeof(long), 1, after_ckpt_stream);
-			fwrite(&len1, sizeof(unsigned int), 1, after_ckpt_stream);
+			/* The source already stores [addr:8][len:4][data] in
+			 * one contiguous chunk at s1 + p1 - 12, so a single
+			 * fwrite of 12 + len bytes replaces three. Cuts the
+			 * stdio call count (and lock churn) by ~3x — the
+			 * dominant cost at scale. */
 			if (len1 > (end_s1 - p1))
 				return -1;
-			fwrite(s1 + p1, len1, 1, after_ckpt_stream);
+			fwrite(s1 + p1 - (sizeof(long) + sizeof(unsigned int)),
+			       sizeof(long) + sizeof(unsigned int) + len1, 1,
+			       after_ckpt_stream);
 			p1 += len1;
 			//printf("\n Node %ld: Write: 0x%lx  : %ld ", __node__, addr1, len1) ;
 			//S1: [-----------)  
@@ -1280,11 +1291,11 @@ int merge_data(char *s1, unsigned int pos_s1, unsigned size_s1,
 			//S1:                      [-----------)         [--------)
 			//S2:        [--------)		    -------[------)	
 			if ((addr2 + len2) < addr1) {
-				fwrite(&addr2, sizeof(long), 1, after_ckpt_stream);
-				fwrite(&len2, sizeof(unsigned int), 1, after_ckpt_stream);
 				if (len2 > (end_s2 - p2))
 					return -1;
-				fwrite(s2 + p2, len2, 1, after_ckpt_stream);
+				fwrite(s2 + p2 - (sizeof(long) + sizeof(unsigned int)),
+				       sizeof(long) + sizeof(unsigned int) + len2, 1,
+				       after_ckpt_stream);
 				//printf("\n Node %ld: Write: 0x%lx : %ld ", __node__, addr2, len2) ;
 				p2 += len2;					
 				if (p2 >= end_s2) break;
@@ -1299,11 +1310,16 @@ int merge_data(char *s1, unsigned int pos_s1, unsigned size_s1,
 			//S1:       [-----------)        [--------)
 			//S2:       	 -------[--------)--------[------)	
 			}else {
-				len = addr1 - addr2;				
-				fwrite(&addr2, sizeof(long), 1, after_ckpt_stream);
-				fwrite(&len, sizeof(unsigned int), 1, after_ckpt_stream);
+				/* Partial entry: header has computed len, not
+				 * the original len2. Pack header on stack and
+				 * issue 2 writes instead of 3. */
+				unsigned char _hdr[sizeof(long) + sizeof(unsigned int)];
+				len = addr1 - addr2;
+				memcpy(_hdr, &addr2, sizeof(long));
+				memcpy(_hdr + sizeof(long), &len, sizeof(unsigned int));
 				if (len > (end_s2 - p2))
 					return -1;
+				fwrite(_hdr, sizeof(_hdr), 1, after_ckpt_stream);
 				fwrite(s2 + p2, len, 1, after_ckpt_stream);
 				//printf("\n Node %ld: Write: 0x%lx : %ld ", __node__, addr2, len2) ;
 				p2 += len;
@@ -1313,51 +1329,32 @@ int merge_data(char *s1, unsigned int pos_s1, unsigned size_s1,
 			}
 		}	
 	}	
-	//Merge the rest part
+	/* Merge the rest part — once one side is exhausted, every remaining
+	 * entry from the other side is passed through unchanged. s1 is
+	 * never modified in-place, so we can bulk-copy [header + all
+	 * subsequent entries] in one fwrite. s2 may carry a residual header
+	 * (set by the partial-entry else branch above) that doesn't match
+	 * what's in the source buffer, so write the current header from
+	 * locals and bulk-copy only the unmodified tail. */
 	if (p1 < end_s1){
-		fwrite(&addr1, sizeof(long), 1, after_ckpt_stream);
-		fwrite(&len1, sizeof(unsigned int), 1, after_ckpt_stream);
-		if (len1 > (end_s1 - p1))
-			return -1;
-		fwrite(s1 + p1, len1, 1, after_ckpt_stream);
-		p1 += len1;
-	}	
-	while (p1 < end_s1){
-		if ((end_s1 - p1) < (sizeof(long) + sizeof(unsigned int)))
-			return -1;
-		addr1 = *(long *) (s1 + p1 );
-		p1 += sizeof(long);
-		len1 = *(unsigned int *) (s1 + p1) ;
-		p1 += sizeof(unsigned int);
-		if (len1 > (end_s1 - p1))
-			return -1;
-		fwrite(&addr1, sizeof(long), 1, after_ckpt_stream);
-		fwrite(&len1, sizeof(unsigned int), 1, after_ckpt_stream);
-		fwrite(s1 + p1, len1, 1, after_ckpt_stream);
-		p1 += len1;		
+		fwrite(s1 + p1 - (sizeof(long) + sizeof(unsigned int)),
+		       (end_s1 - p1) + (sizeof(long) + sizeof(unsigned int)),
+		       1, after_ckpt_stream);
+		p1 = end_s1;
 	}
-	
 	if (p2 < end_s2){
-		fwrite(&addr2, sizeof(long), 1, after_ckpt_stream);
-		fwrite(&len2, sizeof(unsigned int), 1, after_ckpt_stream);
+		unsigned char _hdr[sizeof(long) + sizeof(unsigned int)];
 		if (len2 > (end_s2 - p2))
 			return -1;
+		memcpy(_hdr, &addr2, sizeof(long));
+		memcpy(_hdr + sizeof(long), &len2, sizeof(unsigned int));
+		fwrite(_hdr, sizeof(_hdr), 1, after_ckpt_stream);
 		fwrite(s2 + p2, len2, 1, after_ckpt_stream);
 		p2 += len2;
-	}	
-	while (p2 < end_s2){
-		if ((end_s2 - p2) < (sizeof(long) + sizeof(unsigned int)))
-			return -1;
-		addr2 = *(long *) (s2 + p2 );
-		p2 += sizeof(long);
-		len2 = *(unsigned int *) (s2 + p2) ;
-		p2 += sizeof(unsigned int);
-		if (len2 > (end_s2 - p2))
-			return -1;
-		fwrite(&addr2, sizeof(long), 1, after_ckpt_stream);
-		fwrite(&len2, sizeof(unsigned int), 1, after_ckpt_stream);
-		fwrite(s2 + p2, len2, 1, after_ckpt_stream);
-		p2 += len2;
+		if (p2 < end_s2) {
+			fwrite(s2 + p2, end_s2 - p2, 1, after_ckpt_stream);
+			p2 = end_s2;
+		}
 	}
 	/* Single flush at the end — open_memstream's size is only updated
 	 * on fflush/fclose, and the caller reads after_ckpt_size right
@@ -1430,12 +1427,14 @@ int merge_checkpoint(char *src_ckpt, size_t src_size, char ckpt_flag){
 		if (validate_checkpoint_s_section(src_ckpt, src_size, size_s_src, "merge_checkpoint[src_init]") < 0)
 			return -1;
 		after_ckpt_stream = open_memstream(&after_ckpt, &after_ckpt_size);
+		setvbuf(after_ckpt_stream, NULL, _IOFBF, 4 * 1024 * 1024);
 		fwrite(src_ckpt, src_size, 1, after_ckpt_stream);
 		fflush(after_ckpt_stream);
 		return src_size;	
 	}	
 	//Copy des_stream file to tmp_stream file
 	tmp_stream = open_memstream(&tmp_ckpt, &tmp_size);
+	setvbuf(tmp_stream, NULL, _IOFBF, 4 * 1024 * 1024);
 	fwrite(after_ckpt, after_ckpt_size, 1,tmp_stream);
 	fflush(tmp_stream);
 	
@@ -1492,7 +1491,8 @@ int merge_checkpoint(char *src_ckpt, size_t src_size, char ckpt_flag){
 	 	
  	//Open des_stream file again
  	after_ckpt_stream = open_memstream(&after_ckpt, &after_ckpt_size);
- 	
+ 	setvbuf(after_ckpt_stream, NULL, _IOFBF, 4 * 1024 * 1024);
+
  	
  	if (t1 >= t2){ 			//C <- t1, pc1, size_s, S1+ S2		
 		fwrite(&t1, sizeof(unsigned long), 1, after_ckpt_stream);
@@ -3341,9 +3341,18 @@ void cape_end(unsigned char name_directive, unsigned char ops_flag){
  */
 int ckpt_start(){
 	PROF_START(_t_ckpt_start);
-	//openfile
-	ckpt_data_stream = open_memstream(&ckpt_data, &ckpt_data_size);
-	int size;
+
+	/* The snapshot is a flat concatenation of [addr:8][data] for each
+	 * tracked variable. Compute the total size up-front, malloc once,
+	 * then memcpy — bypassing open_memstream avoids routing 100s of MB
+	 * through stdio's 4 KB buffer (thousands of cookie-write callbacks
+	 * each doing a realloc + memcpy). For our use case that previously
+	 * dominated ckpt_start. ckpt_data_stream is no longer needed; mark
+	 * it NULL so ckpt_stop knows to skip fclose. */
+	ckpt_data = NULL;
+	ckpt_data_size = 0;
+	ckpt_data_stream = NULL;
+
 	if(__var_list_head == NULL) {
 		PROF_ACC(prof_ckpt_start_ns, _t_ckpt_start);
 		PROF_INC(prof_ckpt_start_count);
@@ -3353,29 +3362,53 @@ int ckpt_start(){
 #endif
 		return 0;
 	}
-		
+
 	VarList *tmp;
 	tmp = __var_list_tail;
-	
+
 	//move to the first variable of current parallel level
 	while((tmp->var.level == __parallel_level__) && (tmp->prev != NULL))
-		tmp = tmp->prev ;
-	
-	while(tmp != NULL){
+		tmp = tmp->prev;
+
+	VarList *first = tmp;
+	size_t total = 0;
+	while (tmp != NULL) {
 		if ((tmp->var.pro != CAPE_PRIVATE) &&
-			(tmp->var.pro != CAPE_THREAD_PRIVATE)){
-		
-			fwrite(&tmp->var.addr, sizeof(unsigned long), 1, ckpt_data_stream);
-			fwrite((void*)(uintptr_t)tmp->var.addr, tmp->var.size, tmp->var.n, ckpt_data_stream);
-			fflush(ckpt_data_stream);	
-			// printf("Write to ckpt data file: Ox%lx - pro: %d  - size : %d \n", tmp->var.addr, tmp->var.pro, \
-										sizeof(unsigned long)  + tmp->var.size * tmp->var.n);
-		}
-		
+		    (tmp->var.pro != CAPE_THREAD_PRIVATE))
+			total += sizeof(unsigned long) +
+			         (size_t)tmp->var.size * (size_t)tmp->var.n;
 		tmp = tmp->next;
 	}
-	
-	//printf("Size of CKPT_DATA_FILE: %ld", ckpt_data_size);
+
+	if (total == 0) {
+		PROF_ACC(prof_ckpt_start_ns, _t_ckpt_start);
+		PROF_INC(prof_ckpt_start_count);
+#ifdef CAPE_PROFILE
+		prof_compute_start_ns = cape_get_ns();
+		prof_compute_started = 1;
+#endif
+		return 0;
+	}
+
+	ckpt_data = (unsigned char *)malloc(total);
+	ckpt_data_size = total;
+
+	size_t off = 0;
+	tmp = first;
+	while (tmp != NULL) {
+		if ((tmp->var.pro != CAPE_PRIVATE) &&
+		    (tmp->var.pro != CAPE_THREAD_PRIVATE)) {
+			size_t bytes = (size_t)tmp->var.size * (size_t)tmp->var.n;
+			memcpy(ckpt_data + off, &tmp->var.addr,
+			       sizeof(unsigned long));
+			off += sizeof(unsigned long);
+			memcpy(ckpt_data + off,
+			       (void*)(uintptr_t)tmp->var.addr, bytes);
+			off += bytes;
+		}
+		tmp = tmp->next;
+	}
+
 	PROF_ACC(prof_ckpt_start_ns, _t_ckpt_start);
 	PROF_INC(prof_ckpt_start_count);
 #ifdef CAPE_PROFILE
@@ -3383,6 +3416,7 @@ int ckpt_start(){
 	prof_compute_start_ns = cape_get_ns();
 	prof_compute_started = 1;
 #endif
+	return 0;
 }
 /*
  * --------------------------------------------------------------------
@@ -3436,8 +3470,14 @@ int ckpt_start_2(){
 void ckpt_stop(){
 	PROF_START(_t_stop);
 	if (ckpt_data_size > 0){
-		fclose(ckpt_data_stream);
+		/* ckpt_start now allocates ckpt_data directly via malloc,
+		 * so ckpt_data_stream is NULL — fclose only when present. */
+		if (ckpt_data_stream) {
+			fclose(ckpt_data_stream);
+			ckpt_data_stream = NULL;
+		}
 		free(ckpt_data);
+		ckpt_data = NULL;
 		ckpt_data_size = 0;
 	}
 	PROF_ACC(prof_ckpt_stop_ns, _t_stop);
