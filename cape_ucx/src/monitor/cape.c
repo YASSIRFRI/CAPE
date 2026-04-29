@@ -1432,18 +1432,18 @@ int merge_checkpoint(char *src_ckpt, size_t src_size, char ckpt_flag){
 		fflush(after_ckpt_stream);
 		return src_size;	
 	}	
-	//Copy des_stream file to tmp_stream file
-	tmp_stream = open_memstream(&tmp_ckpt, &tmp_size);
-	setvbuf(tmp_stream, NULL, _IOFBF, 4 * 1024 * 1024);
-	fwrite(after_ckpt, after_ckpt_size, 1,tmp_stream);
-	fflush(tmp_stream);
-	
-	//Close des_stream file
+	/* Transfer ownership instead of memcpying the entire after_ckpt
+	 * into tmp_ckpt. The previous code did open_memstream + fwrite +
+	 * fflush + fclose just to rename a buffer — that's ~400 ms per rep
+	 * of pointless memcpy as the accumulated delta grows across
+	 * hypercube steps. */
 	if (after_ckpt_stream != NULL) {
 		fclose(after_ckpt_stream);
 		after_ckpt_stream = NULL;
 	}
-	free(after_ckpt);
+	tmp_ckpt = after_ckpt;
+	tmp_size = after_ckpt_size;
+	tmp_stream = NULL;       /* no live FILE* — we own the buffer directly */
 	after_ckpt = NULL;
 	after_ckpt_size = 0;
 		
@@ -1475,13 +1475,13 @@ int merge_checkpoint(char *src_ckpt, size_t src_size, char ckpt_flag){
 		fprintf(stderr,
 		        "CAPE merge_checkpoint: header dump local(t=%lu pc=0x%lx) remote(t=%lu pc=0x%lx)\n",
 		        t1, pc1, t2, pc2);
-		fclose(tmp_stream);
+		if (tmp_stream) fclose(tmp_stream);
 		free(tmp_ckpt);
 		return -1;
 	}
 	if (validate_checkpoint_s_section(tmp_ckpt, tmp_size, size_s1, "merge_checkpoint[tmp]") < 0 ||
 	    validate_checkpoint_s_section(src_ckpt, src_size, size_s2, "merge_checkpoint[src]") < 0) {
-		fclose(tmp_stream);
+		if (tmp_stream) fclose(tmp_stream);
 		free(tmp_ckpt);
 		return -1;
 	}
@@ -1523,7 +1523,7 @@ int merge_checkpoint(char *src_ckpt, size_t src_size, char ckpt_flag){
 		free(after_ckpt);
 		after_ckpt = NULL;
 		after_ckpt_size = 0;
-		fclose(tmp_stream);
+		if (tmp_stream) fclose(tmp_stream);
 		free(tmp_ckpt);
 		tmp_ckpt = NULL;
 		return -1;
@@ -1546,7 +1546,7 @@ int merge_checkpoint(char *src_ckpt, size_t src_size, char ckpt_flag){
 				free(after_ckpt);
 				after_ckpt = NULL;
 				after_ckpt_size = 0;
-				fclose(tmp_stream);
+				if (tmp_stream) fclose(tmp_stream);
 				free(tmp_ckpt);
 				return -1;
 			}
@@ -1569,7 +1569,7 @@ int merge_checkpoint(char *src_ckpt, size_t src_size, char ckpt_flag){
 				free(after_ckpt);
 				after_ckpt = NULL;
 				after_ckpt_size = 0;
-				fclose(tmp_stream);
+				if (tmp_stream) fclose(tmp_stream);
 				free(tmp_ckpt);
 				return -1;
 			}
@@ -1582,7 +1582,7 @@ int merge_checkpoint(char *src_ckpt, size_t src_size, char ckpt_flag){
 				free(after_ckpt);
 				after_ckpt = NULL;
 				after_ckpt_size = 0;
-				fclose(tmp_stream);
+				if (tmp_stream) fclose(tmp_stream);
 				free(tmp_ckpt);
 				return -1;
 			}
@@ -1601,7 +1601,7 @@ int merge_checkpoint(char *src_ckpt, size_t src_size, char ckpt_flag){
 				free(after_ckpt);
 				after_ckpt = NULL;
 				after_ckpt_size = 0;
-				fclose(tmp_stream);
+				if (tmp_stream) fclose(tmp_stream);
 				free(tmp_ckpt);
 				return -1; //ERROR
 			}
@@ -1726,7 +1726,7 @@ int merge_checkpoint(char *src_ckpt, size_t src_size, char ckpt_flag){
 					free(after_ckpt);
 					after_ckpt = NULL;
 					after_ckpt_size = 0;
-					fclose(tmp_stream);
+					if (tmp_stream) fclose(tmp_stream);
 					free(tmp_ckpt);
 					return -1;
 			}
@@ -1743,7 +1743,7 @@ int merge_checkpoint(char *src_ckpt, size_t src_size, char ckpt_flag){
 			free(after_ckpt);
 			after_ckpt = NULL;
 			after_ckpt_size = 0;
-			fclose(tmp_stream);
+			if (tmp_stream) fclose(tmp_stream);
 			free(tmp_ckpt);
 			return -1;
 		}
@@ -1758,7 +1758,7 @@ int merge_checkpoint(char *src_ckpt, size_t src_size, char ckpt_flag){
 		fflush(after_ckpt_stream);
 	}
 
-	fclose(tmp_stream);
+	if (tmp_stream) fclose(tmp_stream);
 	free(tmp_ckpt);	
 	tmp_ckpt = NULL;
 	

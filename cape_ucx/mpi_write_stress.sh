@@ -25,6 +25,7 @@ N_LIST=(${N_LIST:-1048576})
 PHASES_LIST=(${PHASES_LIST:-8})
 NODES_LIST=(${NODES_LIST:-4 8 16 32})
 REPS="${REPS:-5}"
+MPI_WRITE_STRESS_PROFILE="${MPI_WRITE_STRESS_PROFILE:-1}"
 
 module purge
 module load GCCcore/14.2.0
@@ -48,6 +49,7 @@ echo "impl,app,n,phases,nodes,rep,app_ms,job_id" > "${CSV}"
 
 echo "Benchmarking MPI write_stress"
 echo "Nodes: ${NODES_LIST[*]}  N: ${N_LIST[*]}  Phases: ${PHASES_LIST[*]}  Reps: ${REPS}"
+echo "MPI_WRITE_STRESS_PROFILE=${MPI_WRITE_STRESS_PROFILE}"
 echo "Results dir: ${RESULTS_DIR}"
 
 TOTAL_NODES="${SLURM_JOB_NUM_NODES:-32}"
@@ -59,6 +61,7 @@ run_one() {
     : > "${log}"
     echo "[launch] ${tag}"
     local rc=0
+    MPI_WRITE_STRESS_PROFILE="${MPI_WRITE_STRESS_PROFILE}" \
     srun --exclusive --mpi="${SRUN_MPI_MODE}" --nodes="${nn}" --ntasks="${nn}" --ntasks-per-node=1 \
          "${BIN}" "${n}" "${phases}" 1 >>"${log}" 2>&1 || rc=$?
     if [ "${rc}" -ne 0 ]; then
