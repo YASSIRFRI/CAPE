@@ -260,6 +260,41 @@ FILE *before_ckpt_stream, *after_ckpt_stream, *final_ckpt_stream;
 char *ckpt_data, *before_ckpt, *after_ckpt, *final_ckpt;
 size_t ckpt_data_size, before_ckpt_size, after_ckpt_size, final_ckpt_size;
 
+/* Manual byte buffer capacity for after_ckpt: kept separate from
+ * after_ckpt_size so we can pre-reserve to the known upper bound
+ * (tmp_size + src_size in merge_checkpoint) and skip the stdio
+ * realloc/cookie_write churn that used to dominate merge_checkpoint. */
+static size_t after_ckpt_cap = 0;
+
+static inline void after_ckpt_reserve(size_t need)
+{
+	if (need <= after_ckpt_cap)
+		return;
+	size_t new_cap = after_ckpt_cap ? after_ckpt_cap : 4096;
+	while (new_cap < need)
+		new_cap *= 2;
+	after_ckpt = (char *)realloc(after_ckpt, new_cap);
+	after_ckpt_cap = new_cap;
+}
+
+static inline void after_ckpt_append(const void *src, size_t n)
+{
+	after_ckpt_reserve(after_ckpt_size + n);
+	memcpy(after_ckpt + after_ckpt_size, src, n);
+	after_ckpt_size += n;
+}
+
+static inline void after_ckpt_patch(size_t off, const void *src, size_t n)
+{
+	memcpy(after_ckpt + off, src, n);
+}
+
+static inline void after_ckpt_release(void)
+{
+	after_ckpt_release();
+	after_ckpt_cap = 0;
+}
+
 static unsigned char __activate_func_level__ = 1;
 static unsigned char __parallel_level__ = 0;
 static int __node__ = -1; //current node
@@ -1048,32 +1083,30 @@ FILE *generate_checkpoint(VarList *vlist,
 		
 	FILE *stream;
 	
-	//open checkpoint file
 	timestamp = tsp;
-	stream = open_memstream(&after_ckpt, &after_ckpt_size);
-	/* open_memstream defaults to a tiny (~1 KB) stdio buffer and calls
-	 * its cookie_write (which realloc+memcpys the user buffer) every
-	 * time that fills. Bump the stdio buffer way up so cookie_write
-	 * fires once per ~4 MB instead of thousands of times — kills the
-	 * dominant cost of generate_checkpoint at scale. */
-	setvbuf(stream, NULL, _IOFBF, 4 * 1024 * 1024);
+	/* Manual buffer: skip stdio entirely. Pre-reserve generously
+	 * (snapshot size is the upper bound for the delta); subsequent
+	 * appends are pure memcpy with no realloc. */
+	after_ckpt_release();
+	after_ckpt_reserve(ckpt_data_size + 4096);
+	stream = NULL;
 	
 	//write time stamp into checkpoint file
-	fwrite(&timestamp, sizeof(unsigned long), 1, stream);
+	after_ckpt_append(&timestamp, sizeof(unsigned long));
 	
 	//write program counter into checkpoint file
 	programcounter = pc ;
-	fwrite(&programcounter, sizeof(unsigned long), 1, stream);
+	after_ckpt_append(&programcounter, sizeof(unsigned long));
 	
 	if (ckpt_data_size <= 0){ 
 		size_s = sizeof(unsigned long) * 3;
-		fwrite(&size_s, sizeof(unsigned long), 1, stream);
-		fflush(stream);		
-		return stream;
+		after_ckpt_append(&size_s, sizeof(unsigned long));
+		(void)0;  /* fflush no-op (manual buffer) */		
+		return NULL;
 	}
 	
 	//Write size_s into checkpoint file, and this place will be modified after writting S part
-	fwrite(&size_s, sizeof(unsigned long), 1, stream);
+	after_ckpt_append(&size_s, sizeof(unsigned long));
 	
 	//Move to current window (the current level of VarList)
 	v = vlist;
@@ -1128,9 +1161,9 @@ FILE *generate_checkpoint(VarList *vlist,
 				//save into ckpt file
 				if (start_addr > start){
 					len = start_addr - start ;
-					fwrite(&start, sizeof(unsigned long), 1, stream);
-					fwrite(&len, sizeof(unsigned int), 1, stream);
-					fwrite((void*)(uintptr_t)start, len, 1, stream);
+					after_ckpt_append(&start, sizeof(unsigned long));
+					after_ckpt_append(&len, sizeof(unsigned int));
+					after_ckpt_append((void*)(uintptr_t)start, len);
 				}
 			}
 			else{ //8 bytes			
@@ -1149,9 +1182,9 @@ FILE *generate_checkpoint(VarList *vlist,
 				//save into ckpt file
 				if (start_addr > start){
 					len = start_addr - start ;
-					fwrite(&start, sizeof(unsigned long), 1, stream);
-					fwrite(&len, sizeof(unsigned int), 1, stream);
-					fwrite((void*)(uintptr_t)start, len, 1, stream);
+					after_ckpt_append(&start, sizeof(unsigned long));
+					after_ckpt_append(&len, sizeof(unsigned int));
+					after_ckpt_append((void*)(uintptr_t)start, len);
 				}
 	}
 		
@@ -1159,7 +1192,7 @@ FILE *generate_checkpoint(VarList *vlist,
 		}
 	}	
 	//Identity size of S part
-	fflush(stream);
+	(void)0;  /* fflush no-op (manual buffer) */
 	size_s = after_ckpt_size;		
 	//Write L part into checkpoint
 	if((cflag == EXIT_CHECKPOINT) && (ops_flag==TRUE)){
@@ -1170,22 +1203,16 @@ FILE *generate_checkpoint(VarList *vlist,
 		while ((v != NULL) && (v->var.level == level)){
 			if ((v->var.pro == CAPE_SUM) || (v->var.pro == CAPE_MUL) || (v->var.pro == CAPE_MAX) ||(v->var.pro == CAPE_MIN) ){
 				len = v->var.size * v->var.n;
-				fwrite(&v->var.addr, sizeof(long), 1, stream);
-				fwrite(&len, sizeof(unsigned int), 1, stream);
-				fwrite((void*)(uintptr_t)v->var.addr, len, 1, stream);
+				after_ckpt_append(&v->var.addr, sizeof(long));
+				after_ckpt_append(&len, sizeof(unsigned int));
+				after_ckpt_append((void*)(uintptr_t)v->var.addr, len);
 			}
 			v = v->next;
 		}			
 	}
-	long end_pos = ftell(stream);
-	if (end_pos >= 0) {
-		fseek(stream, 2*sizeof(unsigned long), SEEK_SET);
-		fwrite(&size_s, sizeof(unsigned long), 1, stream);
-		fseek(stream, end_pos, SEEK_SET);
-		fflush(stream);
-	}
+	after_ckpt_patch(2 * sizeof(unsigned long), &size_s, sizeof(unsigned long));
 	
-	return stream;
+	return NULL;
 
 }
 
@@ -1213,12 +1240,12 @@ int merge_data(char *s1, unsigned int pos_s1, unsigned size_s1,
 		return 0;
 	//if S1 == NULL =>  S = S2
 	if (p1 >= end_s1){
-		fwrite(s2 + p2, end_s2 - p2, 1, after_ckpt_stream);
+		after_ckpt_append(s2 + p2, end_s2 - p2);
 		return 1;
 	}
 	//if S2 == NULL => S = S1
 	if (p2 >= end_s2){
-		fwrite(s1 + p1, end_s1 - p1, 1, after_ckpt_stream);
+		after_ckpt_append(s1 + p1, end_s1 - p1);
 		return 1;
 	}
 	/* Need at least [addr,len] header in each stream */
@@ -1249,9 +1276,7 @@ int merge_data(char *s1, unsigned int pos_s1, unsigned size_s1,
 			 * dominant cost at scale. */
 			if (len1 > (end_s1 - p1))
 				return -1;
-			fwrite(s1 + p1 - (sizeof(long) + sizeof(unsigned int)),
-			       sizeof(long) + sizeof(unsigned int) + len1, 1,
-			       after_ckpt_stream);
+			after_ckpt_append(s1 + p1 - (sizeof(long) + sizeof(unsigned int)), sizeof(long) + sizeof(unsigned int) + len1);
 			p1 += len1;
 			//printf("\n Node %ld: Write: 0x%lx  : %ld ", __node__, addr1, len1) ;
 			//S1: [-----------)  
@@ -1293,9 +1318,7 @@ int merge_data(char *s1, unsigned int pos_s1, unsigned size_s1,
 			if ((addr2 + len2) < addr1) {
 				if (len2 > (end_s2 - p2))
 					return -1;
-				fwrite(s2 + p2 - (sizeof(long) + sizeof(unsigned int)),
-				       sizeof(long) + sizeof(unsigned int) + len2, 1,
-				       after_ckpt_stream);
+				after_ckpt_append(s2 + p2 - (sizeof(long) + sizeof(unsigned int)), sizeof(long) + sizeof(unsigned int) + len2);
 				//printf("\n Node %ld: Write: 0x%lx : %ld ", __node__, addr2, len2) ;
 				p2 += len2;					
 				if (p2 >= end_s2) break;
@@ -1319,8 +1342,8 @@ int merge_data(char *s1, unsigned int pos_s1, unsigned size_s1,
 				memcpy(_hdr + sizeof(long), &len, sizeof(unsigned int));
 				if (len > (end_s2 - p2))
 					return -1;
-				fwrite(_hdr, sizeof(_hdr), 1, after_ckpt_stream);
-				fwrite(s2 + p2, len, 1, after_ckpt_stream);
+				after_ckpt_append(_hdr, sizeof(_hdr));
+				after_ckpt_append(s2 + p2, len);
 				//printf("\n Node %ld: Write: 0x%lx : %ld ", __node__, addr2, len2) ;
 				p2 += len;
 
@@ -1337,9 +1360,7 @@ int merge_data(char *s1, unsigned int pos_s1, unsigned size_s1,
 	 * what's in the source buffer, so write the current header from
 	 * locals and bulk-copy only the unmodified tail. */
 	if (p1 < end_s1){
-		fwrite(s1 + p1 - (sizeof(long) + sizeof(unsigned int)),
-		       (end_s1 - p1) + (sizeof(long) + sizeof(unsigned int)),
-		       1, after_ckpt_stream);
+		after_ckpt_append(s1 + p1 - (sizeof(long) + sizeof(unsigned int)), (end_s1 - p1) + (sizeof(long) + sizeof(unsigned int)));
 		p1 = end_s1;
 	}
 	if (p2 < end_s2){
@@ -1348,11 +1369,11 @@ int merge_data(char *s1, unsigned int pos_s1, unsigned size_s1,
 			return -1;
 		memcpy(_hdr, &addr2, sizeof(long));
 		memcpy(_hdr + sizeof(long), &len2, sizeof(unsigned int));
-		fwrite(_hdr, sizeof(_hdr), 1, after_ckpt_stream);
-		fwrite(s2 + p2, len2, 1, after_ckpt_stream);
+		after_ckpt_append(_hdr, sizeof(_hdr));
+		after_ckpt_append(s2 + p2, len2);
 		p2 += len2;
 		if (p2 < end_s2) {
-			fwrite(s2 + p2, end_s2 - p2, 1, after_ckpt_stream);
+			after_ckpt_append(s2 + p2, end_s2 - p2);
 			p2 = end_s2;
 		}
 	}
@@ -1360,7 +1381,7 @@ int merge_data(char *s1, unsigned int pos_s1, unsigned size_s1,
 	 * on fflush/fclose, and the caller reads after_ckpt_size right
 	 * after we return. The per-fwrite fflushes that used to be inside
 	 * this function dominated merge_checkpoint at scale. */
-	fflush(after_ckpt_stream);
+	(void)0;  /* fflush no-op (manual buffer) */
 	return 2;	
 }
 
@@ -1422,30 +1443,32 @@ int merge_checkpoint(char *src_ckpt, size_t src_size, char ckpt_flag){
 	if (src_size < ckpt_header_size)
 		return 0;
 	
-	if (after_ckpt_size == 0){	
+	if (after_ckpt_size == 0){
 		unsigned long size_s_src = *(unsigned long *)(src_ckpt + (2 * sizeof(unsigned long)));
 		if (validate_checkpoint_s_section(src_ckpt, src_size, size_s_src, "merge_checkpoint[src_init]") < 0)
 			return -1;
-		after_ckpt_stream = open_memstream(&after_ckpt, &after_ckpt_size);
-		setvbuf(after_ckpt_stream, NULL, _IOFBF, 4 * 1024 * 1024);
-		fwrite(src_ckpt, src_size, 1, after_ckpt_stream);
-		fflush(after_ckpt_stream);
-		return src_size;	
-	}	
-	/* Transfer ownership instead of memcpying the entire after_ckpt
-	 * into tmp_ckpt. The previous code did open_memstream + fwrite +
-	 * fflush + fclose just to rename a buffer — that's ~400 ms per rep
-	 * of pointless memcpy as the accumulated delta grows across
-	 * hypercube steps. */
+		/* Manual buffer: skip stdio entirely. */
+		after_ckpt_release();
+		after_ckpt_reserve(src_size);
+		memcpy(after_ckpt, src_ckpt, src_size);
+		after_ckpt_size = src_size;
+		return src_size;
+	}
+	/* Transfer ownership of after_ckpt into tmp_ckpt (no memcpy), and
+	 * pre-allocate a fresh after_ckpt sized to the worst-case merged
+	 * output. With a known capacity, every subsequent append into
+	 * after_ckpt is pure memcpy — no realloc, no stdio cookie_write. */
 	if (after_ckpt_stream != NULL) {
-		fclose(after_ckpt_stream);
+		if (after_ckpt_stream) { fclose(after_ckpt_stream); after_ckpt_stream = NULL; }
 		after_ckpt_stream = NULL;
 	}
 	tmp_ckpt = after_ckpt;
 	tmp_size = after_ckpt_size;
-	tmp_stream = NULL;       /* no live FILE* — we own the buffer directly */
+	tmp_stream = NULL;
 	after_ckpt = NULL;
 	after_ckpt_size = 0;
+	after_ckpt_cap = 0;
+	after_ckpt_reserve(tmp_size + src_size + 64);
 		
 	src_pointer = 0;
  	tmp_pointer =0 ;
@@ -1489,40 +1512,37 @@ int merge_checkpoint(char *src_ckpt, size_t src_size, char ckpt_flag){
  	src_pointer += sizeof(unsigned long);
  	tmp_pointer += sizeof(unsigned long);
 	 	
- 	//Open des_stream file again
- 	after_ckpt_stream = open_memstream(&after_ckpt, &after_ckpt_size);
- 	setvbuf(after_ckpt_stream, NULL, _IOFBF, 4 * 1024 * 1024);
+ 	/* No stdio — after_ckpt was already pre-reserved above. */
+ 	after_ckpt_stream = NULL;
 
  	
  	if (t1 >= t2){ 			//C <- t1, pc1, size_s, S1+ S2		
-		fwrite(&t1, sizeof(unsigned long), 1, after_ckpt_stream);
-		fwrite(&pc1, sizeof(unsigned long), 1, after_ckpt_stream);
-		fwrite(&size_s, sizeof(unsigned long), 1, after_ckpt_stream);
+		after_ckpt_append(&t1, sizeof(unsigned long));
+		after_ckpt_append(&pc1, sizeof(unsigned long));
+		after_ckpt_append(&size_s, sizeof(unsigned long));
 		if ((size_s1 > tmp_pointer) && (size_s2 > src_pointer))
 			merge_rc = merge_data(tmp_ckpt, tmp_pointer, size_s1 - tmp_pointer, src_ckpt, src_pointer, size_s2 - src_pointer);
 		else if (size_s1 > tmp_pointer)
-			fwrite(tmp_ckpt + tmp_pointer, size_s1 - tmp_pointer, 1, after_ckpt_stream);
+			after_ckpt_append(tmp_ckpt + tmp_pointer, size_s1 - tmp_pointer);
 		else if (size_s2 > src_pointer)
-			fwrite(src_ckpt + src_pointer, size_s2 - src_pointer, 1, after_ckpt_stream);
+			after_ckpt_append(src_ckpt + src_pointer, size_s2 - src_pointer);
 	}else{	//C <-	t2, pc2, size_s, S2 + S1		
-		fwrite(&t2, sizeof(unsigned long), 1, after_ckpt_stream);
-		fwrite(&pc2, sizeof(unsigned long), 1, after_ckpt_stream);
-		fwrite(&size_s, sizeof(unsigned long), 1, after_ckpt_stream);
+		after_ckpt_append(&t2, sizeof(unsigned long));
+		after_ckpt_append(&pc2, sizeof(unsigned long));
+		after_ckpt_append(&size_s, sizeof(unsigned long));
 		if ((size_s1 > tmp_pointer) && (size_s2 > src_pointer))
 			merge_rc = merge_data(src_ckpt, src_pointer, size_s2 - src_pointer, tmp_ckpt, tmp_pointer, size_s1 - tmp_pointer);
 		else if (size_s2 > src_pointer)
-			fwrite(src_ckpt + src_pointer, size_s2 - src_pointer, 1, after_ckpt_stream);
+			after_ckpt_append(src_ckpt + src_pointer, size_s2 - src_pointer);
 		else if (size_s1 > tmp_pointer)
-			fwrite(tmp_ckpt + tmp_pointer, size_s1 - tmp_pointer, 1, after_ckpt_stream);
+			after_ckpt_append(tmp_ckpt + tmp_pointer, size_s1 - tmp_pointer);
 	}
 	if (merge_rc < 0) {
 		fprintf(stderr, "CAPE merge_checkpoint: malformed S section (size_s1=%lu size_s2=%lu)\n",
 		        size_s1, size_s2);
-		fclose(after_ckpt_stream);
+		if (after_ckpt_stream) { fclose(after_ckpt_stream); after_ckpt_stream = NULL; }
 		after_ckpt_stream = NULL;
-		free(after_ckpt);
-		after_ckpt = NULL;
-		after_ckpt_size = 0;
+		after_ckpt_release();
 		if (tmp_stream) fclose(tmp_stream);
 		free(tmp_ckpt);
 		tmp_ckpt = NULL;
@@ -1541,11 +1561,9 @@ int merge_checkpoint(char *src_ckpt, size_t src_size, char ckpt_flag){
 			if ((tmp_size - tmp_pointer) < (sizeof(long) + sizeof(unsigned int)) ||
 			    (src_size - src_pointer) < (sizeof(long) + sizeof(unsigned int))) {
 				fprintf(stderr, "CAPE merge_checkpoint: malformed L header\n");
-				fclose(after_ckpt_stream);
+				if (after_ckpt_stream) { fclose(after_ckpt_stream); after_ckpt_stream = NULL; }
 				after_ckpt_stream = NULL;
-				free(after_ckpt);
-				after_ckpt = NULL;
-				after_ckpt_size = 0;
+				after_ckpt_release();
 				if (tmp_stream) fclose(tmp_stream);
 				free(tmp_ckpt);
 				return -1;
@@ -1564,11 +1582,9 @@ int merge_checkpoint(char *src_ckpt, size_t src_size, char ckpt_flag){
 				fprintf(stderr,
 				        "CAPE merge_checkpoint: L mismatch (addr=0x%lx src_addr=0x%lx len=%u src_len=%u)\n",
 				        addr, src_addr, len, src_len);
-				fclose(after_ckpt_stream);
+				if (after_ckpt_stream) { fclose(after_ckpt_stream); after_ckpt_stream = NULL; }
 				after_ckpt_stream = NULL;
-				free(after_ckpt);
-				after_ckpt = NULL;
-				after_ckpt_size = 0;
+				after_ckpt_release();
 				if (tmp_stream) fclose(tmp_stream);
 				free(tmp_ckpt);
 				return -1;
@@ -1577,18 +1593,16 @@ int merge_checkpoint(char *src_ckpt, size_t src_size, char ckpt_flag){
 				fprintf(stderr,
 				        "CAPE merge_checkpoint: malformed L payload (len=%u tmp_left=%zu src_left=%zu)\n",
 				        len, tmp_size - tmp_pointer, src_size - src_pointer);
-				fclose(after_ckpt_stream);
+				if (after_ckpt_stream) { fclose(after_ckpt_stream); after_ckpt_stream = NULL; }
 				after_ckpt_stream = NULL;
-				free(after_ckpt);
-				after_ckpt = NULL;
-				after_ckpt_size = 0;
+				after_ckpt_release();
 				if (tmp_stream) fclose(tmp_stream);
 				free(tmp_ckpt);
 				return -1;
 			}
 			
-			fwrite(&addr, sizeof(long), 1, after_ckpt_stream);
-			fwrite(&len, sizeof(unsigned int), 1, after_ckpt_stream);
+			after_ckpt_append(&addr, sizeof(long));
+			after_ckpt_append(&len, sizeof(unsigned int));
 
 			VarList *var = NULL; 
 			var = find_variable_by_addr(__var_list_head, addr , __parallel_level__);	
@@ -1596,11 +1610,9 @@ int merge_checkpoint(char *src_ckpt, size_t src_size, char ckpt_flag){
 			if (var == NULL) {
 				fprintf(stderr, "CAPE merge_checkpoint: variable not found for addr=0x%lx level=%d\n",
 				        addr, __parallel_level__);
-				fclose(after_ckpt_stream);
+				if (after_ckpt_stream) { fclose(after_ckpt_stream); after_ckpt_stream = NULL; }
 				after_ckpt_stream = NULL;
-				free(after_ckpt);
-				after_ckpt = NULL;
-				after_ckpt_size = 0;
+				after_ckpt_release();
 				if (tmp_stream) fclose(tmp_stream);
 				free(tmp_ckpt);
 				return -1; //ERROR
@@ -1619,23 +1631,23 @@ int merge_checkpoint(char *src_ckpt, size_t src_size, char ckpt_flag){
 					if (var->var.pro == CAPE_SUM){
 						num = 0;
 						num = n1 + n2;
-						fwrite(&num, len, 1, after_ckpt_stream);
+						after_ckpt_append(&num, len);
 						break;						
 					}
 					if (var->var.pro == CAPE_MUL){
 						num = 1;
 						num = n1 * n2;		
-						fwrite(&num, len, 1, after_ckpt_stream);
+						after_ckpt_append(&num, len);
 						break;						
 					}					
 					if (var->var.pro == CAPE_MAX){
 						num = (n1 >= n2 )? n1 : n2 ;
-						fwrite(&num, len, 1, after_ckpt_stream);
+						after_ckpt_append(&num, len);
 						break;						
 					}
 					if (var->var.pro == CAPE_MIN){						
 						num = (n1 < n2 )? n1 : n2 ;				
-						fwrite(&num, len, 1, after_ckpt_stream);
+						after_ckpt_append(&num, len);
 						break;						
 					}							
 					break;
@@ -1647,23 +1659,23 @@ int merge_checkpoint(char *src_ckpt, size_t src_size, char ckpt_flag){
 					if (var->var.pro == CAPE_SUM){
 						num_l = 0;
 						num_l = n1_l + n2_l;
-						fwrite(&num_l, len, 1, after_ckpt_stream);
+						after_ckpt_append(&num_l, len);
 						break;						
 					}
 					if (var->var.pro == CAPE_MUL){
 						num_l = 1;
 						num_l = n1_l * n2_l;		
-						fwrite(&num_l, len, 1, after_ckpt_stream);
+						after_ckpt_append(&num_l, len);
 						break;						
 					}					
 					if (var->var.pro == CAPE_MAX){
 						num_l = (n1_l >= n2_l )? n1_l : n2_l ;
-						fwrite(&num_l, len, 1, after_ckpt_stream);
+						after_ckpt_append(&num_l, len);
 						break;						
 					}
 					if (var->var.pro == CAPE_MIN){						
 						num_l = (n1_l < n2_l )? n1_l : n2_l ;				
-						fwrite(&num_l, len, 1, after_ckpt_stream);
+						after_ckpt_append(&num_l, len);
 						break;						
 					}							
 					break;
@@ -1673,23 +1685,23 @@ int merge_checkpoint(char *src_ckpt, size_t src_size, char ckpt_flag){
 					if (var->var.pro == CAPE_SUM){
 						num_f = 0.0;
 						num_f = n1_f + n2_f;
-						fwrite(&num_f, len, 1, after_ckpt_stream);
+						after_ckpt_append(&num_f, len);
 						break;						
 					}
 					if (var->var.pro == CAPE_MUL){
 						num_f = 1.0;
 						num_f = n1_f * n2_f;		
-						fwrite(&num_f, len, 1, after_ckpt_stream);
+						after_ckpt_append(&num_f, len);
 						break;						
 					}					
 					if (var->var.pro == CAPE_MAX){
 						num_f = (n1_f >= n2_f )? n1_f : n2_f ;
-						fwrite(&num_f, len, 1, after_ckpt_stream);
+						after_ckpt_append(&num_f, len);
 						break;						
 					}
 					if (var->var.pro == CAPE_MIN){						
 						num_f = (n1_f < n2_f )? n1_f : n2_f ;				
-						fwrite(&num_f, len, 1, after_ckpt_stream);
+						after_ckpt_append(&num_f, len);
 						break;						
 					}							
 					break;
@@ -1699,33 +1711,31 @@ int merge_checkpoint(char *src_ckpt, size_t src_size, char ckpt_flag){
 					if (var->var.pro == CAPE_SUM){
 						num_d = 0.0;
 						num_d = n1_d + n2_d;
-						fwrite(&num_d, len, 1, after_ckpt_stream);
+						after_ckpt_append(&num_d, len);
 						break;						
 					}
 					if (var->var.pro == CAPE_MUL){
 						num_d = 1.0;
 						num_d = n1_d * n2_d;		
-						fwrite(&num_d, len, 1, after_ckpt_stream);
+						after_ckpt_append(&num_d, len);
 						break;						
 					}					
 					if (var->var.pro == CAPE_MAX){
 						num = (n1_d >= n2_d )? n1_d : n2_d ;
-						fwrite(&num_d, len, 1, after_ckpt_stream);
+						after_ckpt_append(&num_d, len);
 						break;						
 					}
 					if (var->var.pro == CAPE_MIN){						
 						num_d = (n1_d < n2_d )? n1_d : n2_d ;				
-						fwrite(&num_d, len, 1, after_ckpt_stream);
+						after_ckpt_append(&num_d, len);
 						break;						
 					}							
 					break;
 				default:
 					printf("This datatype is not supported !!!!!");
-					fclose(after_ckpt_stream);
+					if (after_ckpt_stream) { fclose(after_ckpt_stream); after_ckpt_stream = NULL; }
 					after_ckpt_stream = NULL;
-					free(after_ckpt);
-					after_ckpt = NULL;
-					after_ckpt_size = 0;
+					after_ckpt_release();
 					if (tmp_stream) fclose(tmp_stream);
 					free(tmp_ckpt);
 					return -1;
@@ -1738,11 +1748,9 @@ int merge_checkpoint(char *src_ckpt, size_t src_size, char ckpt_flag){
 			fprintf(stderr,
 			        "CAPE merge_checkpoint: uneven L sections (tmp_pointer=%u tmp_size=%zu src_pointer=%u src_size=%zu)\n",
 			        tmp_pointer, tmp_size, src_pointer, src_size);
-			fclose(after_ckpt_stream);
+			if (after_ckpt_stream) { fclose(after_ckpt_stream); after_ckpt_stream = NULL; }
 			after_ckpt_stream = NULL;
-			free(after_ckpt);
-			after_ckpt = NULL;
-			after_ckpt_size = 0;
+			after_ckpt_release();
 			if (tmp_stream) fclose(tmp_stream);
 			free(tmp_ckpt);
 			return -1;
@@ -1750,13 +1758,10 @@ int merge_checkpoint(char *src_ckpt, size_t src_size, char ckpt_flag){
 		
 
 	}	
-	long end_pos = ftell(after_ckpt_stream);
-	if (end_pos >= 0) {
-		fseek(after_ckpt_stream, 2*sizeof(unsigned long), SEEK_SET);
-		fwrite(&size_s, sizeof(unsigned long), 1, after_ckpt_stream);
-		fseek(after_ckpt_stream, end_pos, SEEK_SET);
-		fflush(after_ckpt_stream);
-	}
+	/* Patch size_s into the header at offset 2*ulong (replacing the
+	 * placeholder written earlier). Direct memcpy — no seeks. */
+	after_ckpt_patch(2 * sizeof(unsigned long), &size_s,
+	                 sizeof(unsigned long));
 
 	if (tmp_stream) fclose(tmp_stream);
 	free(tmp_ckpt);	
@@ -2233,12 +2238,10 @@ int inject_checkpoint(char *data_ckpt, size_t file_size){
 void release_checkpoint(){
 	PROF_START(_t_rel);
 	if (after_ckpt_stream != NULL){
-		fclose(after_ckpt_stream);
+		if (after_ckpt_stream) { fclose(after_ckpt_stream); after_ckpt_stream = NULL; }
 		after_ckpt_stream = NULL;
 	}
-	free(after_ckpt);
-	after_ckpt = NULL;
-	after_ckpt_size = 0;
+	after_ckpt_release();
 	PROF_ACC(prof_release_ckpt_ns, _t_rel);
 	PROF_INC(prof_release_count);
 }
@@ -3554,19 +3557,16 @@ void __exit_func(){
 
 void require_generate_checkpoint(char ops_flag){
 	PROF_START(_t_gen);
-	after_ckpt_stream = generate_checkpoint(__var_list_head,
-								__parallel_level__,		\
-								EXIT_CHECKPOINT,				\
-								ops_flag,						\
-								__time_stamp__,		\
-								__pc__);
-	/* Close the memstream so that after_ckpt becomes a plain malloc'd
-	   buffer.  UCX RDMA (rendezvous protocol) needs a stable, registered
-	   buffer — keeping the stream open can interfere with that. */
-	if (after_ckpt_stream != NULL) {
-		fclose(after_ckpt_stream);
-		after_ckpt_stream = NULL;
-	}
+	(void)generate_checkpoint(__var_list_head,
+	                          __parallel_level__,
+	                          EXIT_CHECKPOINT,
+	                          ops_flag,
+	                          __time_stamp__,
+	                          __pc__);
+	/* generate_checkpoint now returns NULL (manual buffer instead of
+	 * stdio stream). after_ckpt is a plain malloc'd buffer ready for
+	 * RDMA registration. */
+	after_ckpt_stream = NULL;
 	PROF_ACC(prof_generate_ckpt_ns, _t_gen);
 	PROF_INC(prof_generate_ckpt_count);
 }
