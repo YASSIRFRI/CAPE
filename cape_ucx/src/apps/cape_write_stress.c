@@ -91,17 +91,42 @@ static void zero_state(int n, int num_nodes)
 		memset(mem_rows[r], 0, (size_t)n * sizeof(mem_rows[r][0]));
 }
 
+/* Per-phase breakdown so the slow region is obvious without grepping
+ * cape_finalize's summary. cape_begin sets up page protection, ckpt_start
+ * snapshots tracked vars, run_phase is the actual user writes, cape_end
+ * does generate_ckpt + allreduce + inject. */
+static unsigned long phase_begin_us, phase_ckpt_us, phase_work_us, phase_end_us;
+
+static unsigned long get_us(void)
+{
+	struct timeval tv;
+	gettimeofday(&tv, NULL);
+	return (unsigned long)(tv.tv_sec * 1000000UL + tv.tv_usec);
+}
+
 static void write_stress_phase(int n, int rep, int phase)
 {
 	__enter_func();
 	int node;
+	unsigned long t0, t1, t2, t3, t4;
 
+	t0 = get_us();
 	cape_begin(PARALLEL_FOR, 0, n);
+	t1 = get_us();
 	ckpt_start();
+	t2 = get_us();
 	node = cape_get_node_num();
 	run_phase(mem_rows[node], n, (unsigned int)node, rep, phase, 1);
+	t3 = get_us();
 	__pc__ = (unsigned long)__get_pc();
 	cape_end(PARALLEL_FOR, FALSE);
+	t4 = get_us();
+
+	phase_begin_us += t1 - t0;
+	phase_ckpt_us  += t2 - t1;
+	phase_work_us  += t3 - t2;
+	phase_end_us   += t4 - t3;
+
 	__exit_func();
 }
 
@@ -179,6 +204,7 @@ int main(int argc, char **argv)
 		 * actual work. cape_end's timestamp-based merge already
 		 * propagates per-cell writes across phases correctly. */
 		zero_state(n, num_nodes);
+		phase_begin_us = phase_ckpt_us = phase_work_us = phase_end_us = 0;
 		t0 = get_ms_of_day();
 		for (p = 0; p < phases; p++)
 			write_stress_phase(n, rep, p);
@@ -188,9 +214,15 @@ int main(int argc, char **argv)
 			cape_finalize();
 			return 1;
 		}
-		if (node == 0)
+		if (node == 0) {
 			printf("RESULT n=%d phases=%d rep=%d ms=%lu\n",
 			       n, phases, rep, t1 - t0);
+			printf("BREAKDOWN rep=%d (us, sum across %d phases) "
+			       "cape_begin=%lu ckpt_start=%lu user_work=%lu cape_end=%lu\n",
+			       rep, phases,
+			       phase_begin_us, phase_ckpt_us,
+			       phase_work_us, phase_end_us);
+		}
 	}
 
 	cape_finalize();

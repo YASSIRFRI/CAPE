@@ -1208,13 +1208,11 @@ int merge_data(char *s1, unsigned int pos_s1, unsigned size_s1,
 	//if S1 == NULL =>  S = S2
 	if (p1 >= end_s1){
 		fwrite(s2 + p2, end_s2 - p2, 1, after_ckpt_stream);
-		fflush(after_ckpt_stream);
 		return 1;
 	}
 	//if S2 == NULL => S = S1
 	if (p2 >= end_s2){
 		fwrite(s1 + p1, end_s1 - p1, 1, after_ckpt_stream);
-		fflush(after_ckpt_stream);
 		return 1;
 	}
 	/* Need at least [addr,len] header in each stream */
@@ -1239,13 +1237,10 @@ int merge_data(char *s1, unsigned int pos_s1, unsigned size_s1,
 		//printf("\n Node %ld: (0x%lx - %ld ) + (0x%lx - %ld)", __node__, addr1, len1, addr2, len2) ;
 		if (addr1 <= addr2){
 			fwrite(&addr1, sizeof(long), 1, after_ckpt_stream);
-			fflush(after_ckpt_stream);
 			fwrite(&len1, sizeof(unsigned int), 1, after_ckpt_stream);
-			fflush(after_ckpt_stream);			
 			if (len1 > (end_s1 - p1))
 				return -1;
 			fwrite(s1 + p1, len1, 1, after_ckpt_stream);
-			fflush(after_ckpt_stream);
 			p1 += len1;
 			//printf("\n Node %ld: Write: 0x%lx  : %ld ", __node__, addr1, len1) ;
 			//S1: [-----------)  
@@ -1286,13 +1281,10 @@ int merge_data(char *s1, unsigned int pos_s1, unsigned size_s1,
 			//S2:        [--------)		    -------[------)	
 			if ((addr2 + len2) < addr1) {
 				fwrite(&addr2, sizeof(long), 1, after_ckpt_stream);
-				fflush(after_ckpt_stream);
 				fwrite(&len2, sizeof(unsigned int), 1, after_ckpt_stream);
-				fflush(after_ckpt_stream);			
 				if (len2 > (end_s2 - p2))
 					return -1;
 				fwrite(s2 + p2, len2, 1, after_ckpt_stream);
-				fflush(after_ckpt_stream);
 				//printf("\n Node %ld: Write: 0x%lx : %ld ", __node__, addr2, len2) ;
 				p2 += len2;					
 				if (p2 >= end_s2) break;
@@ -1309,13 +1301,10 @@ int merge_data(char *s1, unsigned int pos_s1, unsigned size_s1,
 			}else {
 				len = addr1 - addr2;				
 				fwrite(&addr2, sizeof(long), 1, after_ckpt_stream);
-				fflush(after_ckpt_stream);				
 				fwrite(&len, sizeof(unsigned int), 1, after_ckpt_stream);
-				fflush(after_ckpt_stream);
 				if (len > (end_s2 - p2))
 					return -1;
 				fwrite(s2 + p2, len, 1, after_ckpt_stream);
-				fflush(after_ckpt_stream);
 				//printf("\n Node %ld: Write: 0x%lx : %ld ", __node__, addr2, len2) ;
 				p2 += len;
 
@@ -1327,13 +1316,10 @@ int merge_data(char *s1, unsigned int pos_s1, unsigned size_s1,
 	//Merge the rest part
 	if (p1 < end_s1){
 		fwrite(&addr1, sizeof(long), 1, after_ckpt_stream);
-		fflush(after_ckpt_stream);
 		fwrite(&len1, sizeof(unsigned int), 1, after_ckpt_stream);
-		fflush(after_ckpt_stream);			
 		if (len1 > (end_s1 - p1))
 			return -1;
 		fwrite(s1 + p1, len1, 1, after_ckpt_stream);
-		fflush(after_ckpt_stream);
 		p1 += len1;
 	}	
 	while (p1 < end_s1){
@@ -1346,23 +1332,17 @@ int merge_data(char *s1, unsigned int pos_s1, unsigned size_s1,
 		if (len1 > (end_s1 - p1))
 			return -1;
 		fwrite(&addr1, sizeof(long), 1, after_ckpt_stream);
-		fflush(after_ckpt_stream);
 		fwrite(&len1, sizeof(unsigned int), 1, after_ckpt_stream);
-		fflush(after_ckpt_stream);			
 		fwrite(s1 + p1, len1, 1, after_ckpt_stream);
-		fflush(after_ckpt_stream);
 		p1 += len1;		
 	}
 	
 	if (p2 < end_s2){
 		fwrite(&addr2, sizeof(long), 1, after_ckpt_stream);
-		fflush(after_ckpt_stream);
 		fwrite(&len2, sizeof(unsigned int), 1, after_ckpt_stream);
-		fflush(after_ckpt_stream);			
 		if (len2 > (end_s2 - p2))
 			return -1;
 		fwrite(s2 + p2, len2, 1, after_ckpt_stream);
-		fflush(after_ckpt_stream);
 		p2 += len2;
 	}	
 	while (p2 < end_s2){
@@ -1375,13 +1355,15 @@ int merge_data(char *s1, unsigned int pos_s1, unsigned size_s1,
 		if (len2 > (end_s2 - p2))
 			return -1;
 		fwrite(&addr2, sizeof(long), 1, after_ckpt_stream);
-		fflush(after_ckpt_stream);
 		fwrite(&len2, sizeof(unsigned int), 1, after_ckpt_stream);
-		fflush(after_ckpt_stream);			
 		fwrite(s2 + p2, len2, 1, after_ckpt_stream);
-		fflush(after_ckpt_stream);
-		p2 += len2;		
+		p2 += len2;
 	}
+	/* Single flush at the end — open_memstream's size is only updated
+	 * on fflush/fclose, and the caller reads after_ckpt_size right
+	 * after we return. The per-fwrite fflushes that used to be inside
+	 * this function dominated merge_checkpoint at scale. */
+	fflush(after_ckpt_stream);
 	return 2;	
 }
 
@@ -1514,11 +1496,8 @@ int merge_checkpoint(char *src_ckpt, size_t src_size, char ckpt_flag){
  	
  	if (t1 >= t2){ 			//C <- t1, pc1, size_s, S1+ S2		
 		fwrite(&t1, sizeof(unsigned long), 1, after_ckpt_stream);
-		fflush(after_ckpt_stream);
 		fwrite(&pc1, sizeof(unsigned long), 1, after_ckpt_stream);
-		fflush(after_ckpt_stream);
 		fwrite(&size_s, sizeof(unsigned long), 1, after_ckpt_stream);
-		fflush(after_ckpt_stream);
 		if ((size_s1 > tmp_pointer) && (size_s2 > src_pointer))
 			merge_rc = merge_data(tmp_ckpt, tmp_pointer, size_s1 - tmp_pointer, src_ckpt, src_pointer, size_s2 - src_pointer);
 		else if (size_s1 > tmp_pointer)
@@ -1527,11 +1506,8 @@ int merge_checkpoint(char *src_ckpt, size_t src_size, char ckpt_flag){
 			fwrite(src_ckpt + src_pointer, size_s2 - src_pointer, 1, after_ckpt_stream);
 	}else{	//C <-	t2, pc2, size_s, S2 + S1		
 		fwrite(&t2, sizeof(unsigned long), 1, after_ckpt_stream);
-		fflush(after_ckpt_stream);
 		fwrite(&pc2, sizeof(unsigned long), 1, after_ckpt_stream);
-		fflush(after_ckpt_stream);
 		fwrite(&size_s, sizeof(unsigned long), 1, after_ckpt_stream);
-		fflush(after_ckpt_stream);		
 		if ((size_s1 > tmp_pointer) && (size_s2 > src_pointer))
 			merge_rc = merge_data(src_ckpt, src_pointer, size_s2 - src_pointer, tmp_ckpt, tmp_pointer, size_s1 - tmp_pointer);
 		else if (size_s2 > src_pointer)
@@ -1612,9 +1588,7 @@ int merge_checkpoint(char *src_ckpt, size_t src_size, char ckpt_flag){
 			}
 			
 			fwrite(&addr, sizeof(long), 1, after_ckpt_stream);
-			fflush(after_ckpt_stream);
 			fwrite(&len, sizeof(unsigned int), 1, after_ckpt_stream);
-			fflush(after_ckpt_stream);
 
 			VarList *var = NULL; 
 			var = find_variable_by_addr(__var_list_head, addr , __parallel_level__);	
@@ -1646,26 +1620,22 @@ int merge_checkpoint(char *src_ckpt, size_t src_size, char ckpt_flag){
 						num = 0;
 						num = n1 + n2;
 						fwrite(&num, len, 1, after_ckpt_stream);
-						fflush(after_ckpt_stream);
 						break;						
 					}
 					if (var->var.pro == CAPE_MUL){
 						num = 1;
 						num = n1 * n2;		
 						fwrite(&num, len, 1, after_ckpt_stream);
-						fflush(after_ckpt_stream);
 						break;						
 					}					
 					if (var->var.pro == CAPE_MAX){
 						num = (n1 >= n2 )? n1 : n2 ;
 						fwrite(&num, len, 1, after_ckpt_stream);
-						fflush(after_ckpt_stream);
 						break;						
 					}
 					if (var->var.pro == CAPE_MIN){						
 						num = (n1 < n2 )? n1 : n2 ;				
 						fwrite(&num, len, 1, after_ckpt_stream);
-						fflush(after_ckpt_stream);
 						break;						
 					}							
 					break;
@@ -1678,26 +1648,22 @@ int merge_checkpoint(char *src_ckpt, size_t src_size, char ckpt_flag){
 						num_l = 0;
 						num_l = n1_l + n2_l;
 						fwrite(&num_l, len, 1, after_ckpt_stream);
-						fflush(after_ckpt_stream);
 						break;						
 					}
 					if (var->var.pro == CAPE_MUL){
 						num_l = 1;
 						num_l = n1_l * n2_l;		
 						fwrite(&num_l, len, 1, after_ckpt_stream);
-						fflush(after_ckpt_stream);
 						break;						
 					}					
 					if (var->var.pro == CAPE_MAX){
 						num_l = (n1_l >= n2_l )? n1_l : n2_l ;
 						fwrite(&num_l, len, 1, after_ckpt_stream);
-						fflush(after_ckpt_stream);
 						break;						
 					}
 					if (var->var.pro == CAPE_MIN){						
 						num_l = (n1_l < n2_l )? n1_l : n2_l ;				
 						fwrite(&num_l, len, 1, after_ckpt_stream);
-						fflush(after_ckpt_stream);
 						break;						
 					}							
 					break;
@@ -1708,26 +1674,22 @@ int merge_checkpoint(char *src_ckpt, size_t src_size, char ckpt_flag){
 						num_f = 0.0;
 						num_f = n1_f + n2_f;
 						fwrite(&num_f, len, 1, after_ckpt_stream);
-						fflush(after_ckpt_stream);
 						break;						
 					}
 					if (var->var.pro == CAPE_MUL){
 						num_f = 1.0;
 						num_f = n1_f * n2_f;		
 						fwrite(&num_f, len, 1, after_ckpt_stream);
-						fflush(after_ckpt_stream);
 						break;						
 					}					
 					if (var->var.pro == CAPE_MAX){
 						num_f = (n1_f >= n2_f )? n1_f : n2_f ;
 						fwrite(&num_f, len, 1, after_ckpt_stream);
-						fflush(after_ckpt_stream);
 						break;						
 					}
 					if (var->var.pro == CAPE_MIN){						
 						num_f = (n1_f < n2_f )? n1_f : n2_f ;				
 						fwrite(&num_f, len, 1, after_ckpt_stream);
-						fflush(after_ckpt_stream);
 						break;						
 					}							
 					break;
@@ -1738,26 +1700,22 @@ int merge_checkpoint(char *src_ckpt, size_t src_size, char ckpt_flag){
 						num_d = 0.0;
 						num_d = n1_d + n2_d;
 						fwrite(&num_d, len, 1, after_ckpt_stream);
-						fflush(after_ckpt_stream);
 						break;						
 					}
 					if (var->var.pro == CAPE_MUL){
 						num_d = 1.0;
 						num_d = n1_d * n2_d;		
 						fwrite(&num_d, len, 1, after_ckpt_stream);
-						fflush(after_ckpt_stream);
 						break;						
 					}					
 					if (var->var.pro == CAPE_MAX){
 						num = (n1_d >= n2_d )? n1_d : n2_d ;
 						fwrite(&num_d, len, 1, after_ckpt_stream);
-						fflush(after_ckpt_stream);
 						break;						
 					}
 					if (var->var.pro == CAPE_MIN){						
 						num_d = (n1_d < n2_d )? n1_d : n2_d ;				
 						fwrite(&num_d, len, 1, after_ckpt_stream);
-						fflush(after_ckpt_stream);
 						break;						
 					}							
 					break;
