@@ -1739,8 +1739,12 @@ int add_item_to_list_ckpt(struct shared_data_ckpt *p){
 	
 	
 	pt = malloc(sizeof(struct shared_data_ckpt));
+	if (pt == NULL)
+		return 1;
 	pt->addr = p->addr ;
 	memcpy(pt->data, p->data, CAPE_WORD);
+	pt->prev = NULL;
+	pt->next = NULL;
 	
 	float f= 0.0;
 	memcpy(&f, pt->data, CAPE_WORD);	
@@ -1781,6 +1785,7 @@ int add_item_to_list_ckpt(struct shared_data_ckpt *p){
 	
 	if(tmp->addr == pt->addr){
 		memcpy(tmp->data, pt->data, CAPE_WORD);
+		free(pt);
 		
 		//float f= 0.0;
 		//memcpy(&f, tmp->data, CAPE_WORD);	
@@ -2052,6 +2057,7 @@ int add_item_to_list_ckpt(struct shared_data_ckpt *p){
 		old_node = old_node->next;
 
 	}
+	free(current_node);
 	fflush(stream);
 	CAPE_PROFILE_ADD_NS(generate_ckpt_ns, profile_start_ns);
 	CAPE_PROFILE_INC(generate_ckpt_calls);
@@ -2457,14 +2463,16 @@ static int inject_checkpoint_with_write_access(FILE *stream, size_t *file_size,
   * The result will be managed by final_list_ckpt_head
   * --------------------------------------------------------------------
   */
- int add_to_final_ckpt_list(struct shared_data_ckpt *plist, struct shared_data *prop){
+int add_to_final_ckpt_list(struct shared_data_ckpt *plist, struct shared_data *prop){
 	struct shared_data_ckpt *pt, *tmp;
-	struct shared_data *ppt; //properties
 	
 	pt = malloc(sizeof(struct shared_data_ckpt));
+	if (pt == NULL)
+		return 1;
 	pt->addr = plist->addr ;
 	memcpy(pt->data, plist->data, CAPE_WORD);
-	
+	pt->prev = NULL;
+	pt->next = NULL;
 
 	
 	if(final_list_ckpt_head == NULL){
@@ -2494,6 +2502,8 @@ static int inject_checkpoint_with_write_access(FILE *stream, size_t *file_size,
 					
 	//This part will act on data, depends on its properties
 	if(tmp->addr == pt->addr){
+		free(pt);
+		pt = plist;
 		if ((prop->properties == D_LAST_PRIVATE) || 
 				(prop->properties == D_SHARED) ||
 				(prop->properties == D_COPY_IN))
@@ -2736,7 +2746,7 @@ static int inject_checkpoint_with_write_access(FILE *stream, size_t *file_size,
 	
 	size_t file_pointer = 0;
 	unsigned long current_ckpt_struct;
-	unsigned char *buff;
+	unsigned char *buff = NULL;
  	unsigned long addr;
  	int len;
 	
@@ -2747,6 +2757,7 @@ static int inject_checkpoint_with_write_access(FILE *stream, size_t *file_size,
  	
  	while(file_pointer < s_size)
  	{
+		buff = NULL;
  		//read address from after checkpoint
   		fread(&addr, sizeof(unsigned long), 1, s_stream);
   		file_pointer += sizeof(unsigned long);
@@ -2789,7 +2800,11 @@ static int inject_checkpoint_with_write_access(FILE *stream, size_t *file_size,
 				{
 					if (fflag ==FINAL_CHECKPOINT){
 						plist = malloc(sizeof(struct shared_data_ckpt));
+						if (plist == NULL)
+							return 1;
 						plist->addr = addr;
+						plist->prev = NULL;
+						plist->next = NULL;
 					}
 					break;
 				}
@@ -2814,6 +2829,10 @@ static int inject_checkpoint_with_write_access(FILE *stream, size_t *file_size,
 				len = PAGE_SIZE;
 				//read data from checkpoint
 				buff = (unsigned char *) malloc(len);
+				if (buff == NULL) {
+					free(plist);
+					return 1;
+				}
 				fread(buff, len, 1,s_stream);
 				file_pointer +=len;
 				fseek(s_stream, file_pointer, SEEK_SET);
@@ -2831,6 +2850,10 @@ static int inject_checkpoint_with_write_access(FILE *stream, size_t *file_size,
 
 				 //read data from checkpoint
 				buff = (unsigned char *) malloc(len);
+				if (buff == NULL) {
+					free(plist);
+					return 1;
+				}
 				fread(buff, len, 1,s_stream);
 				file_pointer +=len;
 				fseek(s_stream, file_pointer, SEEK_SET);
@@ -2844,6 +2867,10 @@ static int inject_checkpoint_with_write_access(FILE *stream, size_t *file_size,
 				len = CAPE_WORD;
 				//read data from checkpoint
 				buff = (unsigned char *) malloc(len);
+				if (buff == NULL) {
+					free(plist);
+					return 1;
+				}
 				fread(buff, len, 1,s_stream);
 				file_pointer +=len;
 				fseek(s_stream, file_pointer, SEEK_SET);
@@ -2866,6 +2893,8 @@ static int inject_checkpoint_with_write_access(FILE *stream, size_t *file_size,
 			case MD:
 				break;
 		}
+		free(buff);
+		free(plist);
  	}
 	fflush(total_ckpt_stream);
 	return 0;
@@ -3302,13 +3331,19 @@ int require_allreduce_checkpoint(){
 		FILE *inject_stream = fmemopen(total_ckpt, total_ckpt_size, "rb");
 		size_t inject_size = total_ckpt_size;
 		rc = inject_checkpoint_with_write_access(inject_stream, &inject_size, &save_regs);
-		fclose(inject_stream);
+		/* inject_checkpoint() fcloses the stream internally; do
+		 * NOT fclose(inject_stream) here or we double-close. */
 	}
 	/* Same as final_ckpt above: open_memstream buffer must be freed
 	 * explicitly so it doesn't accumulate across allreduce calls. */
 	free(total_ckpt);
 	total_ckpt = NULL;
 	total_ckpt_size = 0;
+	clear_list_data_ckpt(final_list_ckpt_head);
+	list_ckpt_head = NULL;
+	list_ckpt_tail = NULL;
+	final_list_ckpt_head = NULL;
+	final_list_ckpt_tail = NULL;
 
 	return rc;
 }
