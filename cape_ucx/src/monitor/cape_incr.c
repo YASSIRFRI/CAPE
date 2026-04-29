@@ -2110,6 +2110,12 @@ int send_checkpoint(int destination){
 	cape_ucx_send(final_ckpt, final_ckpt_size, destination, TAG_CKPT_DATA + 1);
 
 	fclose(final_ckpt_stream);
+	/* open_memstream's buffer survives fclose — caller must free it.
+	 * Without this the per-phase ckpt buffer accumulates and the
+	 * monitor's RSS grows as O(phases × peers × dirty_per_phase),
+	 * which OOMs at large node counts. */
+	free(final_ckpt);
+	final_ckpt = NULL;
 	final_ckpt_size = 0;
 	return 0;
 }
@@ -3152,8 +3158,17 @@ int ring_allreduce(){
 		rc = merge_external_checkpoint(ckpt_stream, ckpt_data, ckpt_size);
 
 		fclose(ckpt_stream);
+		/* Free the per-iteration open_memstream buffer; otherwise
+		 * the monitor leaks O(N) × msg-size per allreduce call. */
+		free(ckpt_data);
+		ckpt_data = NULL;
 		ckpt_size = 0;
 
+		/* Drop the previous send buffer (only the very first
+		 * send_buffer aliases total_ckpt and must NOT be freed
+		 * here — that one's lifetime is owned by the caller). */
+		if (i > 1)
+			free(send_buffer);
 		send_buffer = recv_buffer;
 		message_size = recv_message_size;
 
@@ -3218,7 +3233,14 @@ int hypercube_allreduce(){
 		join_checkpoint(TOTAL_CHECKPOINT, final_list_ckpt_head);
 
 		fclose(ckpt_stream);
+		/* open_memstream buffer + UCX recv buffer must be freed
+		 * each iteration; otherwise the monitor leaks O(log N) ×
+		 * msg-size per allreduce call. */
+		free(ckpt_data);
+		ckpt_data = NULL;
 		ckpt_size = 0;
+		free(recv_msg);
+		recv_msg = NULL;
 
 
 		send_msg = total_ckpt;
@@ -3245,6 +3267,12 @@ int require_allreduce_checkpoint(){
 	
 	
 	fclose(final_ckpt_stream);
+	/* open_memstream's buffer survives fclose — caller must free it.
+	 * Without this the per-phase ckpt buffer accumulates and the
+	 * monitor's RSS grows as O(phases × peers × dirty_per_phase),
+	 * which OOMs at large node counts. */
+	free(final_ckpt);
+	final_ckpt = NULL;
 	final_ckpt_size = 0;
 	
 	
@@ -3274,7 +3302,12 @@ int require_allreduce_checkpoint(){
 		FILE *inject_stream = fmemopen(total_ckpt, total_ckpt_size, "rb");
 		size_t inject_size = total_ckpt_size;
 		rc = inject_checkpoint_with_write_access(inject_stream, &inject_size, &save_regs);
+		fclose(inject_stream);
 	}
+	/* Same as final_ckpt above: open_memstream buffer must be freed
+	 * explicitly so it doesn't accumulate across allreduce calls. */
+	free(total_ckpt);
+	total_ckpt = NULL;
 	total_ckpt_size = 0;
 
 	return rc;
