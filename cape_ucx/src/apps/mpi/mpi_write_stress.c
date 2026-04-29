@@ -1,9 +1,9 @@
 /*
  * write_stress (pure MPI version):
- *   Single buffer per rank. Each phase: zero buffer, do scattered
- *   random writes against rank-specific seed, then MPI_Allreduce(BXOR)
- *   merges every rank's contribution into all ranks' buffers.
- *   Acts as a baseline for the CAPE/DICKPT versions.
+ *   Per-rank row in a 2D state, mirroring the CAPE/DICKPT layout.
+ *   Each phase: zero the full state, write scattered random values
+ *   into own row, MPI_Allreduce(BXOR) merges every rank's row into
+ *   all ranks' state.
  */
 #include <mpi.h>
 #include <stdint.h>
@@ -13,8 +13,8 @@
 #include <sys/time.h>
 #include <limits.h>
 
-#define DEFAULT_N       (1U << 22)
-#define MAX_N           (1U << 22)
+#define DEFAULT_N       (1U << 20)
+#define MAX_N           (1U << 20)
 #define DEFAULT_PHASES  8
 #define MAX_PHASES      32
 #define WRITES_PER_CELL 4U
@@ -44,7 +44,7 @@ static uint64_t seed_for(unsigned int rank, int rep, int phase)
 	       ((uint64_t)(phase + 1) * 0xd1b54a32d192ed03ULL);
 }
 
-static unsigned int run_phase(unsigned int *buf, int n,
+static unsigned int run_phase(unsigned int *row, int n,
 			      unsigned int rank, int rep, int phase,
 			      int do_writes)
 {
@@ -60,44 +60,49 @@ static unsigned int run_phase(unsigned int *buf, int n,
 			(unsigned int)(next_rand64(&rng) ^ (r >> 32) ^ t);
 
 		if (do_writes)
-			buf[idx] ^= value;
+			row[idx] ^= value;
 		expected_xor ^= value;
 	}
 
 	return expected_xor;
 }
 
-static unsigned int checksum_buf(const unsigned int *buf, int n)
+static unsigned int checksum_row(const unsigned int *row, int n)
 {
 	unsigned int x = 0;
 	int i;
 
 	for (i = 0; i < n; i++)
-		x ^= buf[i];
+		x ^= row[i];
 
 	return x;
 }
 
-static int verify(const unsigned int *buf, int n, int num_ranks,
+static int verify(const unsigned int *rows, int n, int num_ranks,
 		  int rank, int rep, int phase)
 {
-	unsigned int got = checksum_buf(buf, n);
-	unsigned int expected = 0;
+	int errors = 0;
 	int r;
 
-	for (r = 0; r < num_ranks; r++)
-		expected ^= run_phase(NULL, n, (unsigned int)r, rep, phase, 0);
+	for (r = 0; r < num_ranks; r++) {
+		const unsigned int *row = rows + ((size_t)r * (size_t)n);
+		unsigned int got = checksum_row(row, n);
+		unsigned int expected =
+			run_phase(NULL, n, (unsigned int)r, rep, phase, 0);
 
-	if (got != expected) {
-		fprintf(stderr,
-			"VERIFY FAIL rank=%d rep=%d phase=%d got=0x%08x expected=0x%08x\n",
-			rank, rep, phase, got, expected);
-		return 1;
+		if (got != expected) {
+			fprintf(stderr,
+				"VERIFY FAIL rank=%d rep=%d row=%d phase=%d got=0x%08x expected=0x%08x\n",
+				rank, rep, r, phase, got, expected);
+			if (++errors >= 10)
+				return errors;
+		}
 	}
-	if (rank == 0)
-		printf("VERIFY OK  rep=%d phase=%d (n=%d, %d ranks, %u writes/cell/phase)\n",
-		       rep, phase, n, num_ranks, WRITES_PER_CELL);
-	return 0;
+
+	if (errors == 0 && rank == 0)
+		printf("VERIFY OK  rep=%d phase=%d (%d rows x %d cells, %u writes/cell/phase)\n",
+		       rep, phase, num_ranks, n, WRITES_PER_CELL);
+	return errors;
 }
 
 int main(int argc, char *argv[])
@@ -108,7 +113,8 @@ int main(int argc, char *argv[])
 	int rep, p;
 	int rank, num_ranks;
 	unsigned long t0, t1;
-	unsigned int *buf;
+	unsigned int *rows;
+	size_t total_cells;
 
 	MPI_Init(&argc, &argv);
 	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
@@ -133,29 +139,42 @@ int main(int argc, char *argv[])
 	}
 	if (reps <= 0) reps = 1;
 
-	buf = calloc((size_t)n, sizeof(*buf));
-	if (!buf) {
-		fprintf(stderr, "rank %d: failed to allocate %d cells\n",
-			rank, n);
+	total_cells = (size_t)num_ranks * (size_t)n;
+	if (total_cells > (size_t)INT_MAX) {
+		if (rank == 0)
+			fprintf(stderr,
+				"ERROR: total cells too large: %zu\n",
+				total_cells);
+		MPI_Finalize();
+		return 1;
+	}
+
+	rows = calloc(total_cells, sizeof(*rows));
+	if (!rows) {
+		fprintf(stderr, "rank %d: failed to allocate %zu cells\n",
+			rank, total_cells);
 		MPI_Abort(MPI_COMM_WORLD, 1);
 		return 1;
 	}
 
 	for (rep = 1; rep <= reps; rep++) {
+		unsigned int *my_row = rows + ((size_t)rank * (size_t)n);
+
 		MPI_Barrier(MPI_COMM_WORLD);
 		t0 = get_ms_of_day();
 
 		for (p = 0; p < phases; p++) {
-			memset(buf, 0, (size_t)n * sizeof(*buf));
-			run_phase(buf, n, (unsigned int)rank, rep, p, 1);
-			MPI_Allreduce(MPI_IN_PLACE, buf, n,
+			memset(rows, 0, total_cells * sizeof(*rows));
+			run_phase(my_row, n,
+				  (unsigned int)rank, rep, p, 1);
+			MPI_Allreduce(MPI_IN_PLACE, rows, (int)total_cells,
 				      MPI_UNSIGNED, MPI_BXOR, MPI_COMM_WORLD);
 		}
 
 		t1 = get_ms_of_day();
 
-		if (verify(buf, n, num_ranks, rank, rep, phases - 1) != 0) {
-			free(buf);
+		if (verify(rows, n, num_ranks, rank, rep, phases - 1) != 0) {
+			free(rows);
 			MPI_Abort(MPI_COMM_WORLD, 1);
 			return 1;
 		}
@@ -164,7 +183,7 @@ int main(int argc, char *argv[])
 			       n, phases, rep, t1 - t0);
 	}
 
-	free(buf);
+	free(rows);
 	MPI_Finalize();
 	return 0;
 }
