@@ -1,11 +1,10 @@
 /*
  * write_stress (DICKPT version):
- *   Same workload as cape_write_stress.c, expressed with manual dickpt
- *   start/generate/allreduce/stop calls. Each phase corresponds to one
- *   incremental checkpoint window — the pages dirtied during the
- *   scattered random writes get tracked by the monitor and shipped as
- *   a delta. Multiple phases stress the per-phase ckpt overhead and the
- *   incremental tracking machinery.
+ *   Single big buffer per rank. Each phase zeros the buffer (outside
+ *   the ckpt window), then writes scattered random values, then
+ *   start/generate/allreduce/stop. The post-allreduce buffer holds the
+ *   XOR-merge of every rank's writes for that phase. Single-buffer
+ *   layout keeps the registered region (and per-phase ckpt size) small.
  */
 #include <stdint.h>
 #include <stdio.h>
@@ -16,13 +15,12 @@
 
 #define DEFAULT_N       (1U << 22)
 #define MAX_N           (1U << 22)
-#define MAX_NODES       32
-#define DEFAULT_PHASES  4
+#define DEFAULT_PHASES  8
 #define MAX_PHASES      32
 #define WRITES_PER_CELL 4U
 
 struct ckpt_state {
-	unsigned int rows[MAX_NODES][MAX_N] __attribute__((aligned(4096)));
+	unsigned int buf[MAX_N] __attribute__((aligned(4096)));
 };
 
 static struct ckpt_state g_state;
@@ -52,7 +50,7 @@ static uint64_t seed_for(unsigned int rank, int rep, int phase)
 	       ((uint64_t)(phase + 1) * 0xd1b54a32d192ed03ULL);
 }
 
-static unsigned int run_phase(unsigned int *row, int n,
+static unsigned int run_phase(unsigned int *buf, int n,
 			      unsigned int rank, int rep, int phase,
 			      int do_writes)
 {
@@ -68,62 +66,45 @@ static unsigned int run_phase(unsigned int *row, int n,
 			(unsigned int)(next_rand64(&rng) ^ (r >> 32) ^ t);
 
 		if (do_writes)
-			row[idx] ^= value;
+			buf[idx] ^= value;
 		expected_xor ^= value;
 	}
 
 	return expected_xor;
 }
 
-static unsigned int checksum_row(const unsigned int *row, int n)
+static unsigned int checksum_buf(const unsigned int *buf, int n)
 {
 	unsigned int x = 0;
 	int i;
 
 	for (i = 0; i < n; i++)
-		x ^= row[i];
+		x ^= buf[i];
 
 	return x;
 }
 
-static void reset_rows(struct ckpt_state *state, int n, unsigned long num_nodes)
+static int verify(const struct ckpt_state *state, int n,
+		  unsigned long num_nodes, unsigned long node, int rep,
+		  int phase)
 {
+	unsigned int got = checksum_buf(state->buf, n);
+	unsigned int expected = 0;
 	unsigned long r;
 
 	for (r = 0; r < num_nodes; r++)
-		memset(state->rows[r], 0, (size_t)n * sizeof(state->rows[r][0]));
-}
+		expected ^= run_phase(NULL, n, (unsigned int)r, rep, phase, 0);
 
-static int verify_full(const struct ckpt_state *state, int n,
-		       unsigned long num_nodes, unsigned long node, int rep,
-		       int phases)
-{
-	int errors = 0;
-	unsigned long r;
-	int p = 0;
-
-	for (r = 0; r < num_nodes; r++) {
-		unsigned int got = checksum_row(state->rows[r], n);
-		unsigned int expected;
-
-		(void)p;
-		expected = run_phase(NULL, n, (unsigned int)r, rep,
-				     phases - 1, 0);
-
-		if (got != expected) {
-			fprintf(stderr,
-				"VERIFY FAIL node=%lu rep=%d row=%lu got=0x%08x expected=0x%08x\n",
-				node, rep, r, got, expected);
-			if (++errors >= 10)
-				return errors;
-		}
+	if (got != expected) {
+		fprintf(stderr,
+			"VERIFY FAIL node=%lu rep=%d phase=%d got=0x%08x expected=0x%08x\n",
+			node, rep, phase, got, expected);
+		return 1;
 	}
-
-	if (errors == 0 && node == 0)
-		printf("VERIFY OK  rep=%d (%lu rows x %d cells, %d phases, %u writes/cell/phase)\n",
-		       rep, num_nodes, n, phases, WRITES_PER_CELL);
-
-	return errors;
+	if (node == 0)
+		printf("VERIFY OK  rep=%d phase=%d (n=%d, %lu nodes, %u writes/cell/phase)\n",
+		       rep, phase, n, num_nodes, WRITES_PER_CELL);
+	return 0;
 }
 
 int main(int argc, char *argv[])
@@ -155,24 +136,16 @@ int main(int argc, char *argv[])
 
 	node = dickpt_read_node();
 	num_nodes = dickpt_read_num_nodes();
-	if (num_nodes == 0 || num_nodes > MAX_NODES) {
-		fprintf(stderr, "ERROR: num_nodes must be in [1, %d], got %lu\n",
-			MAX_NODES, num_nodes);
-		return 1;
-	}
 	dickpt_send_num_jobs(n);
 
 	for (rep = 1; rep <= reps; rep++) {
-		reset_rows(state, n, num_nodes);
-
 		t0 = get_ms_of_day();
 
 		for (p = 0; p < phases; p++) {
-			memset(state->rows[node], 0,
-			       (size_t)n * sizeof(state->rows[node][0]));
+			memset(state->buf, 0,
+			       (size_t)n * sizeof(state->buf[0]));
 			dickpt_start_ckpt();
-			run_phase(state->rows[node], n,
-				  (unsigned int)node, rep, p, 1);
+			run_phase(state->buf, n, (unsigned int)node, rep, p, 1);
 			dickpt_generate_ckpt();
 			dickpt_allreduce_ckpt();
 			dickpt_stop_ckpt();
@@ -180,7 +153,7 @@ int main(int argc, char *argv[])
 
 		t1 = get_ms_of_day();
 
-		if (verify_full(state, n, num_nodes, node, rep, phases) != 0)
+		if (verify(state, n, num_nodes, node, rep, phases - 1) != 0)
 			return 1;
 
 		if (node == 0)
