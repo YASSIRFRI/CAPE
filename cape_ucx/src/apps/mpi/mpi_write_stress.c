@@ -12,8 +12,8 @@
 #include <string.h>
 #include <limits.h>
 
-#define DEFAULT_N       (1U << 19)
-#define MAX_N           (1U << 19)
+#define DEFAULT_N       (1U << 20)
+#define MAX_N           (1U << 20)
 #define DEFAULT_PHASES  8
 #define MAX_PHASES      32
 #define WRITES_PER_CELL 4U
@@ -121,14 +121,14 @@ static double sum_phases(const double *values, int phases)
 	return total;
 }
 
-static void reduce_profile_metric(double local, double *out)
+static void reduce_profile_metric(double local, double *out, int rank)
 {
 	double reduced[3];
 
 	MPI_Reduce(&local, &reduced[0], 1, MPI_DOUBLE, MPI_MIN, 0, MPI_COMM_WORLD);
 	MPI_Reduce(&local, &reduced[1], 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
 	MPI_Reduce(&local, &reduced[2], 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
-	if (out) {
+	if (rank == 0 && out) {
 		out[0] = reduced[0];
 		out[1] = reduced[1];
 		out[2] = reduced[2];
@@ -173,13 +173,13 @@ static void profile_report(int rank, int num_ranks, int n, int phases, int rep,
 	size_t bytes_per_rank_total = bytes_per_collective * (size_t)phases;
 	int p;
 
-	reduce_profile_metric(barrier_s, barrier_m);
-	reduce_profile_metric(total_s, total_m);
-	reduce_profile_metric(zero_total, zero_m);
-	reduce_profile_metric(work_total, work_m);
-	reduce_profile_metric(allreduce_total, allreduce_m);
-	reduce_profile_metric(phase_total, phase_total_m);
-	reduce_profile_metric(verify_s, verify_m);
+	reduce_profile_metric(barrier_s, barrier_m, rank);
+	reduce_profile_metric(total_s, total_m, rank);
+	reduce_profile_metric(zero_total, zero_m, rank);
+	reduce_profile_metric(work_total, work_m, rank);
+	reduce_profile_metric(allreduce_total, allreduce_m, rank);
+	reduce_profile_metric(phase_total, phase_total_m, rank);
+	reduce_profile_metric(verify_s, verify_m, rank);
 
 	reduce_profile_array(phase_zero_s, zero_min, zero_sum, zero_max, phases);
 	reduce_profile_array(phase_work_s, work_min, work_sum, work_max, phases);
@@ -327,9 +327,11 @@ int main(int argc, char *argv[])
 			MPI_Abort(MPI_COMM_WORLD, 1);
 			return 1;
 		}
-		if (rank == 0)
+		if (rank == 0) {
 			printf("RESULT n=%d phases=%d rep=%d ms=%lu\n",
 			       n, phases, rep, result_ms);
+			fflush(stdout);
+		}
 		if (do_profile)
 			profile_report(rank, num_ranks, n, phases, rep,
 				       total_cells, barrier_s, total_s, verify_s,

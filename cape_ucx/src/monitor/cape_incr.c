@@ -1314,17 +1314,6 @@ int main(int argc, char * argv[]){
 						rc = require_inject_checkpoint();
 						if (rc!=0)	exit(1);						
 						break;
-						
-					/* V5: unused
-					case S_INJECT_WORKSHARE_CHECKPOINT:
-						rc = require_inject_workshare_checkpoint();
-						break;
-
-					case S_MERGE_CHECKPOINT:
-						rc= require_merge_checkpoint();
-						if( rc !=0) exit(1);
-						break;
-					*/
 					case S_WAIT_FOR_CHECKPOINT:
 						rc= require_waitfor_checkpoint();
 						if( rc !=0) exit(1);						

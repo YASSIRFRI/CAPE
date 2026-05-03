@@ -1,11 +1,11 @@
 #!/bin/bash
-#SBATCH --job-name=cape_write_stress
+#SBATCH --job-name=cape_bitmap_write_stress
 #SBATCH --nodes=32
 #SBATCH --ntasks=32
 #SBATCH --ntasks-per-node=1
 #SBATCH --time=04:00:00
-#SBATCH --output=cape_write_stress_%j.out
-#SBATCH --error=cape_write_stress_%j.err
+#SBATCH --output=cape_bitmap_write_stress_%j.out
+#SBATCH --error=cape_bitmap_write_stress_%j.err
 #SBATCH --partition=compute
 
 set -euo pipefail
@@ -16,11 +16,11 @@ PROJECT_DIR="${PROJECT_DIR:-${SLURM_SUBMIT_DIR:-${SCRIPT_DIR}}}"
 cd "${PROJECT_DIR}"
 JOB_TAG="${SLURM_JOB_ID:-local_$$}"
 
-RESULTS_DIR="${RESULTS_DIR:-${SLURM_SUBMIT_DIR:-${PROJECT_DIR}}/results/cape_write_stress_${JOB_TAG}}"
-mkdir -p "${RESULTS_DIR}" 2>/dev/null || { RESULTS_DIR="/tmp/${USER}/cape_write_stress_${JOB_TAG}"; mkdir -p "${RESULTS_DIR}"; }
-BUILD_DIR="${BUILD_DIR:-${SLURM_SUBMIT_DIR:-/tmp/${USER}}/cape_build_ucx_ws_${JOB_TAG}}"
+RESULTS_DIR="${RESULTS_DIR:-${SLURM_SUBMIT_DIR:-${PROJECT_DIR}}/results/cape_bitmap_write_stress_${JOB_TAG}}"
+mkdir -p "${RESULTS_DIR}" 2>/dev/null || { RESULTS_DIR="/tmp/${USER}/cape_bitmap_write_stress_${JOB_TAG}"; mkdir -p "${RESULTS_DIR}"; }
+BUILD_DIR="${BUILD_DIR:-${SLURM_SUBMIT_DIR:-/tmp/${USER}}/cape_build_ucx_bws_${JOB_TAG}}"
 mkdir -p "${BUILD_DIR}/bin" "${BUILD_DIR}/obj" "${BUILD_DIR}/lib" 2>/dev/null || \
-  { BUILD_DIR="/tmp/${USER}/cape_build_ucx_ws_${JOB_TAG}"; mkdir -p "${BUILD_DIR}/bin" "${BUILD_DIR}/obj" "${BUILD_DIR}/lib"; }
+  { BUILD_DIR="/tmp/${USER}/cape_build_ucx_bws_${JOB_TAG}"; mkdir -p "${BUILD_DIR}/bin" "${BUILD_DIR}/obj" "${BUILD_DIR}/lib"; }
 
 # Sweep configuration
 N_LIST=(${N_LIST:-1048576})            # 4 MB / node default (1<<20 cells)
@@ -65,11 +65,11 @@ MAKE_ARGS=(
 
 make -C "${PROJECT_DIR}" cleanall \
     EXE_FOLDER="${BUILD_DIR}/bin" O_FOLDER="${BUILD_DIR}/obj" L_FOLDER="${BUILD_DIR}/lib" 2>/dev/null || true
-make -C "${PROJECT_DIR}" cape_write_stress "${MAKE_ARGS[@]}"
+make -C "${PROJECT_DIR}" cape_bitmap_write_stress "${MAKE_ARGS[@]}"
 
-BIN="${BUILD_DIR}/bin/cape_write_stress"
+BIN="${BUILD_DIR}/bin/cape_bitmap_write_stress"
 
-CSV="${RESULTS_DIR}/cape_write_stress_summary_${JOB_TAG}.csv"
+CSV="${RESULTS_DIR}/cape_bitmap_write_stress_summary_${JOB_TAG}.csv"
 echo "impl,app,n,phases,nodes,rep,app_ms,job_id" > "${CSV}"
 
 echo "Benchmarking CAPE write_stress"
@@ -80,7 +80,7 @@ TOTAL_NODES="${SLURM_JOB_NUM_NODES:-32}"
 
 run_one() {
     local n="$1" phases="$2" nn="$3" rep="$4"
-    local tag="cape_write_stress_n${n}_p${phases}_nodes${nn}_rep${rep}"
+    local tag="cape_bitmap_write_stress_n${n}_p${phases}_nodes${nn}_rep${rep}"
     local log="${RESULTS_DIR}/${tag}.log"
     : > "${log}"
     echo "[launch] ${tag}"
@@ -92,7 +92,7 @@ run_one() {
         echo "[fail] ${tag} rc=${rc}" >&2
         return
     fi
-    awk -v impl="cape" -v app="write_stress" -v nn="${nn}" -v rep="${rep}" \
+    awk -v impl="cape_bitmap" -v app="write_stress" -v nn="${nn}" -v rep="${rep}" \
         -v job="${SLURM_JOB_ID:-local}" '
         /^RESULT / {
             n=""; ph=""; ms="";

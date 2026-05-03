@@ -260,11 +260,40 @@ FILE *before_ckpt_stream, *after_ckpt_stream, *final_ckpt_stream;
 char *ckpt_data, *before_ckpt, *after_ckpt, *final_ckpt;
 size_t ckpt_data_size, before_ckpt_size, after_ckpt_size, final_ckpt_size;
 
-/* Manual byte buffer capacity for after_ckpt: kept separate from
- * after_ckpt_size so we can pre-reserve to the known upper bound
- * (tmp_size + src_size in merge_checkpoint) and skip the stdio
- * realloc/cookie_write churn that used to dominate merge_checkpoint. */
+/* Manual byte buffer capacity for after_ckpt. */
 static size_t after_ckpt_cap = 0;
+
+/* ===== bitmap S-section format =====
+ *   Each variable in the S section is encoded as:
+ *     [var_addr:8][var_size:8][n_pages:4][n_dirty_pages:4]
+ *     [page_bmp: ceil(n_pages/8) bytes]   -- 1 bit per page
+ *     For each dirty page in page_bmp scan order:
+ *       [word_bmp:128 bytes]              -- 1 bit per 4-byte word (1024 bits)
+ *       [page_data: BMP_PAGE_SIZE bytes]   -- full page contents
+ *
+ *   Merging two such sections: page_bmp_out = A | B. For pages dirty in
+ *   only one side, copy that side's word_bmp + data. For pages dirty in
+ *   both, OR the word bitmaps and merge the data word-by-word (later
+ *   write wins by timestamp at the section level).
+ *
+ *   Inject: for each dirty page, walk the word_bmp and write only the
+ *   words whose bit is set — keeps cache lines clean, page-aligned. */
+#define BMP_PAGE_SIZE       4096
+#define BMP_PAGE_SHIFT      12
+#define BMP_WORDS_PER_PAGE  (BMP_PAGE_SIZE / CAPE_WORD)   /* 1024 */
+#define BMP_WORD_BMP_BYTES  (BMP_WORDS_PER_PAGE / 8)      /* 128  */
+#define BMP_PAGE_ENTRY_BYTES (BMP_WORD_BMP_BYTES + BMP_PAGE_SIZE)  /* 4224 */
+
+static inline int bmp_get(const unsigned char *bmp, size_t i) {
+	return (bmp[i >> 3] >> (i & 7)) & 1;
+}
+static inline void bmp_set(unsigned char *bmp, size_t i) {
+	bmp[i >> 3] |= (unsigned char)(1u << (i & 7));
+}
+/* Round var size up to a whole page so n_pages is unambiguous. */
+static inline size_t bmp_round_pages(size_t bytes) {
+	return (bytes + BMP_PAGE_SIZE - 1) >> BMP_PAGE_SHIFT;
+}
 
 static inline void after_ckpt_reserve(size_t need)
 {
@@ -1112,79 +1141,96 @@ FILE *generate_checkpoint(VarList *vlist,
 	while ((v != NULL) && (v->var.level != level))
 		v = v->next;
 		
-	//Move to the first DPAGE
-	//while ((v != NULL) && ((v->addr + v->n * v->size) < dplist->addr))
-	//	v = v->next;
-	unsigned int data_pointer;	
-	while(file_pointer < ckpt_data_size){
-		v_addr = (*(unsigned long *) (ckpt_data + file_pointer)) ; 		
+	/* Bitmap-encoded S section. For each variable: scan word-by-word
+	 * against the snapshot (ckpt_data) to build a per-page word bitmap,
+	 * mark the page bitmap if any word changed, and emit only the
+	 * dirty pages full-size. Page-aligned by construction. */
+	unsigned int data_pointer;
+	while (file_pointer < ckpt_data_size) {
+		v_addr = (*(unsigned long *)(ckpt_data + file_pointer));
 		v1 = find_variable_by_addr(v, v_addr, level);
 		file_pointer += sizeof(unsigned long);
-		data_pointer = file_pointer; //save possition of data
-		file_pointer += v1->var.n * v1->var.size ;
-		
+		data_pointer = file_pointer;
+		file_pointer += v1->var.n * v1->var.size;
+
 		if ((v1->var.pro == CAPE_PRIVATE) || (v1->var.pro == CAPE_THREAD_PRIVATE))
 			continue;
-		
 		if ((cflag == ENTRY_CHECKPOINT) && (v1->var.pro == CAPE_LAST_PRIVATE))
 			continue;
-		
-		if ((cflag ==EXIT_CHECKPOINT) && 
-			((v1->var.pro == CAPE_FIRST_PRIVATE) ||
+		if ((cflag == EXIT_CHECKPOINT) &&
+		    ((v1->var.pro == CAPE_FIRST_PRIVATE) ||
 		     (v1->var.pro == CAPE_COPY_IN) ||
-		     (v1->var.pro == CAPE_SUM) ||
-		     (v1->var.pro == CAPE_MUL) || 
-		     (v1->var.pro == CAPE_MAX) || 
-		     (v1->var.pro == CAPE_MIN)))
-				continue ;
-		start_addr = v_addr;
-		v_end = v_addr + (v1->var.n * v1->var.size);
-		while (start_addr < v_end){
-			if (v1->var.size == CAPE_WORD){
-				//Ignore the data that is not modified
-				while ((start_addr < v_end) &&						
-					( (*(int *)start_addr) == (*(int *) (ckpt_data + data_pointer + (start_addr - v_addr ))) )	)			
-					start_addr += CAPE_WORD;				
-				//count the modified data
-				start = start_addr ;
-				while ((start_addr < v_end) &&						
-					( (*(int *)start_addr) != (*(int *) (ckpt_data + data_pointer + (start_addr - v_addr ))) )	)
-				{			
-					start_addr += CAPE_WORD ;
-				}
-				//save into ckpt file
-				if (start_addr > start){
-					len = start_addr - start ;
-					after_ckpt_append(&start, sizeof(unsigned long));
-					after_ckpt_append(&len, sizeof(unsigned int));
-					after_ckpt_append((void*)(uintptr_t)start, len);
+		     (v1->var.pro == CAPE_SUM) || (v1->var.pro == CAPE_MUL) ||
+		     (v1->var.pro == CAPE_MAX) || (v1->var.pro == CAPE_MIN)))
+			continue;
+
+		size_t var_bytes = (size_t)v1->var.n * (size_t)v1->var.size;
+		size_t n_pages   = bmp_round_pages(var_bytes);
+		size_t page_bmp_bytes = (n_pages + 7u) / 8u;
+
+		/* Pre-reserve enough space for header + page bitmap. We
+		 * append per-page payloads as we discover dirty pages, so
+		 * the entry has variable size — fine, bb grows by 2x. */
+		size_t hdr_off = after_ckpt_size;
+		unsigned long var_addr_w = v_addr;
+		unsigned long var_size_w = (unsigned long)var_bytes;
+		uint32_t n_pages_w = (uint32_t)n_pages;
+		uint32_t n_dirty_pages_w = 0;   /* patched at the end */
+		after_ckpt_append(&var_addr_w,    sizeof(var_addr_w));
+		after_ckpt_append(&var_size_w,    sizeof(var_size_w));
+		after_ckpt_append(&n_pages_w,     sizeof(n_pages_w));
+		size_t n_dirty_off = after_ckpt_size;
+		after_ckpt_append(&n_dirty_pages_w, sizeof(n_dirty_pages_w));
+		size_t page_bmp_off = after_ckpt_size;
+		after_ckpt_reserve(after_ckpt_size + page_bmp_bytes);
+		memset(after_ckpt + page_bmp_off, 0, page_bmp_bytes);
+		after_ckpt_size += page_bmp_bytes;
+
+		size_t n_dirty = 0;
+		const unsigned char *snapshot_base =
+			(const unsigned char *)ckpt_data + data_pointer;
+		const unsigned char *live_base =
+			(const unsigned char *)(uintptr_t)v_addr;
+
+		/* Per-page diff using the manual buffer for the dirty entries.
+		 * Build the word bitmap on the stack for each page. */
+		unsigned char *page_bmp_ptr = (unsigned char *)after_ckpt + page_bmp_off;
+		for (size_t p = 0; p < n_pages; p++) {
+			size_t page_off = p << BMP_PAGE_SHIFT;
+			size_t page_len = BMP_PAGE_SIZE;
+			if (page_off + page_len > var_bytes)
+				page_len = var_bytes - page_off;
+
+			unsigned char wbmp[BMP_WORD_BMP_BYTES];
+			memset(wbmp, 0, sizeof(wbmp));
+			int dirty = 0;
+			const int *live  = (const int *)(live_base  + page_off);
+			const int *snap  = (const int *)(snapshot_base + page_off);
+			size_t nwords = page_len / CAPE_WORD;
+			for (size_t w = 0; w < nwords; w++) {
+				if (live[w] != snap[w]) {
+					bmp_set(wbmp, w);
+					dirty = 1;
 				}
 			}
-			else{ //8 bytes			
-				//Ignore the data that is not modified
-				while ((start_addr < v_end) &&						
-					( (*(double*)start_addr) == (*(double *) (ckpt_data + data_pointer + (start_addr - v_addr ))) )	)			
-					start_addr += DOUBLE_CAPE_WORD;				
-				//count the modified data
-				start = start_addr ;
-				while ((start_addr < v_end) &&						
-					( (*(double *)start_addr) != (*(double *) (ckpt_data + data_pointer + (start_addr - v_addr ))) )	)
-				{			
-					//printf("%d \t" , (*(int *) start_addr) );
-					start_addr += DOUBLE_CAPE_WORD ;
-				}
-				//save into ckpt file
-				if (start_addr > start){
-					len = start_addr - start ;
-					after_ckpt_append(&start, sizeof(unsigned long));
-					after_ckpt_append(&len, sizeof(unsigned int));
-					after_ckpt_append((void*)(uintptr_t)start, len);
-				}
-	}
-		
-			//printf("\nNode %d: File pointer %ld - file size %ld \n",__node__, file_pointer, ckpt_data_size);
+			if (!dirty)
+				continue;
+			bmp_set(page_bmp_ptr, p);
+			n_dirty++;
+			/* Append [word_bmp][page_data] for this dirty page. */
+			after_ckpt_append(wbmp, BMP_WORD_BMP_BYTES);
+			after_ckpt_reserve(after_ckpt_size + BMP_PAGE_SIZE);
+			memcpy(after_ckpt + after_ckpt_size, live_base + page_off, page_len);
+			if (page_len < BMP_PAGE_SIZE)
+				memset(after_ckpt + after_ckpt_size + page_len, 0,
+				       BMP_PAGE_SIZE - page_len);
+			after_ckpt_size += BMP_PAGE_SIZE;
 		}
-	}	
+		n_dirty_pages_w = (uint32_t)n_dirty;
+		after_ckpt_patch(n_dirty_off, &n_dirty_pages_w,
+		                 sizeof(n_dirty_pages_w));
+		(void)hdr_off;
+	}
 	//Identity size of S part
 	size_s = after_ckpt_size;		
 	//Write L part into checkpoint
@@ -1216,7 +1262,159 @@ FILE *generate_checkpoint(VarList *vlist,
  * Structer of S part is: {(addr, len, data) .... }
  * --------------------------------------------------------------------- 
  */
-int merge_data(char *s1, unsigned int pos_s1, unsigned size_s1, 
+/* Bitmap-format merge: parse var entries from s1 and s2 in lockstep
+ * (CAPE invariant: same VarList order on every rank), and for each var
+ * compute page_bmp_out = page_bmp_A | page_bmp_B. Pages that are dirty
+ * on only one side are bulk-copied verbatim (no per-word work). Pages
+ * dirty on both sides have their word bitmaps OR'd and the data merged
+ * word-by-word, with B winning on collisions (B is the "newer" side
+ * picked by the caller's timestamp comparison). */
+static int merge_data_bitmap_one(const char *s1, size_t e1, size_t *p1_io,
+				 const char *s2, size_t e2, size_t *p2_io)
+{
+	size_t p1 = *p1_io;
+	size_t p2 = *p2_io;
+
+	if ((e1 - p1) < 24 || (e2 - p2) < 24)
+		return -1;
+
+	unsigned long va1 = *(const unsigned long *)(s1 + p1); p1 += 8;
+	unsigned long vs1 = *(const unsigned long *)(s1 + p1); p1 += 8;
+	uint32_t np1 = *(const uint32_t *)(s1 + p1); p1 += 4;
+	uint32_t nd1 = *(const uint32_t *)(s1 + p1); p1 += 4;
+
+	unsigned long va2 = *(const unsigned long *)(s2 + p2); p2 += 8;
+	unsigned long vs2 = *(const unsigned long *)(s2 + p2); p2 += 8;
+	uint32_t np2 = *(const uint32_t *)(s2 + p2); p2 += 4;
+	uint32_t nd2 = *(const uint32_t *)(s2 + p2); p2 += 4;
+
+	if (va1 != va2 || vs1 != vs2 || np1 != np2) {
+		fprintf(stderr,
+		        "CAPE merge_data: variable mismatch addr1=0x%lx addr2=0x%lx size1=%lu size2=%lu np1=%u np2=%u\n",
+		        va1, va2, vs1, vs2, np1, np2);
+		return -1;
+	}
+
+	uint32_t n_pages = np1;
+	size_t page_bmp_bytes = ((size_t)n_pages + 7u) / 8u;
+
+	const unsigned char *pbmp1 = (const unsigned char *)(s1 + p1);
+	p1 += page_bmp_bytes;
+	const unsigned char *entries1 = (const unsigned char *)(s1 + p1);
+	p1 += (size_t)nd1 * BMP_PAGE_ENTRY_BYTES;
+
+	const unsigned char *pbmp2 = (const unsigned char *)(s2 + p2);
+	p2 += page_bmp_bytes;
+	const unsigned char *entries2 = (const unsigned char *)(s2 + p2);
+	p2 += (size_t)nd2 * BMP_PAGE_ENTRY_BYTES;
+
+	/* Append the merged var entry directly into after_ckpt. */
+	size_t hdr_off = after_ckpt_size;
+	after_ckpt_append(&va1, sizeof(va1));
+	after_ckpt_append(&vs1, sizeof(vs1));
+	after_ckpt_append(&n_pages, sizeof(n_pages));
+	uint32_t merged_n_dirty = 0;
+	size_t nd_off = after_ckpt_size;
+	after_ckpt_append(&merged_n_dirty, sizeof(merged_n_dirty));
+
+	/* page_bmp_out = pbmp1 | pbmp2  (single linear OR pass, fast). */
+	size_t out_pbmp_off = after_ckpt_size;
+	after_ckpt_reserve(after_ckpt_size + page_bmp_bytes);
+	unsigned char *out_pbmp = (unsigned char *)after_ckpt + out_pbmp_off;
+	for (size_t i = 0; i < page_bmp_bytes; i++)
+		out_pbmp[i] = pbmp1[i] | pbmp2[i];
+	after_ckpt_size += page_bmp_bytes;
+
+	/* Walk pages: for each set bit in the OR'd page bitmap, emit one
+	 * BMP_PAGE_ENTRY_BYTES record. Per-side cursors track which entry
+	 * to consume next from each side. */
+	size_t i1 = 0, i2 = 0;
+	for (uint32_t p = 0; p < n_pages; p++) {
+		int in1 = bmp_get(pbmp1, p);
+		int in2 = bmp_get(pbmp2, p);
+		if (!in1 && !in2)
+			continue;
+		merged_n_dirty++;
+		if (in1 && !in2) {
+			after_ckpt_append(entries1 + i1 * BMP_PAGE_ENTRY_BYTES,
+			                  BMP_PAGE_ENTRY_BYTES);
+			i1++;
+		} else if (!in1 && in2) {
+			after_ckpt_append(entries2 + i2 * BMP_PAGE_ENTRY_BYTES,
+			                  BMP_PAGE_ENTRY_BYTES);
+			i2++;
+		} else {
+			const unsigned char *ea = entries1 + i1 * BMP_PAGE_ENTRY_BYTES;
+			const unsigned char *eb = entries2 + i2 * BMP_PAGE_ENTRY_BYTES;
+			unsigned char merged[BMP_PAGE_ENTRY_BYTES];
+			/* OR the word bitmaps. */
+			for (size_t b = 0; b < BMP_WORD_BMP_BYTES; b++)
+				merged[b] = ea[b] | eb[b];
+			/* For each word, pick: A_only -> A, B_only -> B,
+			 * both -> B (newer wins). When neither set, copy
+			 * either (they should match — both are unmodified). */
+			const int *da = (const int *)(ea + BMP_WORD_BMP_BYTES);
+			const int *db = (const int *)(eb + BMP_WORD_BMP_BYTES);
+			int *dout = (int *)(merged + BMP_WORD_BMP_BYTES);
+			for (size_t w = 0; w < BMP_WORDS_PER_PAGE; w++) {
+				int aset = bmp_get(ea, w);
+				int bset = bmp_get(eb, w);
+				if (bset)
+					dout[w] = db[w];
+				else if (aset)
+					dout[w] = da[w];
+				else
+					dout[w] = da[w];
+			}
+			after_ckpt_append(merged, BMP_PAGE_ENTRY_BYTES);
+			i1++;
+			i2++;
+		}
+	}
+
+	after_ckpt_patch(nd_off, &merged_n_dirty, sizeof(merged_n_dirty));
+	(void)hdr_off;
+	*p1_io = p1;
+	*p2_io = p2;
+	return 0;
+}
+
+int merge_data(char *s1, unsigned int pos_s1, unsigned size_s1,
+				char *s2, unsigned int pos_s2, unsigned size_s2){
+	size_t p1 = pos_s1;
+	size_t p2 = pos_s2;
+	size_t end_s1 = (size_t)pos_s1 + size_s1;
+	size_t end_s2 = (size_t)pos_s2 + size_s2;
+
+	if (p1 >= end_s1 && p2 >= end_s2)
+		return 0;
+	if (p1 >= end_s1) {
+		after_ckpt_append(s2 + p2, end_s2 - p2);
+		return 1;
+	}
+	if (p2 >= end_s2) {
+		after_ckpt_append(s1 + p1, end_s1 - p1);
+		return 1;
+	}
+
+	/* Lockstep merge of var entries (same order on both sides). */
+	while (p1 < end_s1 && p2 < end_s2) {
+		if (merge_data_bitmap_one(s1, end_s1, &p1, s2, end_s2, &p2) < 0)
+			return -1;
+	}
+
+	/* Pass through any leftover var entries (shouldn't happen for
+	 * matching VarLists, but handle defensively). */
+	if (p1 < end_s1)
+		after_ckpt_append(s1 + p1, end_s1 - p1);
+	if (p2 < end_s2)
+		after_ckpt_append(s2 + p2, end_s2 - p2);
+
+	return 2;
+}
+
+#if 0  /* kept dead code below for reference; bitmap path replaces it */
+int merge_data_old(char *s1, unsigned int pos_s1, unsigned size_s1,
 				char *s2, unsigned int pos_s2, unsigned size_s2){
 	unsigned int p1, p2;
 	unsigned int end_s1, end_s2;
@@ -1226,39 +1424,6 @@ int merge_data(char *s1, unsigned int pos_s1, unsigned size_s1,
 	p2 = pos_s2;
 	end_s1 = pos_s1 + size_s1;
 	end_s2 = pos_s2 + size_s2;
-	
-	//printf("*** NODE %d: Position 1= %d, possition 2 =%d: Merge %ld bytes s1 and %ld bytes s2 \n", __node__, pos_s1, pos_s2, size_s1, size_s2);
-	
-	if ((p1 >= end_s1) && (p2 >= end_s2))
-		return 0;
-	//if S1 == NULL =>  S = S2
-	if (p1 >= end_s1){
-		after_ckpt_append(s2 + p2, end_s2 - p2);
-		return 1;
-	}
-	//if S2 == NULL => S = S1
-	if (p2 >= end_s2){
-		after_ckpt_append(s1 + p1, end_s1 - p1);
-		return 1;
-	}
-	/* Need at least [addr,len] header in each stream */
-	if ((end_s1 - p1) < (sizeof(long) + sizeof(unsigned int)) ||
-	    (end_s2 - p2) < (sizeof(long) + sizeof(unsigned int)))
-		return -1;
-
-	addr1 = *(long *) (s1 + p1 );
-	p1 += sizeof(long);
-	len1 = *(unsigned int *) (s1 + p1) ;
-	p1 += sizeof(unsigned int);
-	if (len1 > (end_s1 - p1))
-		return -1;
-	
-	addr2 = *(long *) (s2 + p2 );
-	p2 += sizeof(long);
-	len2 = *(unsigned int *) (s2 + p2) ;
-	p2 += sizeof(unsigned int);
-	if (len2 > (end_s2 - p2))
-		return -1;
 	while ((p1 < end_s1) && (p2 < end_s2)){
 		//printf("\n Node %ld: (0x%lx - %ld ) + (0x%lx - %ld)", __node__, addr1, len1, addr2, len2) ;
 		if (addr1 <= addr2){
@@ -1374,8 +1539,9 @@ int merge_data(char *s1, unsigned int pos_s1, unsigned size_s1,
 	 * on fflush/fclose, and the caller reads after_ckpt_size right
 	 * after we return. The per-fwrite fflushes that used to be inside
 	 * this function dominated merge_checkpoint at scale. */
-	return 2;	
+	return 2;
 }
+#endif  /* dead old merge_data_old */
 
 static int validate_checkpoint_s_section(const char *ckpt,
 		size_t total_size,
@@ -1384,7 +1550,6 @@ static int validate_checkpoint_s_section(const char *ckpt,
 {
 	const unsigned long ckpt_header_size = sizeof(unsigned long) * 3;
 	unsigned long p = ckpt_header_size;
-	unsigned int len = 0;
 
 	if (total_size < ckpt_header_size) {
 		fprintf(stderr, "CAPE %s: checkpoint too small (%zu)\n", label, total_size);
@@ -1396,21 +1561,27 @@ static int validate_checkpoint_s_section(const char *ckpt,
 		return -1;
 	}
 
+	/* Bitmap format: each var is [addr:8][size:8][n_pages:4][n_dirty:4]
+	 * [page_bmp][n_dirty * (word_bmp + page_data)]. */
 	while (p < size_s) {
-		if ((size_s - p) < (sizeof(long) + sizeof(unsigned int))) {
-			fprintf(stderr, "CAPE %s: truncated record header at %lu/%lu\n",
+		if ((size_s - p) < 24) {
+			fprintf(stderr, "CAPE %s: truncated bitmap header at %lu/%lu\n",
 			        label, p, size_s);
 			return -1;
 		}
-		p += sizeof(long);
-		len = *(unsigned int *)(ckpt + p);
-		p += sizeof(unsigned int);
-		if (len > (size_s - p)) {
-			fprintf(stderr, "CAPE %s: truncated record payload at %lu len=%u size_s=%lu\n",
-			        label, p, len, size_s);
+		p += sizeof(unsigned long);   /* var_addr */
+		p += sizeof(unsigned long);   /* var_size */
+		uint32_t n_pages   = *(uint32_t *)(ckpt + p); p += 4;
+		uint32_t n_dirty   = *(uint32_t *)(ckpt + p); p += 4;
+		size_t page_bmp_bytes = ((size_t)n_pages + 7u) / 8u;
+		size_t entries_bytes  = (size_t)n_dirty * BMP_PAGE_ENTRY_BYTES;
+		if ((size_s - p) < page_bmp_bytes + entries_bytes) {
+			fprintf(stderr, "CAPE %s: truncated bitmap entry at %lu/%lu\n",
+			        label, p, size_s);
 			return -1;
 		}
-		p += len;
+		p += page_bmp_bytes;
+		p += entries_bytes;
 	}
 	return 0;
 }
@@ -2178,8 +2349,6 @@ int require_allreduce(char ckpt_flag){
  */
 int inject_checkpoint(char *data_ckpt, size_t file_size){
 	PROF_START(_t_inject);
-	unsigned long len=0, file_pointer = 0;
-	long addr;
 	const unsigned long ckpt_header_size = sizeof(unsigned long) * 3;
 
 	if (file_size <= ckpt_header_size) {
@@ -2187,40 +2356,88 @@ int inject_checkpoint(char *data_ckpt, size_t file_size){
 		PROF_INC(prof_inject_ckpt_count);
 		return 0;
 	}
-	//printf("\n Node %d: inject ckpt - file size = %d bytes", __node__, file_size);
-	
-	__pc__ = *(unsigned long *) (data_ckpt + sizeof(unsigned long)); //get program counter
-	file_pointer = ckpt_header_size; //timestime, program counter, size_s	
-	
-	while(file_pointer < file_size){
-		if ((file_size - file_pointer) < (sizeof(long) + sizeof(unsigned int))) {
-			fprintf(stderr, "CAPE inject_checkpoint: malformed record header at %lu/%zu\n",
-			        file_pointer, file_size);
+
+	__pc__ = *(unsigned long *)(data_ckpt + sizeof(unsigned long));
+	unsigned long size_s = *(unsigned long *)(data_ckpt + 2 * sizeof(unsigned long));
+	if (size_s > file_size) {
+		fprintf(stderr, "CAPE inject_checkpoint: bad size_s=%lu file=%zu\n",
+		        size_s, file_size);
+		return -1;
+	}
+
+	size_t fp = ckpt_header_size;
+	/* Bitmap format: walk var entries, then for each set bit in
+	 * page_bmp, apply the corresponding [word_bmp][page_data] record
+	 * by writing only the words whose word_bmp bit is set.
+	 * Page-aligned writes — we touch each page exactly once per inject. */
+	while (fp < size_s) {
+		if ((size_s - fp) < 24) {
+			fprintf(stderr, "CAPE inject_checkpoint: truncated bitmap header at %zu/%lu\n",
+			        fp, size_s);
 			return -1;
 		}
-		
-		addr = *(long *) (data_ckpt + file_pointer);		
-		file_pointer += sizeof(long);		
-		
-		len = *(unsigned int*) (data_ckpt + file_pointer );
-		file_pointer += sizeof(unsigned int);
-		if (len > (file_size - file_pointer)) {
-			fprintf(stderr,
-			        "CAPE inject_checkpoint: malformed record payload len=%lu left=%zu\n",
-			        len, file_size - file_pointer);
+		unsigned long var_addr = *(unsigned long *)(data_ckpt + fp); fp += 8;
+		unsigned long var_size = *(unsigned long *)(data_ckpt + fp); fp += 8;
+		uint32_t n_pages = *(uint32_t *)(data_ckpt + fp);            fp += 4;
+		uint32_t n_dirty = *(uint32_t *)(data_ckpt + fp);            fp += 4;
+		size_t page_bmp_bytes = ((size_t)n_pages + 7u) / 8u;
+		size_t entries_bytes = (size_t)n_dirty * BMP_PAGE_ENTRY_BYTES;
+		if ((size_s - fp) < page_bmp_bytes + entries_bytes) {
+			fprintf(stderr, "CAPE inject_checkpoint: truncated bitmap payload\n");
 			return -1;
 		}
-		if (addr == 0) {
-			fprintf(stderr, "CAPE inject_checkpoint: null destination address\n");
-			return -1;
+		const unsigned char *pbmp    = (const unsigned char *)data_ckpt + fp;
+		fp += page_bmp_bytes;
+		const unsigned char *entries = (const unsigned char *)data_ckpt + fp;
+		fp += entries_bytes;
+		(void)var_size;
+
+		size_t ei = 0;
+		for (uint32_t p = 0; p < n_pages; p++) {
+			if (!bmp_get(pbmp, p))
+				continue;
+			const unsigned char *e = entries + ei * BMP_PAGE_ENTRY_BYTES;
+			ei++;
+			const unsigned char *wbmp = e;
+			const unsigned char *pdata = e + BMP_WORD_BMP_BYTES;
+			unsigned char *dst = (unsigned char *)(uintptr_t)
+				(var_addr + ((size_t)p << BMP_PAGE_SHIFT));
+
+			/* Fast path: if every word in this page is dirty,
+			 * collapse to a single page-aligned 4 KB memcpy. The
+			 * dense workload (write_stress) hits this >99% of
+			 * the time. */
+			int all_set = 1;
+			for (size_t bi = 0; bi < BMP_WORD_BMP_BYTES; bi++) {
+				if (wbmp[bi] != 0xFFu) { all_set = 0; break; }
+			}
+			if (all_set) {
+				memcpy(dst, pdata, BMP_PAGE_SIZE);
+				continue;
+			}
+
+			/* Sparse path: for each bitmap byte, fast-skip 0x00,
+			 * memcpy 32 bytes for 0xFF, otherwise pick out the
+			 * set words via __builtin_ctz. */
+			int *dst32 = (int *)dst;
+			const int *src32 = (const int *)pdata;
+			for (size_t bi = 0; bi < BMP_WORD_BMP_BYTES; bi++) {
+				unsigned char b = wbmp[bi];
+				if (b == 0)
+					continue;
+				int *dst8 = dst32 + (bi << 3);
+				const int *src8 = src32 + (bi << 3);
+				if (b == 0xFFu) {
+					memcpy(dst8, src8, 8 * sizeof(int));
+					continue;
+				}
+				while (b) {
+					int w = __builtin_ctz(b);
+					dst8[w] = src8[w];
+					b &= (unsigned char)(b - 1);
+				}
+			}
 		}
-
-		memcpy((void*)(uintptr_t)addr, data_ckpt+file_pointer, len)	;
-
-		//if (__node__ == 0)
-		//	printf("DATA: Node %d: addr = 0x%lx - len = %d bytes - data %d \n",__node__, addr, len, *(int *) (data_ckpt+ file_pointer) );
-
-		file_pointer += len ;
 	}
 	PROF_ACC(prof_inject_ckpt_ns, _t_inject);
 	PROF_INC(prof_inject_ckpt_count);

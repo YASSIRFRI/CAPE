@@ -37,6 +37,9 @@ OMP_CFLAGS = -O2 -fopenmp
 #   make cape_mamult
 # ══════════════════════════════════════════════════════════════════════════════
 COMPILE  = $(CC) -w $(CFLAGS) $(C_FOLDER)/monitor/cape.c
+# Bitmap variant: same interface, different on-the-wire delta format
+# ([page_bmp][word_bmp][full_page] instead of sparse [addr][len][data]).
+COMPILE_BITMAP = $(CC) -w $(CFLAGS) $(C_FOLDER)/monitor/cape_bitmap.c
 
 # ── Default target ────────────────────────────────────────────────────────────
 all: cape_mamult cape_reduction cape_nested_parallel_sections cape_memwrite
@@ -56,6 +59,9 @@ cape_memwrite:
 
 cape_write_stress:
 	$(COMPILE) $(C_FOLDER)/apps/cape_write_stress.c -o $(EXE_FOLDER)/cape_write_stress $(LDFLAGS)
+
+cape_bitmap_write_stress:
+	$(COMPILE_BITMAP) $(C_FOLDER)/apps/cape_write_stress.c -o $(EXE_FOLDER)/cape_bitmap_write_stress $(LDFLAGS)
 
 cape_mamult2d:
 	$(COMPILE) $(C_FOLDER)/apps/cape_mamult2d.c -o $(EXE_FOLDER)/cape_mamult2d $(LDFLAGS)
@@ -198,7 +204,7 @@ cleanall:
         dickpt_matvec_manual dickpt_gradient_manual dickpt_memwrite_manual \
         dickpt_write_stress \
         cape_mamult cape_mamult2d cape_matvec cape_gradient cape_memwrite \
-        cape_write_stress \
+        cape_write_stress cape_bitmap_write_stress \
         cape_pi cape_prime cape_prime_number \
         cape_reduction cape_for cape_for_nowait cape_parallel_for \
         cape_vector1 cape_vector2 cape_critical cape_critical2 omp_gradient \
