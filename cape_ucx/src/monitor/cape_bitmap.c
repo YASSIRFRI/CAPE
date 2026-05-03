@@ -295,6 +295,21 @@ static inline size_t bmp_round_pages(size_t bytes) {
 	return (bytes + BMP_PAGE_SIZE - 1) >> BMP_PAGE_SHIFT;
 }
 
+/* Allocate after_ckpt to an EXACT size — used by merge_checkpoint where
+ * we know the worst-case output bound. The doubling reserve below
+ * over-allocates by up to 2x when the request crosses a power of 2,
+ * which can OOM on big merges. */
+static inline void after_ckpt_reserve_exact(size_t need)
+{
+	if (after_ckpt) {
+		free(after_ckpt);
+		after_ckpt = NULL;
+	}
+	after_ckpt_cap = need ? need : 1;
+	after_ckpt_size = 0;
+	after_ckpt = (char *)malloc(after_ckpt_cap);
+}
+
 static inline void after_ckpt_reserve(size_t need)
 {
 	if (need <= after_ckpt_cap)
@@ -1192,9 +1207,10 @@ FILE *generate_checkpoint(VarList *vlist,
 		const unsigned char *live_base =
 			(const unsigned char *)(uintptr_t)v_addr;
 
-		/* Per-page diff using the manual buffer for the dirty entries.
-		 * Build the word bitmap on the stack for each page. */
-		unsigned char *page_bmp_ptr = (unsigned char *)after_ckpt + page_bmp_off;
+		/* IMPORTANT: every after_ckpt_append may realloc the
+		 * underlying buffer, so we must NOT cache page_bmp_ptr
+		 * across appends. Track the offset and recompute the
+		 * pointer fresh each time we need to set a bit. */
 		for (size_t p = 0; p < n_pages; p++) {
 			size_t page_off = p << BMP_PAGE_SHIFT;
 			size_t page_len = BMP_PAGE_SIZE;
@@ -1215,7 +1231,7 @@ FILE *generate_checkpoint(VarList *vlist,
 			}
 			if (!dirty)
 				continue;
-			bmp_set(page_bmp_ptr, p);
+			bmp_set((unsigned char *)after_ckpt + page_bmp_off, p);
 			n_dirty++;
 			/* Append [word_bmp][page_data] for this dirty page. */
 			after_ckpt_append(wbmp, BMP_WORD_BMP_BYTES);
@@ -3143,12 +3159,26 @@ void cape_init(){
 		        PMIx_Error_string(pst));
 		exit(1);
 	}
-	PMIx_Commit();
+	pst = PMIx_Commit();
+	if (pst != PMIX_SUCCESS) {
+		fprintf(stderr, "CAPE UCX: PMIx_Commit failed: %s\n",
+		        PMIx_Error_string(pst));
+		exit(1);
+	}
 #ifdef CAPE_PROFILE
 	prof_ucx_bootstrap_pmix_put_ns += cape_get_ns() - _pmix_put_start;
 	double _pmix_fence_start = cape_get_ns();
 #endif
-	PMIx_Fence(&wildcard, 1, NULL, 0);
+	pmix_info_t fence_info;
+	PMIX_INFO_CONSTRUCT(&fence_info);
+	PMIX_INFO_LOAD(&fence_info, PMIX_COLLECT_DATA, NULL, PMIX_BOOL);
+	pst = PMIx_Fence(NULL, 0, &fence_info, 1);
+	PMIX_INFO_DESTRUCT(&fence_info);
+	if (pst != PMIX_SUCCESS) {
+		fprintf(stderr, "CAPE UCX: PMIx_Fence failed: %s\n",
+		        PMIx_Error_string(pst));
+		exit(1);
+	}
 #ifdef CAPE_PROFILE
 	prof_ucx_bootstrap_pmix_fence_ns += cape_get_ns() - _pmix_fence_start;
 #endif

@@ -1059,8 +1059,22 @@ static void cape_ucx_init(void)
                 PMIx_Error_string(pst));
         exit(1);
     }
-    PMIx_Commit();
-    PMIx_Fence(&wildcard, 1, NULL, 0);
+    pst = PMIx_Commit();
+    if (pst != PMIX_SUCCESS) {
+        fprintf(stderr, "CAPE UCX: PMIx_Commit failed: %s\n",
+                PMIx_Error_string(pst));
+        exit(1);
+    }
+    pmix_info_t fence_info;
+    PMIX_INFO_CONSTRUCT(&fence_info);
+    PMIX_INFO_LOAD(&fence_info, PMIX_COLLECT_DATA, NULL, PMIX_BOOL);
+    pst = PMIx_Fence(NULL, 0, &fence_info, 1);
+    PMIX_INFO_DESTRUCT(&fence_info);
+    if (pst != PMIX_SUCCESS) {
+        fprintf(stderr, "CAPE UCX: PMIx_Fence failed: %s\n",
+                PMIx_Error_string(pst));
+        exit(1);
+    }
 
     ucp_endpoints = malloc(num_nodes * sizeof(ucp_ep_h));
     for (int i = 0; i < num_nodes; i++) {

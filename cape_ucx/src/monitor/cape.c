@@ -2926,12 +2926,26 @@ void cape_init(){
 		        PMIx_Error_string(pst));
 		exit(1);
 	}
-	PMIx_Commit();
+	pst = PMIx_Commit();
+	if (pst != PMIX_SUCCESS) {
+		fprintf(stderr, "CAPE UCX: PMIx_Commit failed: %s\n",
+		        PMIx_Error_string(pst));
+		exit(1);
+	}
 #ifdef CAPE_PROFILE
 	prof_ucx_bootstrap_pmix_put_ns += cape_get_ns() - _pmix_put_start;
 	double _pmix_fence_start = cape_get_ns();
 #endif
-	PMIx_Fence(&wildcard, 1, NULL, 0);
+	pmix_info_t fence_info;
+	PMIX_INFO_CONSTRUCT(&fence_info);
+	PMIX_INFO_LOAD(&fence_info, PMIX_COLLECT_DATA, NULL, PMIX_BOOL);
+	pst = PMIx_Fence(NULL, 0, &fence_info, 1);
+	PMIX_INFO_DESTRUCT(&fence_info);
+	if (pst != PMIX_SUCCESS) {
+		fprintf(stderr, "CAPE UCX: PMIx_Fence failed: %s\n",
+		        PMIx_Error_string(pst));
+		exit(1);
+	}
 #ifdef CAPE_PROFILE
 	prof_ucx_bootstrap_pmix_fence_ns += cape_get_ns() - _pmix_fence_start;
 #endif
