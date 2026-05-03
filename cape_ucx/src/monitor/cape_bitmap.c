@@ -1128,11 +1128,12 @@ FILE *generate_checkpoint(VarList *vlist,
 	FILE *stream;
 	
 	timestamp = tsp;
-	/* Manual buffer: skip stdio entirely. Pre-reserve generously
-	 * (snapshot size is the upper bound for the delta); subsequent
-	 * appends are pure memcpy with no realloc. */
+	/* Start with a small buffer; doubling realloc grows it to the
+	 * actual delta size (a few MB), not the snapshot size (64 MB+).
+	 * Pre-reserving to snapshot size + power-of-2 doubling was
+	 * holding 128 MB per task — OOMed at every node count. */
 	after_ckpt_release();
-	after_ckpt_reserve(ckpt_data_size + 4096);
+	after_ckpt_reserve(64 * 1024);
 	stream = NULL;
 	
 	//write time stamp into checkpoint file
@@ -1647,7 +1648,10 @@ int merge_checkpoint(char *src_ckpt, size_t src_size, char ckpt_flag){
 	after_ckpt = NULL;
 	after_ckpt_size = 0;
 	after_ckpt_cap = 0;
-	after_ckpt_reserve(tmp_size + src_size + 64);
+	/* Exact allocation here: tmp_size + src_size is a tight upper
+	 * bound on the merged output, so doubling-realloc would round up
+	 * to 2x and waste tens of MB at later hypercube steps. */
+	after_ckpt_reserve_exact(tmp_size + src_size + 64);
 		
 	src_pointer = 0;
  	tmp_pointer =0 ;
