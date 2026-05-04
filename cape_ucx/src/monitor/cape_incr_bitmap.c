@@ -29,6 +29,7 @@
 #include <sys/epoll.h>
 #include <fcntl.h>
 #include <linux/sched.h>
+#include <sched.h>
 #include <linux/userfaultfd.h>
 #include <dirent.h>
 #include <sys/personality.h>
@@ -990,9 +991,13 @@ static void cape_recv_cb(void *request, ucs_status_t status,
     r->completed = 1;
 }
 
-/* Busy-spin ucp_worker_progress until the request completes. UCX is
- * designed for this; calling ucp_worker_wait between progress calls
- * adds per-iteration epoll latency that destroys bandwidth. */
+/* Drive ucp_worker_progress until the request completes. We spin tight
+ * while progress is making forward motion (the bandwidth-critical path),
+ * but if progress reports no events for a while we sched_yield() so the
+ * peer process — which on a single host shares this core and is the one
+ * that has to actually push our data — gets to run. Pure busy-spin
+ * starves the peer and turned 80 sendrecvs into 296M progress calls
+ * (~3 s of wasted spin) in the dickpt_bitmap_write_stress profile. */
 static void cape_ucx_wait(void *req, size_t expect_len, int check_len,
                           ucp_tag_t *out_tag)
 {
@@ -1008,9 +1013,18 @@ static void cape_ucx_wait(void *req, size_t expect_len, int check_len,
         exit(1);
     }
     cape_ucx_req_t *r = (cape_ucx_req_t *)req;
+    unsigned idle_iters = 0;
     while (!r->completed) {
-        ucp_worker_progress(ucp_worker);
+        unsigned events = ucp_worker_progress(ucp_worker);
         CAPE_PROFILE_INC(ucx_progress_calls);
+        if (events == 0) {
+            if (++idle_iters >= 64) {
+                sched_yield();
+                idle_iters = 0;
+            }
+        } else {
+            idle_iters = 0;
+        }
     }
     CAPE_PROFILE_ADD_NS(ucx_wait_ns, wait_start_ns);
     CAPE_PROFILE_ADD_NS(ucx_progress_ns, wait_start_ns);
