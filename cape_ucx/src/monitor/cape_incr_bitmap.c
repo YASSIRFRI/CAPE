@@ -30,6 +30,7 @@
 #include <fcntl.h>
 #include <linux/sched.h>
 #include <sched.h>
+#include <sys/signalfd.h>
 #include <linux/userfaultfd.h>
 #include <dirent.h>
 #include <sys/personality.h>
@@ -71,6 +72,8 @@ int child_id, parent_id;
 int control_fd = -1;
 int userfault_fd = -1;
 static int epoll_fd = -1;
+static int sigchld_fd = -1;  /* signalfd carrying SIGCHLD; lets epoll_wait
+                              * wake on child ptrace stops without polling. */
 
 struct cape_dickpt_range *tracked_ranges = NULL;
 size_t tracked_range_count = 0;
@@ -738,20 +741,71 @@ static int cape_handle_userfault_event(void)
 	return 0;
 }
 
+/* Read a batch of uffd messages in one syscall and process them all.
+ * UFFD lets a single read() return up to (buf_len / sizeof(uffd_msg))
+ * queued messages, so a 16-deep buffer cuts read() syscalls ~16× on
+ * fault storms. Returns 0 on EAGAIN (drained), >0 if events processed
+ * and another read might yield more, -1 on fatal error. */
+static int cape_drain_userfaultfd_batch(void)
+{
+	struct uffd_msg msgs[16];
+	ssize_t nread;
+	int i, n_msgs;
+	int processed = 0;
+	CAPE_PROFILE_NS_VAR(start_ns);
+
+	nread = read(userfault_fd, msgs, sizeof(msgs));
+	if (nread < 0) {
+		if (errno == EAGAIN || errno == EINTR)
+			return 0;
+		perror("read(userfaultfd)");
+		return -1;
+	}
+	if (nread == 0 || (size_t)nread % sizeof(struct uffd_msg) != 0)
+		return -1;
+	n_msgs = (int)((size_t)nread / sizeof(struct uffd_msg));
+
+	CAPE_PROFILE_NS_START(start_ns);
+	for (i = 0; i < n_msgs; ++i) {
+		struct uffd_msg *msg = &msgs[i];
+		unsigned long page_addr;
+
+		if (msg->event != UFFD_EVENT_PAGEFAULT)
+			continue;
+		if ((msg->arg.pagefault.flags & UFFD_PAGEFAULT_FLAG_WP) == 0)
+			continue;
+
+		CAPE_PROFILE_INC(userfault_events);
+		page_addr = msg->arg.pagefault.address & ~(PAGE_SIZE - 1);
+		if (cape_capture_dirty_page(child_id, page_addr) != 0) {
+			fprintf(stderr,
+				"Monitor %ld: failed to snapshot page 0x%lx\n",
+				node, page_addr);
+			return -1;
+		}
+		if (cape_userfault_writeprotect(page_addr, PAGE_SIZE, 0) == -1) {
+			perror("ioctl(UFFDIO_WRITEPROTECT clear)");
+			return -1;
+		}
+		processed++;
+	}
+	CAPE_PROFILE_ADD_NS(userfault_handle_ns, start_ns);
+	return n_msgs;
+}
+
 int cape_drain_userfaultfd(void)
 {
-	struct epoll_event ev;
-
 	if (userfault_fd < 0 || !tracking_is_enabled)
 		return 0;
 
-	while (epoll_wait(epoll_fd, &ev, 1, 0) > 0) {
-		if ((ev.events & EPOLLIN) == 0)
-			break;
-		if (cape_handle_userfault_event() != 0)
+	/* uffd is O_NONBLOCK; read in 16-msg batches until EAGAIN. */
+	for (;;) {
+		int rc = cape_drain_userfaultfd_batch();
+		if (rc < 0)
 			return -1;
+		if (rc == 0)
+			break;
 	}
-
 	return 0;
 }
 
@@ -786,55 +840,69 @@ int cape_wait_for_child_event(pid_t pid, int *status)
 		pid_t rc;
 
 		CAPE_PROFILE_INC(wait_loops);
+
+		/* Fast path: pick up any ptrace stop that already happened
+		 * before we got here (e.g. queued from a prior loop pass or
+		 * delivered while we were inside cape_drain_userfaultfd). */
 		CAPE_PROFILE_NS_START(waitpid_start_ns);
 		rc = waitpid(pid, status, WNOHANG);
 		CAPE_PROFILE_ADD_NS(waitpid_ns, waitpid_start_ns);
 		CAPE_PROFILE_INC(waitpid_calls);
-
 		if (rc == pid) {
 			CAPE_PROFILE_ADD_NS(wait_for_child_ns, total_start_ns);
 			CAPE_PROFILE_ADD_NS(wait_tracked_ns, total_start_ns);
 			return rc;
 		}
-		if (rc == -1) {
-			if (errno == EINTR)
-				continue;
+		if (rc == -1 && errno != EINTR)
 			return -1;
-		}
+
 		if (cape_drain_userfaultfd() != 0)
 			return -1;
 
 		{
-			struct epoll_event evs[2];
+			struct epoll_event evs[4];
 			int nfds, i;
 			CAPE_PROFILE_NS_VAR(poll_start_ns);
-			/* Poll userfaultfd briefly, then loop back to waitpid(WNOHANG)
-			 * to detect ptrace stops from the child. */
-			int timeout = 1;
 
 			CAPE_PROFILE_NS_START(poll_start_ns);
 			if (epoll_fd < 0) {
-				/* userfaultfd setup hasn't happened yet (app is still
-				 * starting up and about to sendmsg its uffd to us).
-				 * Just sleep briefly and loop back to waitpid — do NOT
-				 * touch epoll_fd here or we'd EBADF-out, exit, and
-				 * close the control socket while the app is mid-sendmsg. */
-				struct timespec ts = { 0, 1 * 1000 * 1000 }; /* 1 ms */
+				/* userfaultfd setup hasn't happened yet — fall
+				 * back to a tiny nanosleep + retry. */
+				struct timespec ts = { 0, 1 * 1000 * 1000 };
 				nanosleep(&ts, NULL);
 				nfds = 0;
 			} else {
-				nfds = epoll_wait(epoll_fd, evs, 2, timeout);
+				/* Block indefinitely. We get woken either by a
+				 * uffd page-fault event or by SIGCHLD arriving
+				 * via signalfd when the child hits a ptrace
+				 * stop. No more 1ms timeout polls. */
+				nfds = epoll_wait(epoll_fd, evs, 4, -1);
 			}
 			CAPE_PROFILE_ADD_NS(poll_ns, poll_start_ns);
 			CAPE_PROFILE_INC(poll_calls);
 			if (nfds == 0)
 				CAPE_PROFILE_INC(poll_timeouts);
-			if (nfds == -1 && errno != EINTR)
+			if (nfds == -1) {
+				if (errno == EINTR)
+					continue;
 				return -1;
-			for (i = 0; i < nfds; i++) {
+			}
+			for (i = 0; i < nfds; ++i) {
+				if (evs[i].data.fd == sigchld_fd &&
+				    (evs[i].events & EPOLLIN) != 0) {
+					/* Drain the signalfd queue so it
+					 * stops being level-readable. The
+					 * actual child status is fetched by
+					 * the WNOHANG waitpid on the next
+					 * loop pass. */
+					struct signalfd_siginfo si;
+					while (read(sigchld_fd, &si,
+						    sizeof(si)) == sizeof(si))
+						;
+				}
 				if (evs[i].data.fd == userfault_fd &&
 				    (evs[i].events & EPOLLIN) != 0) {
-					if (cape_handle_userfault_event() != 0)
+					if (cape_drain_userfaultfd() != 0)
 						return -1;
 				}
 			}
@@ -924,6 +992,46 @@ int cape_receive_userfaultfd_setup(void)
 	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, userfault_fd, &ev) < 0) {
 		perror("epoll_ctl(userfault_fd)");
 		return 1;
+	}
+
+	/* Make userfault_fd non-blocking so we can drain it in a tight
+	 * read() loop without ever stalling on EAGAIN. */
+	{
+		int flags = fcntl(userfault_fd, F_GETFL, 0);
+		if (flags != -1)
+			(void)fcntl(userfault_fd, F_SETFL, flags | O_NONBLOCK);
+	}
+
+	/* Block SIGCHLD and route it through signalfd. The wait loop then
+	 * blocks indefinitely on epoll_wait() and is woken either by a
+	 * userfault page-fault event (uffd) or by the kernel reporting a
+	 * ptrace stop on the child (SIGCHLD → signalfd).
+	 *
+	 * Before this change the loop did waitpid(WNOHANG) + epoll(1ms) on
+	 * every iteration: 8559 polls / 484 ms / 367 timeouts / and an
+	 * extra epoll_wait(0) inside cape_drain_userfaultfd — pure
+	 * scheduler ping-pong with no event waiting for us most of the
+	 * time. Blocking epoll lets the scheduler park the monitor thread
+	 * properly. waitpid() still works while SIGCHLD is blocked. */
+	{
+		sigset_t mask;
+		sigemptyset(&mask);
+		sigaddset(&mask, SIGCHLD);
+		if (sigprocmask(SIG_BLOCK, &mask, NULL) == -1) {
+			perror("sigprocmask(SIGCHLD)");
+			return 1;
+		}
+		sigchld_fd = signalfd(-1, &mask, SFD_CLOEXEC | SFD_NONBLOCK);
+		if (sigchld_fd < 0) {
+			perror("signalfd(SIGCHLD)");
+			return 1;
+		}
+		ev.events = EPOLLIN;
+		ev.data.fd = sigchld_fd;
+		if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, sigchld_fd, &ev) < 0) {
+			perror("epoll_ctl(sigchld_fd)");
+			return 1;
+		}
 	}
 
 	return 0;
