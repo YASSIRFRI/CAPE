@@ -109,7 +109,13 @@ static inline size_t bmp_round_pages(size_t bytes) {
 	return (bytes + BMP_PAGE_SIZE - 1) >> BMP_PAGE_SHIFT;
 }
 <<<<<<< HEAD
+<<<<<<< HEAD
 #endif
+=======
+static inline size_t bmp_bytes_for_pages(uint32_t n_pages) {
+	return ((size_t)n_pages + 7u) >> 3;
+}
+>>>>>>> parent of 5ba0aed (bitmap dickpt full)
 =======
 static inline size_t bmp_bytes_for_pages(uint32_t n_pages) {
 	return ((size_t)n_pages + 7u) >> 3;
