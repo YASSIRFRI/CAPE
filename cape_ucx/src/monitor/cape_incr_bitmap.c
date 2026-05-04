@@ -66,10 +66,7 @@ struct shared_data_ckpt * final_list_ckpt_head = NULL;
 struct shared_data_ckpt * final_list_ckpt_tail = NULL;
 
 int process_state = 0; //to follow the state of process
-int child_id;
-#if 0 /* unused legacy parent bookkeeping */
-int parent_id;
-#endif
+int child_id, parent_id;
 int control_fd = -1;
 int userfault_fd = -1;
 static int epoll_fd = -1;
@@ -104,23 +101,12 @@ static inline int bmp_get(const unsigned char *bmp, size_t i) {
 static inline void bmp_set(unsigned char *bmp, size_t i) {
 	bmp[i >> 3] |= (unsigned char)(1u << (i & 7));
 }
-#if 0 /* page-count helper from the page-only draft; word bitmap format uses constants */
 static inline size_t bmp_round_pages(size_t bytes) {
 	return (bytes + BMP_PAGE_SIZE - 1) >> BMP_PAGE_SHIFT;
 }
-<<<<<<< HEAD
-<<<<<<< HEAD
-#endif
-=======
 static inline size_t bmp_bytes_for_pages(uint32_t n_pages) {
 	return ((size_t)n_pages + 7u) >> 3;
 }
->>>>>>> parent of 5ba0aed (bitmap dickpt full)
-=======
-static inline size_t bmp_bytes_for_pages(uint32_t n_pages) {
-	return ((size_t)n_pages + 7u) >> 3;
-}
->>>>>>> parent of 5ba0aed (bitmap dickpt full)
 
 struct shared_data *is_in_share_data_list(unsigned long int addr,
 					  struct shared_data *list);
@@ -438,22 +424,15 @@ static void collect_l_words_from_page(unsigned long page_addr,
 	}
 }
 
-unsigned long child_data_start;
-#if 0 /* unused legacy heap/stack boundary bookkeeping */
-unsigned long old_brk = 0, new_brk = 0, heap_top;
-#endif
+unsigned long old_brk = 0, new_brk = 0, heap_top, child_data_start;
 
 struct user_regs_struct save_regs;
 unsigned long node;
 int num_nodes;
-#if 0 /* unused legacy total-checkpoint state */
 int total_ckpt_flag = 0;
-#endif
 int ckpt_flag = 0; // to save the state of checkpoint that is received
 
-#if 0 /* unused legacy package scheduling state */
 int number_of_packages; // number of data packages is sent at each slave
-#endif
 int current_node=1; //current slave is communicating with master 
 int current_job =0; //count the current job
 unsigned long number_of_jobs; //save number of step that will be sent from CAPE program
@@ -461,9 +440,7 @@ int jobs_per_node; //save the number of step that is divided to a node
 
 unsigned long timespan = 1 ; // timespan of checkpoints
 
-#if 0 /* unused legacy TCP/IP bootstrap fields; UCX/PMIx handles exchange */
 char *pre_node_ip, *next_node_ip, *current_node_ip, * main_node_ip;
-#endif
 
 //checkpoint variables
 unsigned char *after_ckpt, *final_ckpt, *total_ckpt, *buffer_ckpt;
@@ -473,7 +450,6 @@ FILE *total_ckpt_stream;
 size_t after_ckpt_size, final_ckpt_size, total_ckpt_size;
 int buffer_size;
 
-#if 0 /* unused workshare checkpoint buffers */
 //Workshare checkpoints
 unsigned char *mbefore_ckpt;
 FILE *mbefore_ckpt_stream;
@@ -483,7 +459,6 @@ int task_ckpt_size=0; //size of a workshare checkpoint
 
 //receive buffer
 unsigned char *before_buffer;
-#endif
 
 
 
@@ -998,19 +973,17 @@ static void cape_ucx_req_init(void *request)
 
 static void cape_send_cb(void *request, ucs_status_t status, void *user_data)
 {
-	(void)user_data;
-	cape_ucx_req_t *r = (cape_ucx_req_t *)request;
-	r->status    = status;
-	r->completed = 1;
+    cape_ucx_req_t *r = (cape_ucx_req_t *)request;
+    r->status    = status;
+    r->completed = 1;
 }
 
 static void cape_recv_cb(void *request, ucs_status_t status,
                          const ucp_tag_recv_info_t *info, void *user_data)
 {
-	(void)user_data;
-	cape_ucx_req_t *r = (cape_ucx_req_t *)request;
-	r->status    = status;
-	if (info != NULL) {
+    cape_ucx_req_t *r = (cape_ucx_req_t *)request;
+    r->status    = status;
+    if (info != NULL) {
         r->recv_len   = info->length;
         r->sender_tag = info->sender_tag;
     }
@@ -1527,15 +1500,11 @@ int clear_list(struct page_node *list);
 int send_int_value_to_child(int value);
 int get_long_int_from_child(unsigned long *value);
 int init_jobs_per_node();
-#if 0 /* unused legacy /proc readers */
 int read_current_stack_start(unsigned int pid, unsigned long src, unsigned long dst, int len);
 int read_current_brk(unsigned int pid, unsigned long src, unsigned long dst, int len);
-#endif
 int ioctl_read_data(unsigned int pid, unsigned long src, void *dst, int len);
 int ioctl_write_data(unsigned int pid, const void *src, unsigned long dst, int len);
-#if 0 /* unused with userfaultfd write-protect path */
 int ioctl_clear_write_protect(unsigned int pid, unsigned long dst);
-#endif
 void tracer_wait ( pid_t pid, int * status, int options, struct user * u );
 int lock_process_memory(unsigned int pid);
 int unlock_process_memory(unsigned int pid);
@@ -1556,10 +1525,8 @@ void end_shared_data();
 // int require_inject_workshare_checkpoint();
 
 int require_allreduce_checkpoint();
-#if 0 /* unused CAPE50 allreduce/debug prototypes */
 int allreduce_checkpoint();
 void print_data_in_list(struct shared_data *list);
-#endif
 int cape_receive_userfaultfd_setup(void);
 int cape_wait_for_child_event(pid_t pid, int *status);
 int cape_drain_userfaultfd(void);
@@ -1576,9 +1543,12 @@ int cape_drain_userfaultfd(void);
  */
 int main(int argc, char * argv[]){
 	char * exec_file; 
-	int status, rc;
+	int addr, i, state, status, old, sys_num, rc;
 	struct user u ;
-	struct user_regs_struct regs;
+	siginfo_t child_siginfo;
+	struct sigaction sa;
+	int tc = 0, flag_192 = 0, main_flag = 0, opt, reuse = 1;
+	struct user_regs_struct regs, newregs;
 	int control_pair[2];
 	char control_fd_text[32];
 
@@ -1881,7 +1851,6 @@ int init_jobs_per_node(){
 	return rc;	
 	
  }
-#if 0 /* unused legacy /proc readers kept for reference */
 /* ---------------------------------------------------
  * read_current_stack_start(): read the start adress of stack 
  * ---------------------------------------------------
@@ -1938,7 +1907,6 @@ int read_current_brk(unsigned int pid, unsigned long src, unsigned long dst, int
 	fclose(maps);
 	return 0;
 }
-#endif
 /* -----------------------------------------------------
  * ioctl_read_data(): Read data from memory of the process
  * -----------------------------------------------------
@@ -1975,7 +1943,6 @@ int ioctl_write_data(unsigned int pid, const void *src, unsigned long dst, int l
  * ---------------------------------------------------------------
  */
  int ioctl_set_write_protect(unsigned int pid, unsigned long dst){
-	(void)pid;
 	return cape_userfault_writeprotect(dst & ~(PAGE_SIZE - 1), PAGE_SIZE, 1);
 }
 
@@ -2001,7 +1968,6 @@ void tracer_wait ( pid_t pid, int * status, int options, struct user * u ){
  * ------------------------------------------------------------------ 
  */
 int lock_process_memory(unsigned int pid){
-	(void)pid;
 	if (cape_receive_userfaultfd_setup() != 0)
 		return 1;
 	tracking_is_enabled = 1;
@@ -2013,7 +1979,6 @@ int lock_process_memory(unsigned int pid){
  * -----------------------------------------------------------------------
  */
 int unlock_process_memory(unsigned int pid){
-	(void)pid;
 	int rc;
 
 	rc = cape_writeprotect_tracked_ranges(0);
@@ -2060,7 +2025,6 @@ void end_shared_data(){
 }
 
 
-#if 0 /* unused debug dump helpers */
 /* ==================================================================
  * Print data in list: This function to test the list to ensure that it is correct
  * ==================================================================
@@ -2093,7 +2057,6 @@ void end_shared_data(){
 		 ppt = ppt->next;
 	 }
  }
-#endif
  
  
  /* --------------------------------------------------------------------
@@ -3075,7 +3038,6 @@ int add_to_final_ckpt_list(struct shared_data_ckpt *plist, struct shared_data *p
 				size_t s_size, 
 				size_t s_position, int fflag ) {
 	
-	(void)s_data;
 	size_t file_pointer = 0;
 	unsigned long current_ckpt_struct;
 	unsigned char *buff = NULL;
@@ -3249,7 +3211,6 @@ int merge_external_checkpoint(FILE *src_ckpt_stream, 		\
 							  unsigned char *src_ckpt_data, \
 							  size_t src_ckpt_size 	)
  {
-	(void)src_ckpt_stream;
 	FILE *tmp_read_stream, *src_read_stream;
 	unsigned char *tmp_ckpt;
 	size_t tmp_size;
@@ -3434,7 +3395,6 @@ int is_power_of_two(unsigned int n)
   return 1;
 }
 
-#if 0 /* unused helper from old allreduce setup path */
 /*----------------------------------------------------------------------
  * find the number lower than n, but it is nearest number that powerof 2
  * ---------------------------------------------------------------------
@@ -3448,7 +3408,6 @@ unsigned int nearest_power_of_two(unsigned int n){
 	}
 	return 0;
 }
-#endif
 
 /*----------------------------------------------------------------------
  * log2(n): calculate log2 of n
@@ -3462,7 +3421,6 @@ int mylog2(unsigned int n){
 	return p;	
 }
 
-#if 0 /* unused broadcast preparation path; allreduce merges current buffers directly */
 /*---------------------------------------------------------------------*/
 // Bcast total_ckpt from master to all nodes
 
@@ -3490,7 +3448,6 @@ int prepare_allreduce_checkpoint(){
 	}
 	return rc;
 }
-#endif
 /*----------------------------------------------------------------------
  * ring_allreduce(): Allreduce using Ring algorithm
  * 
