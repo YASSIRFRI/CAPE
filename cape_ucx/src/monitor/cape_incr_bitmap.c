@@ -972,17 +972,19 @@ static void cape_ucx_req_init(void *request)
 
 static void cape_send_cb(void *request, ucs_status_t status, void *user_data)
 {
-    cape_ucx_req_t *r = (cape_ucx_req_t *)request;
-    r->status    = status;
-    r->completed = 1;
+	(void)user_data;
+	cape_ucx_req_t *r = (cape_ucx_req_t *)request;
+	r->status    = status;
+	r->completed = 1;
 }
 
 static void cape_recv_cb(void *request, ucs_status_t status,
                          const ucp_tag_recv_info_t *info, void *user_data)
 {
-    cape_ucx_req_t *r = (cape_ucx_req_t *)request;
-    r->status    = status;
-    if (info != NULL) {
+	(void)user_data;
+	cape_ucx_req_t *r = (cape_ucx_req_t *)request;
+	r->status    = status;
+	if (info != NULL) {
         r->recv_len   = info->length;
         r->sender_tag = info->sender_tag;
     }
@@ -1942,6 +1944,7 @@ int ioctl_write_data(unsigned int pid, const void *src, unsigned long dst, int l
  * ---------------------------------------------------------------
  */
  int ioctl_set_write_protect(unsigned int pid, unsigned long dst){
+	(void)pid;
 	return cape_userfault_writeprotect(dst & ~(PAGE_SIZE - 1), PAGE_SIZE, 1);
 }
 
@@ -1967,6 +1970,7 @@ void tracer_wait ( pid_t pid, int * status, int options, struct user * u ){
  * ------------------------------------------------------------------ 
  */
 int lock_process_memory(unsigned int pid){
+	(void)pid;
 	if (cape_receive_userfaultfd_setup() != 0)
 		return 1;
 	tracking_is_enabled = 1;
@@ -1978,6 +1982,7 @@ int lock_process_memory(unsigned int pid){
  * -----------------------------------------------------------------------
  */
 int unlock_process_memory(unsigned int pid){
+	(void)pid;
 	int rc;
 
 	rc = cape_writeprotect_tracked_ranges(0);
@@ -3102,6 +3107,7 @@ int add_to_final_ckpt_list(struct shared_data_ckpt *plist, struct shared_data *p
 				size_t s_size, 
 				size_t s_position, int fflag ) {
 	
+	(void)s_data;
 	size_t file_pointer = 0;
 	unsigned long current_ckpt_struct;
 	unsigned char *buff = NULL;
@@ -3275,6 +3281,7 @@ int merge_external_checkpoint(FILE *src_ckpt_stream, 		\
 							  unsigned char *src_ckpt_data, \
 							  size_t src_ckpt_size 	)
  {
+	(void)src_ckpt_stream;
 	FILE *tmp_read_stream, *src_read_stream;
 	unsigned char *tmp_ckpt;
 	size_t tmp_size;
