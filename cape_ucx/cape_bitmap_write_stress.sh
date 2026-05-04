@@ -7,6 +7,11 @@
 #SBATCH --output=cape_bitmap_write_stress_%j.out
 #SBATCH --error=cape_bitmap_write_stress_%j.err
 #SBATCH --partition=compute
+# 128 MB BSS (mem_rows) + 128 MB heap (ckpt_data snapshot) + dynamic
+# delta buffers. Default cgroup memory was OOMing at 4 nodes. Give
+# enough headroom for the worst-case 32-node merged delta (~70 MB) on
+# top of the static 256 MB.
+#SBATCH --mem=2G
 
 set -euo pipefail
 

@@ -141,7 +141,7 @@ apps: cape_mamult cape_mamult2d cape_matvec cape_gradient cape_memwrite \
 # make-time and point gcc at its `ld` with -B<dir>/.
 # Only run binutils discovery (and print the [dickpt] info lines) when an
 # actual dickpt target is being built. Cape targets don't need this.
-DICKPT_TARGETS := dickpt dickpt_monitor dickpt_mul_manual dickpt_matvec_manual dickpt_gradient_manual dickpt_memwrite_manual dickpt_write_stress
+DICKPT_TARGETS := dickpt dickpt_monitor dickpt_bitmap_monitor dickpt_mul_manual dickpt_matvec_manual dickpt_gradient_manual dickpt_memwrite_manual dickpt_write_stress
 ifneq ($(filter $(DICKPT_TARGETS),$(MAKECMDGOALS)),)
 ifneq ($(EBROOTBINUTILS),)
 DICKPT_BINUTILS_BIN := $(EBROOTBINUTILS)/bin
@@ -170,6 +170,10 @@ DICKPT_RUNTIME = $(C_FOLDER)/apps/cape_dickpt_runtime.c
 dickpt_monitor:
 	@mkdir -p $(EXE_FOLDER)
 	$(CC) -w $(CFLAGS) $(DICKPT_LD_PREFIX) $(C_FOLDER)/monitor/cape_incr.c -o $(EXE_FOLDER)/cape_dickpt_monitor $(LDFLAGS)
+
+dickpt_bitmap_monitor:
+	@mkdir -p $(EXE_FOLDER)
+	$(CC) -w $(CFLAGS) $(DICKPT_LD_PREFIX) $(C_FOLDER)/monitor/cape_incr_bitmap.c -o $(EXE_FOLDER)/cape_dickpt_bitmap_monitor $(LDFLAGS)
 
 # Dickpt application targets
 dickpt_mul_manual:
@@ -200,7 +204,7 @@ cleanall:
 	rm -f $(EXE_FOLDER)/* $(O_FOLDER)/* $(L_FOLDER)/*
 
 .PHONY: all apps cleanall \
-        dickpt dickpt_monitor dickpt_mul_manual \
+        dickpt dickpt_monitor dickpt_bitmap_monitor dickpt_mul_manual \
         dickpt_matvec_manual dickpt_gradient_manual dickpt_memwrite_manual \
         dickpt_write_stress \
         cape_mamult cape_mamult2d cape_matvec cape_gradient cape_memwrite \
