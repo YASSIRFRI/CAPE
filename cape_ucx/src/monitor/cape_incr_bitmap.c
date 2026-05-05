@@ -1013,18 +1013,18 @@ static void cape_ucx_wait(void *req, size_t expect_len, int check_len,
         exit(1);
     }
     cape_ucx_req_t *r = (cape_ucx_req_t *)req;
-    unsigned idle_iters = 0;
+    //unsigned idle_iters = 0;
     while (!r->completed) {
         unsigned events = ucp_worker_progress(ucp_worker);
         CAPE_PROFILE_INC(ucx_progress_calls);
-        if (events == 0) {
-            if (++idle_iters >= 64) {
-                sched_yield();
-                idle_iters = 0;
-            }
-        } else {
-            idle_iters = 0;
-        }
+        // if (events == 0) {
+        //     if (++idle_iters >= 64) {
+        //         sched_yield();
+        //         idle_iters = 0;
+        //     }
+        // } else {
+        //     idle_iters = 0;
+        // }
     }
     CAPE_PROFILE_ADD_NS(ucx_wait_ns, wait_start_ns);
     CAPE_PROFILE_ADD_NS(ucx_progress_ns, wait_start_ns);
