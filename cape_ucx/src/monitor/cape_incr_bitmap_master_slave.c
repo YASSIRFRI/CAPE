@@ -1247,6 +1247,33 @@ static ucc_status_t cape_ucc_oob_allgather(void *sbuf, void *rbuf,
             oob_req->n_reqs++;
     }
 
+    /* Drain to completion before returning. UCC progresses OOB calls
+     * locally and can have multiple OOB allgathers in flight at once
+     * across different ranks (different team/context-creation phases).
+     * If we let allgather() return before this call is fully done,
+     * stragglers from this call land in the next call's pre-posted
+     * recvs and we get the "got=8 expected=364" mismatch.
+     *
+     * OOB is only on the setup hot-path (a handful of calls), so
+     * blocking here costs nothing while making the protocol bulletproof. */
+    while (oob_req->status == UCC_OK) {
+        int remaining = 0;
+        ucp_worker_progress(ucp_worker);
+        CAPE_PROFILE_INC(ucx_progress_calls);
+        for (i = 0; i < num_nodes; ++i) {
+            cape_ucc_oob_release_ucx_req(&oob_req->recv_reqs[i], 1,
+                                         oob_req->msglen, &oob_req->status);
+            cape_ucc_oob_release_ucx_req(&oob_req->send_reqs[i], 0,
+                                         0, &oob_req->status);
+            if (oob_req->recv_reqs[i] != NULL) remaining++;
+            if (oob_req->send_reqs[i] != NULL) remaining++;
+        }
+        if (oob_req->status != UCC_OK)
+            break;
+        if (remaining == 0)
+            break;
+    }
+
     *req = oob_req;
     return oob_req->status;
 }
@@ -1280,31 +1307,12 @@ static void cape_ucc_oob_release_ucx_req(void **reqp, int check_len,
 
 static ucc_status_t cape_ucc_oob_allgather_test(void *req)
 {
+    /* allgather() now drains to completion before returning, so test()
+     * is just a status reporter. */
     struct cape_ucc_oob_req *oob_req = (struct cape_ucc_oob_req *)req;
-    int i, remaining = 0;
-
     if (oob_req == NULL)
         return UCC_OK;
-    if (oob_req->status != UCC_OK)
-        return oob_req->status;
-
-    ucp_worker_progress(ucp_worker);
-    CAPE_PROFILE_INC(ucx_progress_calls);
-
-    for (i = 0; i < num_nodes; ++i) {
-        cape_ucc_oob_release_ucx_req(&oob_req->recv_reqs[i], 1,
-                                     oob_req->msglen, &oob_req->status);
-        cape_ucc_oob_release_ucx_req(&oob_req->send_reqs[i], 0,
-                                     0, &oob_req->status);
-        if (oob_req->recv_reqs[i] != NULL)
-            remaining++;
-        if (oob_req->send_reqs[i] != NULL)
-            remaining++;
-    }
-
-    if (oob_req->status != UCC_OK)
-        return oob_req->status;
-    return remaining == 0 ? UCC_OK : UCC_INPROGRESS;
+    return oob_req->status;
 }
 
 static ucc_status_t cape_ucc_oob_allgather_free(void *req)
