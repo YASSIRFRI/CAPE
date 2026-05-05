@@ -1151,7 +1151,6 @@ static ucc_lib_h     cape_ucc_lib;
 static ucc_context_h cape_ucc_context;
 static ucc_team_h    cape_ucc_team;
 static int           cape_ucc_ready;
-static uint32_t      cape_ucc_oob_seq;
 
 struct cape_ucc_oob_req {
     int            n_reqs;
@@ -1173,9 +1172,9 @@ static void *cape_ucx_post_send_nb(const void *buf, size_t len,
     return ucp_tag_send_nbx(ucp_endpoints[dest], buf, len, tag, &sp);
 }
 
-static uint32_t cape_ucc_oob_next_token(void)
+static uint32_t cape_ucc_oob_token(size_t msglen)
 {
-    return TAG_UCC_OOB_BASE + cape_ucc_oob_seq++;
+    return TAG_UCC_OOB_BASE | ((uint32_t)msglen & 0x7ffffU);
 }
 
 static ucc_status_t cape_ucc_oob_allgather(void *sbuf, void *rbuf,
@@ -1184,7 +1183,7 @@ static ucc_status_t cape_ucc_oob_allgather(void *sbuf, void *rbuf,
 {
     struct cape_ucc_oob_req *oob_req;
     unsigned char *dst = (unsigned char *)rbuf;
-    uint32_t token = cape_ucc_oob_next_token();
+    uint32_t token = cape_ucc_oob_token(msglen);
     int i;
 
     (void)coll_info;
@@ -1254,7 +1253,7 @@ static void cape_ucc_oob_release_ucx_req(void **reqp, int check_len,
         fprintf(stderr, "CAPE UCC OOB UCX request failed: %s\n",
                 ucs_status_string(r->status));
         *status = UCC_ERR_NO_MESSAGE;
-    } else if (check_len && r->recv_len != expect_len) {
+    } else if (check_len && r->recv_len != 0 && r->recv_len != expect_len) {
         fprintf(stderr,
                 "CAPE UCC OOB recv length mismatch: got=%zu expected=%zu\n",
                 r->recv_len, expect_len);
