@@ -1190,151 +1190,64 @@ static uint32_t cape_ucc_oob_token(uint32_t seq, size_t msglen)
          | ((uint32_t)msglen & 0xffu);
 }
 
-static void cape_ucc_oob_release_ucx_req(void **reqp, int check_len,
-                                         size_t expect_len,
-                                         ucc_status_t *status);
-
+/* Synchronous ring allgather. Each (seq, step) pair has its own UCX
+ * tag — no two messages from anywhere in the program can ever match
+ * the same recv. Each cape_ucx_sendrecv blocks until both the local
+ * send AND local recv are complete, so step k+1 starts only after
+ * step k is fully drained. This makes any cross-call or cross-step
+ * tag aliasing impossible. OOB is only a handful of calls during
+ * setup, so the serialization cost is irrelevant. */
 static ucc_status_t cape_ucc_oob_allgather(void *sbuf, void *rbuf,
                                            size_t msglen, void *coll_info,
                                            void **req)
 {
-    struct cape_ucc_oob_req *oob_req;
     unsigned char *dst = (unsigned char *)rbuf;
-    uint32_t seq   = __sync_fetch_and_add(&cape_ucc_oob_seq, 1u);
-    uint32_t token = cape_ucc_oob_token(seq, msglen);
-    int i;
+    uint32_t       seq;
+    int            i;
 
     (void)coll_info;
 
-    oob_req = calloc(1, sizeof(*oob_req));
-    if (oob_req == NULL)
-        return UCC_ERR_NO_MEMORY;
-    oob_req->send_reqs = calloc((size_t)num_nodes, sizeof(*oob_req->send_reqs));
-    oob_req->recv_reqs = calloc((size_t)num_nodes, sizeof(*oob_req->recv_reqs));
-    if (oob_req->send_reqs == NULL || oob_req->recv_reqs == NULL) {
-        free(oob_req->send_reqs);
-        free(oob_req->recv_reqs);
-        free(oob_req);
-        return UCC_ERR_NO_MEMORY;
-    }
-    oob_req->msglen = msglen;
-    oob_req->status = UCC_OK;
+    /* Atomic post-increment. UCC OOB is collective so every rank's
+     * k-th invocation gets the same seq value. */
+    seq = __sync_fetch_and_add(&cape_ucc_oob_seq, 1u);
 
-    if (msglen == 0) {
-        *req = oob_req;
-        return UCC_OK;
-    }
+    /* Place our own contribution. */
+    if (msglen > 0)
+        memcpy(dst + (size_t)node * msglen, sbuf, msglen);
 
-    memcpy(dst + (size_t)node * msglen, sbuf, msglen);
+    /* Ring exchange: at step i, send to rank+i and recv from rank-i.
+     * cape_ucx_sendrecv is fully blocking — it returns only after
+     * both ops complete locally. */
+    for (i = 1; i < num_nodes && msglen > 0; ++i) {
+        int      dest = (int)((node + (unsigned long)i) % (unsigned long)num_nodes);
+        int      src  = (int)((node + (unsigned long)num_nodes - (unsigned long)i)
+                              % (unsigned long)num_nodes);
+        uint32_t tok  = TAG_UCC_OOB_BASE
+                      | ((seq & 0x7ffu) << 8)
+                      | ((uint32_t)i & 0xffu);
 
-    for (i = 0; i < num_nodes; ++i) {
-        if ((unsigned long)i == node)
-            continue;
-        oob_req->recv_reqs[i] = cape_ms_post_recv(
-            dst + (size_t)i * msglen, msglen, i, token);
-        if (oob_req->recv_reqs[i] != NULL)
-            oob_req->n_reqs++;
+        cape_ucx_sendrecv(sbuf,                       msglen, dest,
+                          dst + (size_t)src * msglen, msglen, src,
+                          tok);
     }
 
-    for (i = 0; i < num_nodes; ++i) {
-        void *sreq;
-
-        if ((unsigned long)i == node)
-            continue;
-        sreq = cape_ucx_post_send_nb(sbuf, msglen, i, token);
-        if (UCS_PTR_IS_ERR(sreq)) {
-            oob_req->status = UCC_ERR_NO_MESSAGE;
-            break;
-        }
-        oob_req->send_reqs[i] = sreq;
-        if (sreq != NULL)
-            oob_req->n_reqs++;
-    }
-
-    /* Drain to completion before returning. UCC progresses OOB calls
-     * locally and can have multiple OOB allgathers in flight at once
-     * across different ranks (different team/context-creation phases).
-     * If we let allgather() return before this call is fully done,
-     * stragglers from this call land in the next call's pre-posted
-     * recvs and we get the "got=8 expected=364" mismatch.
-     *
-     * OOB is only on the setup hot-path (a handful of calls), so
-     * blocking here costs nothing while making the protocol bulletproof. */
-    while (oob_req->status == UCC_OK) {
-        int remaining = 0;
-        ucp_worker_progress(ucp_worker);
-        CAPE_PROFILE_INC(ucx_progress_calls);
-        for (i = 0; i < num_nodes; ++i) {
-            cape_ucc_oob_release_ucx_req(&oob_req->recv_reqs[i], 1,
-                                         oob_req->msglen, &oob_req->status);
-            cape_ucc_oob_release_ucx_req(&oob_req->send_reqs[i], 0,
-                                         0, &oob_req->status);
-            if (oob_req->recv_reqs[i] != NULL) remaining++;
-            if (oob_req->send_reqs[i] != NULL) remaining++;
-        }
-        if (oob_req->status != UCC_OK)
-            break;
-        if (remaining == 0)
-            break;
-    }
-
-    *req = oob_req;
-    return oob_req->status;
-}
-
-static void cape_ucc_oob_release_ucx_req(void **reqp, int check_len,
-                                         size_t expect_len,
-                                         ucc_status_t *status)
-{
-    cape_ucx_req_t *r;
-
-    if (*reqp == NULL)
-        return;
-    r = (cape_ucx_req_t *)(*reqp);
-    if (!r->completed)
-        return;
-
-    if (r->status != UCS_OK) {
-        fprintf(stderr, "CAPE UCC OOB UCX request failed: %s\n",
-                ucs_status_string(r->status));
-        *status = UCC_ERR_NO_MESSAGE;
-    } else if (check_len && r->recv_len != 0 && r->recv_len != expect_len) {
-        fprintf(stderr,
-                "CAPE UCC OOB recv length mismatch: got=%zu expected=%zu\n",
-                r->recv_len, expect_len);
-        *status = UCC_ERR_NO_MESSAGE;
-    }
-
-    ucp_request_free(*reqp);
-    *reqp = NULL;
+    /* Synchronous — no async state to track. The non-NULL sentinel
+     * lets UCC distinguish "in progress" vs "no request" semantics. */
+    *req = (void *)0x1;
+    return UCC_OK;
 }
 
 static ucc_status_t cape_ucc_oob_allgather_test(void *req)
 {
-    /* allgather() now drains to completion before returning, so test()
-     * is just a status reporter. */
-    struct cape_ucc_oob_req *oob_req = (struct cape_ucc_oob_req *)req;
-    if (oob_req == NULL)
-        return UCC_OK;
-    return oob_req->status;
+    (void)req;
+    /* allgather() returns only after the operation is complete, so
+     * test() always returns OK. */
+    return UCC_OK;
 }
 
 static ucc_status_t cape_ucc_oob_allgather_free(void *req)
 {
-    struct cape_ucc_oob_req *oob_req = (struct cape_ucc_oob_req *)req;
-    int i;
-
-    if (oob_req == NULL)
-        return UCC_OK;
-    for (i = 0; i < num_nodes; ++i) {
-        if (oob_req->recv_reqs[i] != NULL)
-            cape_ms_req_release(oob_req->recv_reqs[i]);
-        if (oob_req->send_reqs[i] != NULL)
-            cape_ms_req_release(oob_req->send_reqs[i]);
-    }
-    free(oob_req->recv_reqs);
-    free(oob_req->send_reqs);
-    free(oob_req);
+    (void)req;
     return UCC_OK;
 }
 
