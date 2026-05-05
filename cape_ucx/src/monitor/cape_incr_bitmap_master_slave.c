@@ -1466,10 +1466,6 @@ static void cape_ms_req_release(void *req)
 
 static const char *cape_ucx_bootstrap_id(void)
 {
-    /* Cached so callers can hold the returned pointer for the lifetime of
-     * the process. Built as SLURM_JOB_ID + "_" + SLURM_STEP_ID so concurrent
-     * srun steps inside one allocation (e.g. 4 parallel reps from the
-     * benchmark script) get distinct rendezvous files. */
     static char buf[64];
     static int cached = 0;
     const char *override;
@@ -1502,11 +1498,6 @@ static const char *cape_ucx_bootstrap_dir(void)
 }
 
 #ifndef USE_PMIX
-/* NFS-safe publish: after creating a file under `dir`, fsync the parent
- * directory's fd so the new entry is committed to the NFS server and its
- * mtime bumps — this lets other clients' cache revalidation detect the
- * change instead of waiting out their negative-lookup cache (~30s).
- * `filepath` is the full path of the file just created. */
 static void fs_publish_dir_entry(const char *dir, const char *filepath)
 {
     int ffd = open(filepath, O_RDONLY);
