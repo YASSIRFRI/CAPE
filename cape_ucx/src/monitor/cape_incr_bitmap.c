@@ -77,74 +77,64 @@ size_t tracked_range_count = 0;
 int tracking_is_enabled = 0;
 
 /* ===== bitmap S-section format =====
- *   [BMP_S:8] [n_ranges:4]
- *   For each tracked range:
- *     [base_addr:8] [n_pages:4] [n_dirty:4]
- *     [page_bmp: ceil(n_pages/8) bytes]
- *     [dirty_pages_data: n_dirty * 4096 bytes]   (page-aligned, in page_bmp scan order)
+ *   [BMP_S:8] [n_dirty_pages:4]
+ *   [page_addr_0:8] ... [page_addr_{n-1}:8]            // sorted ascending
+ *   For each page i:
+ *     [word_bmp_i:128]                                  // 1024 bits, 1 = word changed
+ *     [changed_words_i: popcount(word_bmp_i) * 4 bytes] // packed in bit-scan order
  *
- * Merging two S sections: union the page bitmaps; pages dirty on only
- * one side are bulk-copied; pages dirty on both sides resolve by
- * "newer wins" (the merge function picks the side at section level
- * via the timestamp comparison in merge_external_checkpoint).
+ * Pack: at checkpoint time we have the pre-image of each faulted page
+ * (snapshotted on fault into page_node->data). We process_vm_readv the
+ * live post-image, build the word bitmap from a word-by-word diff, and
+ * write only the changed post-image words. Pages that faulted but are
+ * byte-identical produce a zero bitmap and are skipped entirely.
  *
- * Inject: walk page_bmp, write each dirty page in one 4 KB memcpy.
+ * Inject: per page, 1x process_vm_readv (live page) -> patch words
+ * where the bit is set from the packed stream -> 1x process_vm_writev.
+ * Exactly 1R+1W syscalls per dirty page.
  *
- * The L section that follows continues with the existing SD/MD/EP
- * markers unchanged, so reductions and shared-data still work. */
+ * Merge: two-pointer over the sorted page_addr arrays. Page only on one
+ * side -> emit verbatim. Page on both sides -> emit newer side wholesale
+ * (data-parallel programs don't produce real conflicts; the timestamp
+ * comparison in merge_external_checkpoint picks newer-wins at the
+ * section level). */
 #define BMP_S 6
 #define BMP_PAGE_SHIFT 12
 #define BMP_PAGE_SIZE (1u << BMP_PAGE_SHIFT)
+#define BMP_WORDS_PER_PAGE 1024u
+#define BMP_WORD_BMP_BYTES 128u
 
-static inline int bmp_get(const unsigned char *bmp, size_t i) {
-	return (bmp[i >> 3] >> (i & 7)) & 1;
+static inline int wbmp_get(const uint8_t *b, unsigned w) {
+	return (b[w >> 3] >> (w & 7)) & 1;
 }
-static inline void bmp_set(unsigned char *bmp, size_t i) {
-	bmp[i >> 3] |= (unsigned char)(1u << (i & 7));
+static inline void wbmp_set(uint8_t *b, unsigned w) {
+	b[w >> 3] |= (uint8_t)(1u << (w & 7));
 }
-static inline size_t bmp_round_pages(size_t bytes) {
-	return (bytes + BMP_PAGE_SIZE - 1) >> BMP_PAGE_SHIFT;
-}
-static inline size_t bmp_bytes_for_pages(uint32_t n_pages) {
-	return ((size_t)n_pages + 7u) >> 3;
+static inline unsigned wbmp_popcount(const uint8_t *b) {
+	unsigned n = 0, i;
+	for (i = 0; i < BMP_WORD_BMP_BYTES; ++i)
+		n += (unsigned)__builtin_popcount(b[i]);
+	return n;
 }
 
 struct shared_data *is_in_share_data_list(unsigned long int addr,
 					  struct shared_data *list);
 int add_item_to_list_ckpt(struct shared_data_ckpt *p);
 
-struct bmp_range_view {
-	unsigned long base;
-	uint32_t n_pages;
-	uint32_t n_dirty;
-	size_t bmp_bytes;
-	const unsigned char *bmp;
-	const unsigned char *pages;
+struct bmp_page_view {
+	uint64_t       addr;
+	const uint8_t *word_bmp;     /* 128 B, into ckpt buffer */
+	const uint8_t *changed;      /* n_changed*4 bytes, into ckpt buffer */
+	uint32_t       n_changed;
 };
 
 struct bmp_section_view {
 	int present;
 	size_t start;
 	size_t end;
-	uint32_t n_ranges;
-	struct bmp_range_view *ranges;
+	uint32_t n_pages;
+	struct bmp_page_view *pages;   /* sorted by addr */
 };
-
-static int bmp_range_cmp(const void *a, const void *b)
-{
-	const struct bmp_range_view *ra = (const struct bmp_range_view *)a;
-	const struct bmp_range_view *rb = (const struct bmp_range_view *)b;
-
-	if (ra->base < rb->base)
-		return -1;
-	if (ra->base > rb->base)
-		return 1;
-	if (ra->n_pages < rb->n_pages)
-		return -1;
-	if (ra->n_pages > rb->n_pages)
-		return 1;
-	return 0;
-}
 
 static int ckpt_read_mem(const unsigned char *data, size_t size,
 			 size_t *pos, void *dst, size_t n)
@@ -176,172 +166,65 @@ static int parse_bitmap_section(const unsigned char *data, size_t size,
 	pos += sizeof(marker);
 
 	view->present = 1;
-	if (ckpt_read_mem(data, size, &pos, &view->n_ranges,
-			  sizeof(view->n_ranges)) != 0)
-		return 1;
-	if (view->n_ranges > CAPE_DICKPT_MAX_RANGES * 4u)
+	if (ckpt_read_mem(data, size, &pos, &view->n_pages,
+			  sizeof(view->n_pages)) != 0)
 		return 1;
 
-	if (view->n_ranges != 0) {
-		view->ranges = calloc(view->n_ranges, sizeof(*view->ranges));
-		if (view->ranges == NULL)
+	if (view->n_pages != 0) {
+		view->pages = calloc(view->n_pages, sizeof(*view->pages));
+		if (view->pages == NULL)
 			return 1;
 	}
 
-	for (i = 0; i < view->n_ranges; ++i) {
-		struct bmp_range_view *r = &view->ranges[i];
-		uint64_t base;
-		uint32_t n_pages, n_dirty;
-		size_t data_bytes;
-
-		if (ckpt_read_mem(data, size, &pos, &base, sizeof(base)) != 0 ||
-		    ckpt_read_mem(data, size, &pos, &n_pages, sizeof(n_pages)) != 0 ||
-		    ckpt_read_mem(data, size, &pos, &n_dirty, sizeof(n_dirty)) != 0)
+	for (i = 0; i < view->n_pages; ++i) {
+		uint64_t addr;
+		if (ckpt_read_mem(data, size, &pos, &addr, sizeof(addr)) != 0)
 			return 1;
-		if (n_dirty > n_pages)
-			return 1;
-
-		r->base = (unsigned long)base;
-		r->n_pages = n_pages;
-		r->n_dirty = n_dirty;
-		r->bmp_bytes = bmp_bytes_for_pages(n_pages);
-		if (pos > size || r->bmp_bytes > size - pos)
-			return 1;
-		r->bmp = data + pos;
-		pos += r->bmp_bytes;
-
-		data_bytes = (size_t)n_dirty * BMP_PAGE_SIZE;
-		if (pos > size || data_bytes > size - pos)
-			return 1;
-		r->pages = data + pos;
-		pos += data_bytes;
+		view->pages[i].addr = addr;
 	}
 
-	if (view->n_ranges > 1)
-		qsort(view->ranges, view->n_ranges, sizeof(*view->ranges),
-		      bmp_range_cmp);
+	for (i = 0; i < view->n_pages; ++i) {
+		struct bmp_page_view *pg = &view->pages[i];
+		unsigned n_changed;
+		size_t payload_bytes;
+
+		if (pos > size || size - pos < BMP_WORD_BMP_BYTES)
+			return 1;
+		pg->word_bmp = data + pos;
+		pos += BMP_WORD_BMP_BYTES;
+
+		n_changed = wbmp_popcount(pg->word_bmp);
+		if (n_changed > BMP_WORDS_PER_PAGE)
+			return 1;
+		pg->n_changed = (uint32_t)n_changed;
+		payload_bytes = (size_t)n_changed * sizeof(uint32_t);
+		if (pos > size || payload_bytes > size - pos)
+			return 1;
+		pg->changed = data + pos;
+		pos += payload_bytes;
+	}
+
 	view->end = pos;
 	return 0;
 }
 
 static void free_bitmap_section(struct bmp_section_view *view)
 {
-	free(view->ranges);
-	view->ranges = NULL;
-	view->n_ranges = 0;
+	free(view->pages);
+	view->pages = NULL;
+	view->n_pages = 0;
 	view->present = 0;
 }
 
-static uint32_t bmp_count_union_bits(const struct bmp_range_view *a,
-				     const struct bmp_range_view *b,
-				     uint32_t n_pages,
-				     unsigned char *out_bmp)
+static int write_bitmap_page_payload(FILE *out, const struct bmp_page_view *pg)
 {
-	uint32_t p, n_dirty = 0;
+	size_t bytes = (size_t)pg->n_changed * sizeof(uint32_t);
 
-	memset(out_bmp, 0, bmp_bytes_for_pages(n_pages));
-	for (p = 0; p < n_pages; ++p) {
-		int abit = (a != NULL && p < a->n_pages) ? bmp_get(a->bmp, p) : 0;
-		int bbit = (b != NULL && p < b->n_pages) ? bmp_get(b->bmp, p) : 0;
-
-		if (abit || bbit) {
-			bmp_set(out_bmp, p);
-			n_dirty++;
-		}
-	}
-	return n_dirty;
-}
-
-static int write_bitmap_range_copy(FILE *out, const struct bmp_range_view *r)
-{
-	uint64_t base = (uint64_t)r->base;
-
-	if (fwrite(&base, sizeof(base), 1, out) != 1 ||
-	    fwrite(&r->n_pages, sizeof(r->n_pages), 1, out) != 1 ||
-	    fwrite(&r->n_dirty, sizeof(r->n_dirty), 1, out) != 1)
+	if (fwrite(pg->word_bmp, BMP_WORD_BMP_BYTES, 1, out) != 1)
 		return 1;
-	if (r->bmp_bytes != 0 && fwrite(r->bmp, r->bmp_bytes, 1, out) != 1)
-		return 1;
-	if (r->n_dirty != 0 &&
-	    fwrite(r->pages, (size_t)r->n_dirty * BMP_PAGE_SIZE, 1, out) != 1)
+	if (bytes != 0 && fwrite(pg->changed, bytes, 1, out) != 1)
 		return 1;
 	return 0;
-}
-
-static int write_merged_bitmap_range(FILE *out,
-				     const struct bmp_range_view *older,
-				     const struct bmp_range_view *newer)
-{
-	uint64_t base;
-	uint32_t n_pages, n_dirty, p;
-	size_t bmp_bytes;
-	unsigned char *union_bmp;
-	uint32_t older_idx = 0, newer_idx = 0;
-
-	if (older == NULL)
-		return write_bitmap_range_copy(out, newer);
-	if (newer == NULL)
-		return write_bitmap_range_copy(out, older);
-
-	base = (uint64_t)newer->base;
-	n_pages = newer->n_pages > older->n_pages ? newer->n_pages : older->n_pages;
-	bmp_bytes = bmp_bytes_for_pages(n_pages);
-	union_bmp = malloc(bmp_bytes ? bmp_bytes : 1);
-	if (union_bmp == NULL)
-		return 1;
-
-	n_dirty = bmp_count_union_bits(older, newer, n_pages, union_bmp);
-	if (fwrite(&base, sizeof(base), 1, out) != 1 ||
-	    fwrite(&n_pages, sizeof(n_pages), 1, out) != 1 ||
-	    fwrite(&n_dirty, sizeof(n_dirty), 1, out) != 1 ||
-	    (bmp_bytes != 0 && fwrite(union_bmp, bmp_bytes, 1, out) != 1)) {
-		free(union_bmp);
-		return 1;
-	}
-
-	for (p = 0; p < n_pages; ++p) {
-		int older_dirty = p < older->n_pages ? bmp_get(older->bmp, p) : 0;
-		int newer_dirty = p < newer->n_pages ? bmp_get(newer->bmp, p) : 0;
-		const unsigned char *page = NULL;
-
-		if (newer_dirty)
-			page = newer->pages + ((size_t)newer_idx * BMP_PAGE_SIZE);
-		else if (older_dirty)
-			page = older->pages + ((size_t)older_idx * BMP_PAGE_SIZE);
-
-		if (page != NULL && fwrite(page, BMP_PAGE_SIZE, 1, out) != 1) {
-			free(union_bmp);
-			return 1;
-		}
-		if (older_dirty)
-			older_idx++;
-		if (newer_dirty)
-			newer_idx++;
-	}
-
-	free(union_bmp);
-	return 0;
-}
-
-static uint32_t count_bitmap_range_union(const struct bmp_section_view *a,
-					 const struct bmp_section_view *b)
-{
-	uint32_t ia = 0, ib = 0, count = 0;
-
-	while (ia < a->n_ranges || ib < b->n_ranges) {
-		if (ib >= b->n_ranges ||
-		    (ia < a->n_ranges && a->ranges[ia].base < b->ranges[ib].base)) {
-			ia++;
-		} else if (ia >= a->n_ranges ||
-			   b->ranges[ib].base < a->ranges[ia].base) {
-			ib++;
-		} else {
-			ia++;
-			ib++;
-		}
-		count++;
-	}
-	return count;
 }
 
 static int merge_bitmap_sections(FILE *out,
@@ -349,36 +232,57 @@ static int merge_bitmap_sections(FILE *out,
 				 const struct bmp_section_view *newer)
 {
 	unsigned long marker = BMP_S;
-	uint32_t out_ranges;
+	uint32_t total = 0, i;
 	uint32_t ia = 0, ib = 0;
+	const struct bmp_page_view **out_pages = NULL;
+	size_t cap;
 
 	if (!older->present && !newer->present)
 		return 0;
 
-	out_ranges = count_bitmap_range_union(older, newer);
-	if (fwrite(&marker, sizeof(marker), 1, out) != 1 ||
-	    fwrite(&out_ranges, sizeof(out_ranges), 1, out) != 1)
+	cap = (size_t)older->n_pages + (size_t)newer->n_pages;
+	if (cap == 0) {
+		if (fwrite(&marker, sizeof(marker), 1, out) != 1 ||
+		    fwrite(&total, sizeof(total), 1, out) != 1)
+			return 1;
+		return 0;
+	}
+	out_pages = malloc(cap * sizeof(*out_pages));
+	if (out_pages == NULL)
 		return 1;
 
-	while (ia < older->n_ranges || ib < newer->n_ranges) {
-		const struct bmp_range_view *or = NULL;
-		const struct bmp_range_view *nr = NULL;
-
-		if (ib >= newer->n_ranges ||
-		    (ia < older->n_ranges &&
-		     older->ranges[ia].base < newer->ranges[ib].base)) {
-			or = &older->ranges[ia++];
-		} else if (ia >= older->n_ranges ||
-			   newer->ranges[ib].base < older->ranges[ia].base) {
-			nr = &newer->ranges[ib++];
+	while (ia < older->n_pages || ib < newer->n_pages) {
+		if (ib >= newer->n_pages ||
+		    (ia < older->n_pages &&
+		     older->pages[ia].addr < newer->pages[ib].addr)) {
+			out_pages[total++] = &older->pages[ia++];
+		} else if (ia >= older->n_pages ||
+			   newer->pages[ib].addr < older->pages[ia].addr) {
+			out_pages[total++] = &newer->pages[ib++];
 		} else {
-			or = &older->ranges[ia++];
-			nr = &newer->ranges[ib++];
+			out_pages[total++] = &newer->pages[ib++];
+			ia++;
 		}
-		if (write_merged_bitmap_range(out, or, nr) != 0)
-			return 1;
 	}
+
+	if (fwrite(&marker, sizeof(marker), 1, out) != 1 ||
+	    fwrite(&total, sizeof(total), 1, out) != 1)
+		goto fail;
+	for (i = 0; i < total; ++i) {
+		uint64_t addr = out_pages[i]->addr;
+		if (fwrite(&addr, sizeof(addr), 1, out) != 1)
+			goto fail;
+	}
+	for (i = 0; i < total; ++i) {
+		if (write_bitmap_page_payload(out, out_pages[i]) != 0)
+			goto fail;
+	}
+	free(out_pages);
 	return 0;
+
+fail:
+	free(out_pages);
+	return 1;
 }
 
 static void collect_l_word(unsigned long addr, const void *word,
@@ -2199,17 +2103,24 @@ int add_item_to_list_ckpt(struct shared_data_ckpt *p){
 	struct page_node *old_node;
 	unsigned long _timespan;
 	unsigned long marker = BMP_S;
-	uint32_t n_ranges;
-	size_t i;
 	CAPE_PROFILE_NS_VAR(profile_start_ns);
 	CAPE_PROFILE_NS_START(profile_start_ns);
-	
+
+	struct pack_page {
+		uint64_t  addr;
+		uint8_t   bmp[BMP_WORD_BMP_BYTES];
+		uint32_t  n_changed;
+		uint32_t *changed;
+	};
+	struct pack_page *pp = NULL;
+	size_t cap = 0, n = 0, k;
+
 	//open the stream memory file
-	stream = open_binary_memstream(ckpt_data, ckpt_size);		
-		
+	stream = open_binary_memstream(ckpt_data, ckpt_size);
+
 	//get the registers
 	ptrace(PTRACE_GETREGS, child_id, NULL, &save_regs);
-	
+
 	//write timespan into checkpoint
 	_timespan = tsp;
 	fwrite(&_timespan, sizeof(unsigned long), 1, stream);
@@ -2217,67 +2128,66 @@ int add_item_to_list_ckpt(struct shared_data_ckpt *p){
 	//save register to file
 	fwrite(&save_regs,sizeof(struct user_regs_struct),1, stream);
 
-	n_ranges = (uint32_t)tracked_range_count;
-	fwrite(&marker, sizeof(marker), 1, stream);
-	fwrite(&n_ranges, sizeof(n_ranges), 1, stream);
-
-	for (i = 0; i < tracked_range_count; ++i) {
-		uint64_t base = tracked_ranges[i].start & ~(uint64_t)(BMP_PAGE_SIZE - 1);
-		uint64_t end = (tracked_ranges[i].start + tracked_ranges[i].len +
-				BMP_PAGE_SIZE - 1) & ~(uint64_t)(BMP_PAGE_SIZE - 1);
-		uint32_t n_pages = (uint32_t)((end - base) >> BMP_PAGE_SHIFT);
-		uint32_t n_dirty = 0;
-		size_t bmp_bytes = bmp_bytes_for_pages(n_pages);
-		unsigned char *page_bmp = calloc(bmp_bytes ? bmp_bytes : 1, 1);
-		long dirty_pos, bmp_pos, end_pos;
-
-		if (page_bmp == NULL) {
-			perror("malloc(page_bmp)");
-			exit(1);
-		}
-
-		fwrite(&base, sizeof(base), 1, stream);
-		fwrite(&n_pages, sizeof(n_pages), 1, stream);
-		dirty_pos = ftell(stream);
-		fwrite(&n_dirty, sizeof(n_dirty), 1, stream);
-		bmp_pos = ftell(stream);
-		fwrite(page_bmp, bmp_bytes, 1, stream);
-
-		for (old_node = list; old_node != NULL; old_node = old_node->next) {
-			uint32_t page_idx;
-			unsigned char current_page[BMP_PAGE_SIZE];
-
-			if ((uint64_t)old_node->addr < base || (uint64_t)old_node->addr >= end)
-				continue;
-
-			page_idx = (uint32_t)(((uint64_t)old_node->addr - base) >> BMP_PAGE_SHIFT);
-			if (read_remote_memory(child_id, old_node->addr,
-					       current_page, BMP_PAGE_SIZE) != 0) {
-				fprintf(stderr,
-					"Monitor %ld: failed to read dirty page 0x%lx\n",
-					node, old_node->addr);
-				continue;
-			}
-
-			if (memcmp(old_node->data, current_page, BMP_PAGE_SIZE) == 0)
-				continue;
-
-			bmp_set(page_bmp, page_idx);
-			n_dirty++;
-			collect_l_words_from_page(old_node->addr,
-						  (const unsigned char *)old_node->data,
-						  current_page, cflag);
-			fwrite(current_page, BMP_PAGE_SIZE, 1, stream);
-		}
-
-		end_pos = ftell(stream);
-		fseek(stream, dirty_pos, SEEK_SET);
-		fwrite(&n_dirty, sizeof(n_dirty), 1, stream);
-		fseek(stream, bmp_pos, SEEK_SET);
-		fwrite(page_bmp, bmp_bytes, 1, stream);
-		fseek(stream, end_pos, SEEK_SET);
-		free(page_bmp);
+	for (old_node = list; old_node != NULL; old_node = old_node->next)
+		cap++;
+	if (cap != 0) {
+		pp = calloc(cap, sizeof(*pp));
+		if (pp == NULL) { perror("calloc(pack_page)"); exit(1); }
 	}
+
+	for (old_node = list; old_node != NULL; old_node = old_node->next) {
+		unsigned char current_page[BMP_PAGE_SIZE];
+		uint32_t tmp_changed[BMP_WORDS_PER_PAGE];
+		const uint32_t *pre  = (const uint32_t *)old_node->data;
+		const uint32_t *post = (const uint32_t *)current_page;
+		unsigned w, nc = 0;
+
+		if (read_remote_memory(child_id, old_node->addr,
+				       current_page, BMP_PAGE_SIZE) != 0) {
+			fprintf(stderr,
+				"Monitor %ld: failed to read dirty page 0x%lx\n",
+				node, old_node->addr);
+			continue;
+		}
+
+		memset(pp[n].bmp, 0, BMP_WORD_BMP_BYTES);
+		for (w = 0; w < BMP_WORDS_PER_PAGE; ++w) {
+			if (pre[w] != post[w]) {
+				wbmp_set(pp[n].bmp, w);
+				tmp_changed[nc++] = post[w];
+			}
+		}
+		if (nc == 0)
+			continue;
+
+		collect_l_words_from_page(old_node->addr,
+					  (const unsigned char *)old_node->data,
+					  current_page, cflag);
+
+		pp[n].addr = (uint64_t)old_node->addr;
+		pp[n].n_changed = nc;
+		pp[n].changed = malloc((size_t)nc * sizeof(uint32_t));
+		if (pp[n].changed == NULL) { perror("malloc(changed)"); exit(1); }
+		memcpy(pp[n].changed, tmp_changed, (size_t)nc * sizeof(uint32_t));
+		n++;
+	}
+
+	{
+		uint32_t n32 = (uint32_t)n;
+		fwrite(&marker, sizeof(marker), 1, stream);
+		fwrite(&n32, sizeof(n32), 1, stream);
+		for (k = 0; k < n; ++k)
+			fwrite(&pp[k].addr, sizeof(pp[k].addr), 1, stream);
+		for (k = 0; k < n; ++k) {
+			fwrite(pp[k].bmp, BMP_WORD_BMP_BYTES, 1, stream);
+			if (pp[k].n_changed != 0)
+				fwrite(pp[k].changed,
+				       (size_t)pp[k].n_changed * sizeof(uint32_t),
+				       1, stream);
+			free(pp[k].changed);
+		}
+	}
+	free(pp);
 
 	for (old_node = list; old_node != NULL; old_node = old_node->next) {
 		ioctl_set_write_protect(child_id, old_node->addr);
@@ -2502,76 +2412,90 @@ int require_send_checkpoint(){
 static int inject_bitmap_section_from_stream(FILE *stream, size_t file_size,
 					     unsigned long *file_pointer)
 {
-	uint32_t n_ranges, r;
+	uint32_t n_pages, i;
+	uint64_t *addrs = NULL;
+	int rc = 0;
 
-	if (fread(&n_ranges, sizeof(n_ranges), 1, stream) != 1)
+	if (fread(&n_pages, sizeof(n_pages), 1, stream) != 1)
 		return 1;
-	*file_pointer += sizeof(n_ranges);
+	*file_pointer += sizeof(n_pages);
 
-	for (r = 0; r < n_ranges; ++r) {
-		uint64_t base;
-		uint32_t n_pages, n_dirty, seen_dirty = 0, p;
-		size_t bmp_bytes;
-		unsigned char *page_bmp;
+	if (n_pages == 0)
+		return 0;
 
-		if (fread(&base, sizeof(base), 1, stream) != 1 ||
-		    fread(&n_pages, sizeof(n_pages), 1, stream) != 1 ||
-		    fread(&n_dirty, sizeof(n_dirty), 1, stream) != 1)
-			return 1;
-		*file_pointer += sizeof(base) + sizeof(n_pages) + sizeof(n_dirty);
-		if (n_dirty > n_pages)
-			return 1;
+	if (*file_pointer > file_size ||
+	    (size_t)n_pages * sizeof(uint64_t) > file_size - *file_pointer)
+		return 1;
 
-		bmp_bytes = bmp_bytes_for_pages(n_pages);
-		if (*file_pointer > file_size || bmp_bytes > file_size - *file_pointer)
-			return 1;
-		page_bmp = malloc(bmp_bytes ? bmp_bytes : 1);
-		if (page_bmp == NULL)
-			return 1;
-		if (bmp_bytes != 0 && fread(page_bmp, bmp_bytes, 1, stream) != 1) {
-			free(page_bmp);
-			return 1;
-		}
-		*file_pointer += bmp_bytes;
-
-		for (p = 0; p < n_pages; ++p) {
-			unsigned char page[BMP_PAGE_SIZE];
-			unsigned long dst;
-			int rc;
-
-			if (!bmp_get(page_bmp, p))
-				continue;
-			if (seen_dirty >= n_dirty) {
-				free(page_bmp);
-				return 1;
-			}
-			if (*file_pointer > file_size ||
-			    BMP_PAGE_SIZE > file_size - *file_pointer) {
-				free(page_bmp);
-				return 1;
-			}
-			if (fread(page, BMP_PAGE_SIZE, 1, stream) != 1) {
-				free(page_bmp);
-				return 1;
-			}
-			*file_pointer += BMP_PAGE_SIZE;
-			seen_dirty++;
-
-			dst = (unsigned long)(base + ((uint64_t)p << BMP_PAGE_SHIFT));
-			rc = ioctl_write_data(child_id, page, dst, BMP_PAGE_SIZE);
-			if (rc != 0) {
-				fprintf(stderr,
-					"Monitor %ld: failed to inject bitmap page at 0x%lx: %s\n",
-					node, dst, strerror(errno));
-				free(page_bmp);
-				return rc;
-			}
-		}
-		free(page_bmp);
-		if (seen_dirty != n_dirty)
-			return 1;
+	addrs = malloc((size_t)n_pages * sizeof(uint64_t));
+	if (addrs == NULL)
+		return 1;
+	if (fread(addrs, sizeof(uint64_t), n_pages, stream) != n_pages) {
+		rc = 1;
+		goto out;
 	}
-	return 0;
+	*file_pointer += (size_t)n_pages * sizeof(uint64_t);
+
+	for (i = 0; i < n_pages; ++i) {
+		uint8_t word_bmp[BMP_WORD_BMP_BYTES];
+		uint32_t live[BMP_WORDS_PER_PAGE];
+		uint32_t *changed = NULL;
+		unsigned w, k = 0, n_changed;
+		size_t payload_bytes;
+
+		if (*file_pointer > file_size ||
+		    BMP_WORD_BMP_BYTES > file_size - *file_pointer) {
+			rc = 1; goto out;
+		}
+		if (fread(word_bmp, BMP_WORD_BMP_BYTES, 1, stream) != 1) {
+			rc = 1; goto out;
+		}
+		*file_pointer += BMP_WORD_BMP_BYTES;
+
+		n_changed = wbmp_popcount(word_bmp);
+		payload_bytes = (size_t)n_changed * sizeof(uint32_t);
+		if (*file_pointer > file_size ||
+		    payload_bytes > file_size - *file_pointer) {
+			rc = 1; goto out;
+		}
+		if (n_changed != 0) {
+			changed = malloc(payload_bytes);
+			if (changed == NULL) { rc = 1; goto out; }
+			if (fread(changed, payload_bytes, 1, stream) != 1) {
+				free(changed); rc = 1; goto out;
+			}
+		}
+		*file_pointer += payload_bytes;
+
+		if (read_remote_memory(child_id, (unsigned long)addrs[i],
+				       live, BMP_PAGE_SIZE) != 0) {
+			fprintf(stderr,
+				"Monitor %ld: failed to read live page at 0x%lx\n",
+				node, (unsigned long)addrs[i]);
+			free(changed); rc = 1; goto out;
+		}
+		for (w = 0; w < BMP_WORDS_PER_PAGE; ++w) {
+			if (wbmp_get(word_bmp, w)) {
+				if (k >= n_changed) {
+					free(changed); rc = 1; goto out;
+				}
+				live[w] = changed[k++];
+			}
+		}
+		if (write_remote_memory(child_id, live,
+					(unsigned long)addrs[i],
+					BMP_PAGE_SIZE) != 0) {
+			fprintf(stderr,
+				"Monitor %ld: failed to inject page at 0x%lx: %s\n",
+				node, (unsigned long)addrs[i], strerror(errno));
+			free(changed); rc = 1; goto out;
+		}
+		free(changed);
+	}
+
+out:
+	free(addrs);
+	return rc;
 }
  
 /*------------------------------------
