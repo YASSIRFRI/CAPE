@@ -1172,9 +1172,22 @@ static void *cape_ucx_post_send_nb(const void *buf, size_t len,
     return ucp_tag_send_nbx(ucp_endpoints[dest], buf, len, tag, &sp);
 }
 
-static uint32_t cape_ucc_oob_token(size_t msglen)
+/* UCC invokes the OOB allgather multiple times during context+team
+ * setup (sometimes with the same msglen, sometimes overlapping). Tags
+ * keyed on msglen alone collide across calls and let stale stragglers
+ * land in the wrong call's recv (the "got=8 expected=364" log line).
+ * Use a per-call sequence number bumped atomically — UCC orders OOB
+ * collectives consistently across ranks, so every rank's Nth call
+ * shares the same seq, giving each call its own tag space. */
+static uint32_t cape_ucc_oob_seq = 0;
+
+static uint32_t cape_ucc_oob_token(uint32_t seq, size_t msglen)
 {
-    return TAG_UCC_OOB_BASE | ((uint32_t)msglen & 0x7ffffU);
+    /* 11-bit seq (2048 calls) | 8 low bits of msglen — both informative
+     * and well within the 20-bit token field of CAPE_UCX_TAG. */
+    return TAG_UCC_OOB_BASE
+         | ((seq & 0x7ffu) << 8)
+         | ((uint32_t)msglen & 0xffu);
 }
 
 static ucc_status_t cape_ucc_oob_allgather(void *sbuf, void *rbuf,
@@ -1183,7 +1196,8 @@ static ucc_status_t cape_ucc_oob_allgather(void *sbuf, void *rbuf,
 {
     struct cape_ucc_oob_req *oob_req;
     unsigned char *dst = (unsigned char *)rbuf;
-    uint32_t token = cape_ucc_oob_token(msglen);
+    uint32_t seq   = __sync_fetch_and_add(&cape_ucc_oob_seq, 1u);
+    uint32_t token = cape_ucc_oob_token(seq, msglen);
     int i;
 
     (void)coll_info;
