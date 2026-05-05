@@ -1190,6 +1190,10 @@ static uint32_t cape_ucc_oob_token(uint32_t seq, size_t msglen)
          | ((uint32_t)msglen & 0xffu);
 }
 
+static void cape_ucc_oob_release_ucx_req(void **reqp, int check_len,
+                                         size_t expect_len,
+                                         ucc_status_t *status);
+
 static ucc_status_t cape_ucc_oob_allgather(void *sbuf, void *rbuf,
                                            size_t msglen, void *coll_info,
                                            void **req)
