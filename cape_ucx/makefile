@@ -11,6 +11,15 @@ UCX_SRC     ?= /usr/local/src/ucx/src
 UCX_GEN     ?= /home/yassir/internship/code/matmul_bench/ucx_gen
 UCX_LIB     ?= /home/yassir/internship/code/matmul_bench/ucx_libs
 
+# ── UCC (used by the bitmap master/slave monitor for broadcast) ──────────────
+# Override on the command line, e.g.:
+#   make dickpt_bitmap_master_slave_monitor UCC_SRC=/opt/ucc/include UCC_LIB=/opt/ucc/lib
+UCC_SRC     ?=
+UCC_LIB     ?=
+comma       := ,
+UCC_FLAGS   ?= $(if $(UCC_SRC),-I$(UCC_SRC),$(shell pkg-config --cflags ucc 2>/dev/null))
+UCC_LINK    ?= $(if $(UCC_LIB),-L$(UCC_LIB) -lucc -Wl$(comma)-rpath$(comma)$(UCC_LIB),$(shell pkg-config --libs ucc 2>/dev/null))
+
 # ── PMIx (optional) ───────────────────────────────────────────────────────────
 # Pass PMIX_FLAGS and PMIX_LINK from the build script when PMIx is available.
 # Leave empty to build without PMIx (uses SLURM env vars + shared filesystem).
@@ -141,7 +150,7 @@ apps: cape_mamult cape_mamult2d cape_matvec cape_gradient cape_memwrite \
 # make-time and point gcc at its `ld` with -B<dir>/.
 # Only run binutils discovery (and print the [dickpt] info lines) when an
 # actual dickpt target is being built. Cape targets don't need this.
-DICKPT_TARGETS := dickpt dickpt_monitor dickpt_bitmap_monitor dickpt_mul_manual dickpt_matvec_manual dickpt_gradient_manual dickpt_memwrite_manual dickpt_write_stress
+DICKPT_TARGETS := dickpt dickpt_monitor dickpt_bitmap_monitor dickpt_bitmap_master_slave_monitor dickpt_mul_manual dickpt_matvec_manual dickpt_gradient_manual dickpt_memwrite_manual dickpt_write_stress
 ifneq ($(filter $(DICKPT_TARGETS),$(MAKECMDGOALS)),)
 ifneq ($(EBROOTBINUTILS),)
 DICKPT_BINUTILS_BIN := $(EBROOTBINUTILS)/bin
@@ -175,6 +184,10 @@ dickpt_bitmap_monitor:
 	@mkdir -p $(EXE_FOLDER)
 	$(CC) -w $(CFLAGS) $(DICKPT_LD_PREFIX) $(C_FOLDER)/monitor/cape_incr_bitmap.c -o $(EXE_FOLDER)/cape_dickpt_bitmap_monitor $(LDFLAGS)
 
+dickpt_bitmap_master_slave_monitor:
+	@mkdir -p $(EXE_FOLDER)
+	$(CC) -w $(CFLAGS) $(UCC_FLAGS) -DUSE_UCC_BCAST $(DICKPT_LD_PREFIX) $(C_FOLDER)/monitor/cape_incr_bitmap_master_slave.c -o $(EXE_FOLDER)/cape_dickpt_bitmap_master_slave_monitor $(LDFLAGS) $(UCC_LINK)
+
 # Dickpt application targets
 dickpt_mul_manual:
 	@mkdir -p $(EXE_FOLDER)
@@ -204,7 +217,7 @@ cleanall:
 	rm -f $(EXE_FOLDER)/* $(O_FOLDER)/* $(L_FOLDER)/*
 
 .PHONY: all apps cleanall \
-        dickpt dickpt_monitor dickpt_bitmap_monitor dickpt_mul_manual \
+        dickpt dickpt_monitor dickpt_bitmap_monitor dickpt_bitmap_master_slave_monitor dickpt_mul_manual \
         dickpt_matvec_manual dickpt_gradient_manual dickpt_memwrite_manual \
         dickpt_write_stress \
         cape_mamult cape_mamult2d cape_matvec cape_gradient cape_memwrite \

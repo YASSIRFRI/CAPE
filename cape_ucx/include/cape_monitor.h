@@ -31,7 +31,7 @@ struct shared_data_ckpt{
 //Data structure of pages
 struct page_node{
 	unsigned long addr;
-	int data[1024];  //char data[PAGE_SIZE] ???????
+	int data[1024]; 
 	struct page_node * before;
 	struct page_node * next;
 };

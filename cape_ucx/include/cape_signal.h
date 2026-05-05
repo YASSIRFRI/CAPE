@@ -80,7 +80,6 @@
 #define CAPE_LONG_INT 18		//  This is a pair of a long integer (which under IA32 is just a 32-bit integer) followed by a 32-bit integer.
 #define CAPE_SHORT_INT 19		//  This is a pair of a 16-bit short integer followed by a 32-bit integer.
 
-//Structure of sharing-data variables
 struct shared_data{
 	unsigned long addr;
 	unsigned int len;
