@@ -556,6 +556,8 @@ typedef struct {
 	unsigned long ucx_bootstrap_wait_iters;
 	unsigned long sigtrap_count;
 	unsigned long generate_ckpt_calls;
+	unsigned long merge_ext_calls;
+	unsigned long allreduce_steps;
 	/* ns timers */
 	unsigned long long process_vm_read_ns, process_vm_write_ns;
 	unsigned long long writeprotect_ns;
@@ -570,6 +572,8 @@ typedef struct {
 	unsigned long long ucx_wait_ns;
 	unsigned long long ucx_bootstrap_wait_ns;
 	unsigned long long generate_ckpt_ns;
+	unsigned long long merge_ext_ns;
+	unsigned long long allreduce_total_ns;
 } cape_profile_t;
 
 static cape_profile_t cape_profile;
@@ -605,6 +609,8 @@ static void cape_profile_report(void)
 	P_NS(ucx_send_ns); P_CNT(ucx_send_calls); P_CNT(ucx_send_bytes);
 	P_NS(ucx_recv_ns); P_CNT(ucx_recv_calls); P_CNT(ucx_recv_bytes);
 	P_NS(ucx_wait_ns);
+	P_NS(merge_ext_ns); P_CNT(merge_ext_calls);
+	P_NS(allreduce_total_ns); P_CNT(allreduce_steps);
 	P_NS(ucx_bootstrap_wait_ns); P_CNT(ucx_bootstrap_wait_iters);
 	P_CNT(sigtrap_count);
 	fflush(stderr);
@@ -1087,7 +1093,7 @@ static void cape_ucx_wait(void *req, size_t expect_len, int check_len,
         unsigned events = ucp_worker_progress(ucp_worker);
         CAPE_PROFILE_INC(ucx_progress_calls);
         if (events == 0) {
-            if (++idle_iters >= 1024) {
+            if (++idle_iters >= 1000000) {
                 sched_yield();
                 idle_iters = 0;
             }
@@ -2518,7 +2524,8 @@ int merge_external_checkpoint(FILE *src_ckpt_stream, 		\
 	unsigned char *tmp_ckpt;
 	size_t tmp_size;
 	struct bmp_section_view tmp_bmp, src_bmp;
-
+	CAPE_PROFILE_NS_VAR(merge_start_ns);
+	CAPE_PROFILE_NS_START(merge_start_ns);
 
  	size_t payload_pos;
  	int rc =0;
@@ -2589,10 +2596,12 @@ done:
  	fclose(src_read_stream);
 	free(tmp_ckpt);
 
-	/* Flush so total_ckpt_size reflects all data written by merge_data().
+	/* Flush so total_ckpt_size reflects all data written.
 	 * open_memstream only updates the size on fflush/fclose. */
 	fflush(total_ckpt_stream);
 
+	CAPE_PROFILE_ADD_NS(merge_ext_ns, merge_start_ns);
+	CAPE_PROFILE_INC(merge_ext_calls);
  	return rc;
  }
  
@@ -2825,17 +2834,15 @@ int hypercube_allreduce(){
 	for(i = 0; i < nsteps; i ++){
 		uint32_t token_size = TAG_ALLREDUCE_BASE + (i * 2);
 		uint32_t token_data = TAG_ALLREDUCE_BASE + (i * 2) + 1;
+		CAPE_PROFILE_NS_VAR(step_start_ns);
+		CAPE_PROFILE_NS_START(step_start_ns);
 
 		partner = node ^ (1 << i);
-
-
 
 		//send size of message
 		cape_ucx_sendrecv(&send_msg_size, sizeof(int), partner,
 						  &recv_msg_size, sizeof(int), partner,
 						  token_size);
-
-
 
 		recv_msg = malloc(sizeof(char) * recv_msg_size) ;
 
@@ -2864,6 +2871,8 @@ int hypercube_allreduce(){
 		send_msg = total_ckpt;
 		send_msg_size = total_ckpt_size;
 
+		CAPE_PROFILE_ADD_NS(allreduce_total_ns, step_start_ns);
+		CAPE_PROFILE_INC(allreduce_steps);
 	}
 
 
