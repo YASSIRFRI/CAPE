@@ -1413,6 +1413,16 @@ static void cape_ucx_init(void)
     if (netdev_override != NULL && netdev_override[0] != '\0')
         setenv("UCX_NET_DEVICES", netdev_override, 1);
 
+    /* RDMA tuning defaults (override-only-if-unset, so the user can still
+     * tweak via env). Put-zcopy = sender pushes via RDMA WRITE instead of
+     * receiver issuing RDMA READ; reduces stalls when the sender's buffer
+     * keeps changing across iterations. ODP = on-demand paging on Mellanox
+     * HCAs, removes the per-call ibv_reg_mr cost. PROTO_ENABLE=y picks the
+     * newer UCX protocol selection logic which handles these better. */
+    setenv("UCX_RNDV_SCHEME",   "put_zcopy", 0);
+    setenv("UCX_IB_REG_METHODS","odp",       0);
+    setenv("UCX_PROTO_ENABLE",  "y",         0);
+
     /* 1. Get rank and size */
 #ifdef USE_PMIX
     PMIX_PROC_CONSTRUCT(&pmix_myproc);
