@@ -1556,18 +1556,28 @@ static void cape_ucx_init(void)
 
     ucp_worker_release_address(ucp_worker, local_addr);
 
-    /* Diagnostic: dump the transport actually selected for the first peer
-     * endpoint so we can tell at a glance whether RDMA was picked or UCX
-     * silently fell back to TCP. Only rank 0 to avoid log spam. Suppress
-     * with CAPE_UCX_QUIET=1. */
-    if (node == 0 && getenv("CAPE_UCX_QUIET") == NULL && num_nodes > 1) {
-        fprintf(stderr, "CAPE UCX: rank 0 worker/endpoint info follows\n");
+    /* Diagnostic: dump the transport actually selected so we can tell at
+     * a glance whether RDMA was picked or UCX silently fell back to TCP.
+     * Print on EVERY rank with a prefix — SLURM may write each rank's
+     * stderr to a different file (--error=...%t.err), and rank 0's file
+     * is easy to miss. Suppress with CAPE_UCX_QUIET=1. */
+    if (getenv("CAPE_UCX_QUIET") == NULL && num_nodes > 1) {
+        int peer = (node == 0) ? 1 : 0;
+        fprintf(stderr, "[CAPE-UCX-DIAG rank=%lu] init reached diagnostic; peer=%d follows\n",
+                node, peer);
         fprintf(stderr,
-                "  hint: set CAPE_UCX_TLS=rc_x,sm,self (or rc_v,ud_v,sm,self)\n"
-                "        to force RDMA, CAPE_UCX_NET_DEVICES=mlx5_0:1 to pin HCA,\n"
-                "        UCX_LOG_LEVEL=info for full transport selection log.\n");
+                "[CAPE-UCX-DIAG rank=%lu] hint: CAPE_UCX_TLS=rc_x,sm,self (or rc_v,ud_v,sm,self),\n"
+                "[CAPE-UCX-DIAG rank=%lu]       CAPE_UCX_NET_DEVICES=mlx5_0:1, UCX_LOG_LEVEL=info\n",
+                node, node);
+        fflush(stderr);
         ucp_worker_print_info(ucp_worker, stderr);
-        ucp_ep_print_info(ucp_endpoints[1 % num_nodes], stderr);
+        ucp_ep_print_info(ucp_endpoints[peer], stderr);
+        fprintf(stderr, "[CAPE-UCX-DIAG rank=%lu] end of dump\n", node);
+        fflush(stderr);
+    } else {
+        /* Make absence visible: at least confirm init completed. */
+        fprintf(stderr, "[CAPE-UCX-DIAG rank=%lu] init complete (diag suppressed: quiet=%s nodes=%d)\n",
+                node, getenv("CAPE_UCX_QUIET") ? "1" : "0", num_nodes);
         fflush(stderr);
     }
 }
