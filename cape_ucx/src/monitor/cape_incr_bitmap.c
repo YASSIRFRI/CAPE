@@ -42,6 +42,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <time.h>
+#include <limits.h>
 
 #include "../include/cape_monitor.h"
 #include "../include/cape_dickpt_uffd.h"
@@ -1030,6 +1031,17 @@ static ucp_context_h ucp_context;
 static ucp_worker_h  ucp_worker;
 static ucp_ep_h     *ucp_endpoints;  /* one per peer process */
 
+static unsigned char *ucx_scratch_send;
+static unsigned char *ucx_scratch_recv;
+static unsigned char *ucx_scratch_merge;
+static unsigned char *ucx_scratch_total_in;
+static size_t ucx_scratch_send_cap;
+static size_t ucx_scratch_recv_cap;
+static size_t ucx_scratch_merge_cap;
+static size_t ucx_scratch_total_in_cap;
+static size_t ucx_scratch_initial_cap;
+static int total_ckpt_uses_scratch;
+
 /* Per-request state allocated by UCX in the request headroom */
 typedef struct {
     volatile int completed;
@@ -1066,13 +1078,137 @@ static void cape_recv_cb(void *request, ucs_status_t status,
     r->completed = 1;
 }
 
-/* Drive ucp_worker_progress until the request completes. We spin tight
- * while progress is making forward motion (the bandwidth-critical path),
- * but if progress reports no events for a while we sched_yield() so the
- * peer process — which on a single host shares this core and is the one
- * that has to actually push our data — gets to run. Pure busy-spin
- * starves the peer and turned 80 sendrecvs into 296M progress calls
- * (~3 s of wasted spin) in the dickpt_bitmap_write_stress profile. */
+static size_t cape_parse_size_env(const char *name, size_t fallback)
+{
+    const char *v = getenv(name);
+    char *end = NULL;
+    unsigned long long n;
+
+    if (v == NULL || v[0] == '\0')
+        return fallback;
+    errno = 0;
+    n = strtoull(v, &end, 0);
+    if (errno != 0 || end == v || n == 0 || n > (unsigned long long)SIZE_MAX)
+        return fallback;
+    return (size_t)n;
+}
+
+static int cape_scratch_reserve(unsigned char **buf, size_t *cap, size_t need)
+{
+    size_t new_cap;
+    unsigned char *new_buf;
+
+    if (need == 0)
+        need = 1;
+    if (*cap >= need)
+        return 0;
+
+    new_cap = *cap;
+    if (new_cap < ucx_scratch_initial_cap)
+        new_cap = ucx_scratch_initial_cap;
+    if (new_cap == 0)
+        new_cap = 64ull * 1024ull * 1024ull;
+    while (new_cap < need) {
+        if (new_cap > SIZE_MAX / 2) {
+            new_cap = need;
+            break;
+        }
+        new_cap *= 2;
+    }
+
+    if (posix_memalign((void **)&new_buf, 4096, new_cap) != 0)
+        return 1;
+    free(*buf);
+    *buf = new_buf;
+    *cap = new_cap;
+    return 0;
+}
+
+static int cape_copy_to_scratch(unsigned char **buf, size_t *cap,
+                                const void *src, size_t len)
+{
+    if (cape_scratch_reserve(buf, cap, len) != 0)
+        return 1;
+    if (len != 0)
+        memcpy(*buf, src, len);
+    return 0;
+}
+
+static int cape_ucx_scratch_init(void)
+{
+    ucx_scratch_initial_cap = cape_parse_size_env("CAPE_UCX_SCRATCH_BYTES",
+                                                  64ull * 1024ull * 1024ull);
+    if (cape_scratch_reserve(&ucx_scratch_send, &ucx_scratch_send_cap,
+                             ucx_scratch_initial_cap) != 0 ||
+        cape_scratch_reserve(&ucx_scratch_recv, &ucx_scratch_recv_cap,
+                             ucx_scratch_initial_cap) != 0 ||
+        cape_scratch_reserve(&ucx_scratch_merge, &ucx_scratch_merge_cap,
+                             ucx_scratch_initial_cap) != 0 ||
+        cape_scratch_reserve(&ucx_scratch_total_in, &ucx_scratch_total_in_cap,
+                             ucx_scratch_initial_cap) != 0) {
+        fprintf(stderr, "CAPE UCX: failed to allocate scratch buffers\n");
+        return 1;
+    }
+    return 0;
+}
+
+static void cape_ucx_scratch_cleanup(void)
+{
+    free(ucx_scratch_send);
+    free(ucx_scratch_recv);
+    free(ucx_scratch_merge);
+    free(ucx_scratch_total_in);
+    ucx_scratch_send = ucx_scratch_recv = ucx_scratch_merge = NULL;
+    ucx_scratch_total_in = NULL;
+    ucx_scratch_send_cap = ucx_scratch_recv_cap = ucx_scratch_merge_cap = 0;
+    ucx_scratch_total_in_cap = 0;
+}
+
+static int cape_total_stream_update_size(void)
+{
+    long pos;
+
+    if (total_ckpt_stream == NULL)
+        return 0;
+    if (fflush(total_ckpt_stream) != 0)
+        return 1;
+    pos = ftell(total_ckpt_stream);
+    if (pos < 0)
+        return 1;
+    total_ckpt_size = (size_t)pos;
+    return 0;
+}
+
+static FILE *cape_total_open_scratch_stream(size_t need)
+{
+    FILE *stream;
+
+    if (cape_scratch_reserve(&ucx_scratch_merge, &ucx_scratch_merge_cap,
+                             need + 1) != 0)
+        return NULL;
+    stream = fmemopen(ucx_scratch_merge, ucx_scratch_merge_cap, "wb");
+    if (stream == NULL)
+        return NULL;
+    total_ckpt = ucx_scratch_merge;
+    total_ckpt_size = 0;
+    total_ckpt_uses_scratch = 1;
+    total_ckpt_stream = stream;
+    return stream;
+}
+
+static void cape_total_release(void)
+{
+    if (total_ckpt_stream != NULL) {
+        fclose(total_ckpt_stream);
+        total_ckpt_stream = NULL;
+    }
+    if (total_ckpt != NULL && !total_ckpt_uses_scratch)
+        free(total_ckpt);
+    total_ckpt = NULL;
+    total_ckpt_size = 0;
+    total_ckpt_uses_scratch = 0;
+}
+
 static void cape_ucx_wait(void *req, size_t expect_len, int check_len,
                           ucp_tag_t *out_tag)
 {
@@ -1398,31 +1534,6 @@ static void ucx_exchange_addresses_via_fs(const char *dir, const char *jobid,
 /* Initialize UCX context, worker, and endpoints */
 static void cape_ucx_init(void)
 {
-    const char *rndv_override = getenv("CAPE_UCX_RNDV_THRESH");
-    if (rndv_override != NULL && rndv_override[0] != '\0')
-        setenv("UCX_RNDV_THRESH", rndv_override, 1);
-
-    /* Force a transport list (e.g. CAPE_UCX_TLS=rc_x,sm,self for IB,
-     * or rc_v,ud_v,sm,self). Without this UCX auto-selects and on some
-     * clusters silently falls back to TCP — which looks like 100 MB/s
-     * throughput in the profile instead of 10+ GB/s on RDMA. */
-    const char *tls_override = getenv("CAPE_UCX_TLS");
-    if (tls_override != NULL && tls_override[0] != '\0')
-        setenv("UCX_TLS", tls_override, 1);
-    const char *netdev_override = getenv("CAPE_UCX_NET_DEVICES");
-    if (netdev_override != NULL && netdev_override[0] != '\0')
-        setenv("UCX_NET_DEVICES", netdev_override, 1);
-
-    /* RDMA tuning defaults (override-only-if-unset, so the user can still
-     * tweak via env). Put-zcopy = sender pushes via RDMA WRITE instead of
-     * receiver issuing RDMA READ; reduces stalls when the sender's buffer
-     * keeps changing across iterations. ODP = on-demand paging on Mellanox
-     * HCAs, removes the per-call ibv_reg_mr cost. PROTO_ENABLE=y picks the
-     * newer UCX protocol selection logic which handles these better. */
-    setenv("UCX_RNDV_SCHEME",   "put_zcopy", 0);
-    setenv("UCX_IB_REG_METHODS","odp",       0);
-    setenv("UCX_PROTO_ENABLE",  "y",         0);
-
     /* 1. Get rank and size */
 #ifdef USE_PMIX
     PMIX_PROC_CONSTRUCT(&pmix_myproc);
@@ -1498,6 +1609,8 @@ static void cape_ucx_init(void)
                 ucs_status_string(st));
         exit(1);
     }
+    if (cape_ucx_scratch_init() != 0)
+        exit(1);
 
     /* 4. Exchange worker addresses and build endpoints */
     ucp_address_t *local_addr;
@@ -1581,10 +1694,6 @@ static void cape_ucx_init(void)
         int peer = (node == 0) ? 1 : 0;
         fprintf(stdout, "[CAPE-UCX-DIAG rank=%lu] init reached diagnostic; peer=%d follows\n",
                 node, peer);
-        fprintf(stdout,
-                "[CAPE-UCX-DIAG rank=%lu] hint: CAPE_UCX_TLS=rc_x,sm,self (or rc_v,ud_v,sm,self),\n"
-                "[CAPE-UCX-DIAG rank=%lu]       CAPE_UCX_NET_DEVICES=mlx5_0:1, UCX_LOG_LEVEL=info\n",
-                node, node);
         fflush(stdout);
         ucp_worker_print_info(ucp_worker, stdout);
         ucp_ep_print_info(ucp_endpoints[peer], stdout);
@@ -1617,6 +1726,7 @@ static void cape_ucx_finalize(void)
     free(ucp_endpoints);
     ucp_endpoints = NULL;
 
+    cape_ucx_scratch_cleanup();
     ucp_worker_destroy(ucp_worker);
     ucp_cleanup(ucp_context);
 
@@ -2530,10 +2640,12 @@ int merge_external_checkpoint(FILE *src_ckpt_stream, 		\
 							  unsigned char *src_ckpt_data, \
 							  size_t src_ckpt_size 	)
  {
-	FILE *tmp_read_stream, *src_read_stream;
+	FILE *tmp_read_stream = NULL, *src_read_stream = NULL;
 	unsigned char *tmp_ckpt;
 	size_t tmp_size;
-	struct bmp_section_view tmp_bmp, src_bmp;
+	struct bmp_section_view tmp_bmp = {0}, src_bmp = {0};
+	unsigned char *old_total;
+	int old_total_was_scratch;
 	CAPE_PROFILE_NS_VAR(merge_start_ns);
 	CAPE_PROFILE_NS_START(merge_start_ns);
 
@@ -2545,27 +2657,54 @@ int merge_external_checkpoint(FILE *src_ckpt_stream, 		\
 
  	if(total_ckpt_size==0)
  	{
- 		total_ckpt_stream = open_binary_memstream(&total_ckpt, &total_ckpt_size);
- 		fwrite(src_ckpt_data, src_ckpt_size, 1, total_ckpt_stream);
- 		fflush(total_ckpt_stream);
+		total_ckpt_stream = cape_total_open_scratch_stream(src_ckpt_size);
+		if (total_ckpt_stream == NULL)
+			return 1;
+		if (fwrite(src_ckpt_data, src_ckpt_size, 1, total_ckpt_stream) != 1 ||
+		    cape_total_stream_update_size() != 0)
+			return 1;
 		return 0;
  	}
 
- 	/* Save total_ckpt buffer and close the write stream */
-	//fflush(total_ckpt_stream);
-	tmp_ckpt = total_ckpt;
+	if (cape_total_stream_update_size() != 0)
+		return 1;
+	old_total = total_ckpt;
+	old_total_was_scratch = total_ckpt_uses_scratch;
 	tmp_size = total_ckpt_size;
-	fclose(total_ckpt_stream);
+
+	if (cape_copy_to_scratch(&ucx_scratch_total_in,
+				 &ucx_scratch_total_in_cap,
+				 old_total, tmp_size) != 0)
+		return 1;
+	tmp_ckpt = ucx_scratch_total_in;
+
+	if (total_ckpt_stream != NULL) {
+		fclose(total_ckpt_stream);
+		total_ckpt_stream = NULL;
+	}
+	if (!old_total_was_scratch)
+		free(old_total);
 	total_ckpt_size = 0;
 
 	tmp_read_stream = fmemopen(tmp_ckpt, tmp_size, "rb");
 	src_read_stream = fmemopen(src_ckpt_data, src_ckpt_size, "rb");
+	if (tmp_read_stream == NULL || src_read_stream == NULL) {
+		rc = 1;
+		goto done;
+	}
 
  	//1. Read timespan
- 	fread(&t1, sizeof(unsigned long), 1, tmp_read_stream);
- 	fread(&t2, sizeof(unsigned long), 1, src_read_stream);
+	if (fread(&t1, sizeof(unsigned long), 1, tmp_read_stream) != 1 ||
+	    fread(&t2, sizeof(unsigned long), 1, src_read_stream) != 1) {
+		rc = 1;
+		goto done;
+	}
 
-	total_ckpt_stream = open_binary_memstream(&total_ckpt, &total_ckpt_size);
+	total_ckpt_stream = cape_total_open_scratch_stream(tmp_size + src_ckpt_size + 4096);
+	if (total_ckpt_stream == NULL) {
+		rc = 1;
+		goto done;
+	}
 
 	payload_pos = sizeof(unsigned long) + sizeof(struct user_regs_struct);
 	memset(&tmp_bmp, 0, sizeof(tmp_bmp));
@@ -2602,13 +2741,13 @@ int merge_external_checkpoint(FILE *src_ckpt_stream, 		\
 done:
 	free_bitmap_section(&tmp_bmp);
 	free_bitmap_section(&src_bmp);
- 	fclose(tmp_read_stream);
- 	fclose(src_read_stream);
-	free(tmp_ckpt);
+	if (tmp_read_stream != NULL)
+		fclose(tmp_read_stream);
+	if (src_read_stream != NULL)
+		fclose(src_read_stream);
 
-	/* Flush so total_ckpt_size reflects all data written.
-	 * open_memstream only updates the size on fflush/fclose. */
-	fflush(total_ckpt_stream);
+	if (total_ckpt_stream != NULL && cape_total_stream_update_size() != 0)
+		rc = 1;
 
 	CAPE_PROFILE_ADD_NS(merge_ext_ns, merge_start_ns);
 	CAPE_PROFILE_INC(merge_ext_calls);
@@ -2691,20 +2830,6 @@ int is_power_of_two(unsigned int n)
 }
 
 /*----------------------------------------------------------------------
- * find the number lower than n, but it is nearest number that powerof 2
- * ---------------------------------------------------------------------
- */
-unsigned int nearest_power_of_two(unsigned int n){
-	
-	if (is_power_of_two(n)) return n;
-	while(n > 1){
-		n--;
-		if (is_power_of_two(n)) return n;
-	}
-	return 0;
-}
-
-/*----------------------------------------------------------------------
  * log2(n): calculate log2 of n
  *----------------------------------------------------------------------
  */
@@ -2716,33 +2841,6 @@ int mylog2(unsigned int n){
 	return p;	
 }
 
-/*---------------------------------------------------------------------*/
-// Bcast total_ckpt from master to all nodes
-
-int prepare_allreduce_checkpoint(){
-	int rc = 0;
-	int i;
-	//Bcast total_ckpt from master node to all nodes
-
-	if (node == 0){
-		buffer_size = total_ckpt_size;
-		buffer_ckpt = total_ckpt;
-		for (i = 1; i < num_nodes; i++){
-			cape_ucx_send(&buffer_size, sizeof(int), i, TAG_BCAST_SIZE);
-			cape_ucx_send(buffer_ckpt, buffer_size, i, TAG_BCAST_DATA);
-		}
-	}else{
-		cape_ucx_recv(&buffer_size, sizeof(int), 0, TAG_BCAST_SIZE);
-		buffer_ckpt = malloc(buffer_size);
-		cape_ucx_recv(buffer_ckpt, buffer_size, 0, TAG_BCAST_DATA);
-		//write buffer_ckpt to total_ckpt_stream file
-		total_ckpt_stream = open_binary_memstream(&total_ckpt, &total_ckpt_size);
-		fwrite(buffer_ckpt, buffer_size, 1, total_ckpt_stream);
-		fflush(total_ckpt_stream);
-		free(buffer_ckpt);
-	}
-	return rc;
-}
 /*----------------------------------------------------------------------
  * ring_allreduce(): Allreduce using Ring algorithm
  * 
@@ -2752,19 +2850,18 @@ int ring_allreduce(){
 	int rc = 0;
 
 	int message_size;
-	unsigned char * recv_buffer, * send_buffer;
-
 	FILE *ckpt_stream;
-	unsigned char *ckpt_data;
-	size_t ckpt_size;
 
 	int left;
 	int right;
 	int i;
 
-
-	send_buffer = total_ckpt   ;
-	message_size = total_ckpt_size ;
+	if (total_ckpt_size > (size_t)INT_MAX)
+		return 1;
+	if (cape_copy_to_scratch(&ucx_scratch_send, &ucx_scratch_send_cap,
+				 total_ckpt, total_ckpt_size) != 0)
+		return 1;
+	message_size = (int)total_ckpt_size;
 	int recv_message_size = 0;
 
 	left = ( node - 1 + num_nodes ) % num_nodes;
@@ -2781,43 +2878,32 @@ int ring_allreduce(){
 						  &recv_message_size, sizeof(int), left,
 						  token_size);
 
-		recv_buffer = malloc(sizeof(char) * recv_message_size) ;
+		if (recv_message_size < 0 ||
+		    cape_scratch_reserve(&ucx_scratch_recv, &ucx_scratch_recv_cap,
+					 (size_t)recv_message_size) != 0)
+			return 1;
 
 		//send data
-		cape_ucx_sendrecv(send_buffer, message_size, right,
-						  recv_buffer, recv_message_size, left,
+		cape_ucx_sendrecv(ucx_scratch_send, (size_t)message_size, right,
+						  ucx_scratch_recv, (size_t)recv_message_size, left,
 						  token_data);
 
-
-		ckpt_stream = open_binary_memstream(&ckpt_data, &ckpt_size);
-		fwrite(recv_buffer, recv_message_size, 1, ckpt_stream);
-		fflush(ckpt_stream);
-
-		rc = merge_external_checkpoint(ckpt_stream, ckpt_data, ckpt_size);
-
+		ckpt_stream = fmemopen(ucx_scratch_recv,
+				       (size_t)recv_message_size, "rb");
+		if (ckpt_stream == NULL)
+			return 1;
+		rc = merge_external_checkpoint(ckpt_stream, ucx_scratch_recv,
+					       (size_t)recv_message_size);
 		fclose(ckpt_stream);
-		/* Free the per-iteration open_memstream buffer; otherwise
-		 * the monitor leaks O(N) × msg-size per allreduce call. */
-		free(ckpt_data);
-		ckpt_data = NULL;
-		ckpt_size = 0;
-
-		/* Drop the previous send buffer (only the very first
-		 * send_buffer aliases total_ckpt and must NOT be freed
-		 * here — that one's lifetime is owned by the caller). */
-		if (i > 1)
-			free(send_buffer);
-		send_buffer = recv_buffer;
+		if (rc != 0)
+			return rc;
+		if (cape_copy_to_scratch(&ucx_scratch_send, &ucx_scratch_send_cap,
+					 ucx_scratch_recv,
+					 (size_t)recv_message_size) != 0)
+			return 1;
 		message_size = recv_message_size;
 
 	}
-	free(recv_buffer);
-/*----------------------------------------------------------------------
- * hypercube_allreduce(): Allreduce using hypercube algorithm
- * 
- * ---------------------------------------------------------------------
- */
-
 
     return rc;
 }
@@ -2829,17 +2915,10 @@ int hypercube_allreduce(){
 	int nsteps = 0;
 	int partner;
 	int send_msg_size=0, recv_msg_size=0;
-	unsigned char * send_msg;
-	unsigned char * recv_msg;
 
 	FILE *ckpt_stream;
-	unsigned char *ckpt_data;
-	size_t ckpt_size;
 
 	nsteps = mylog2 (num_nodes);
-
-	send_msg = total_ckpt;
-	send_msg_size = total_ckpt_size;
 
 	for(i = 0; i < nsteps; i ++){
 		uint32_t token_size = TAG_ALLREDUCE_BASE + (i * 2);
@@ -2849,37 +2928,38 @@ int hypercube_allreduce(){
 
 		partner = node ^ (1 << i);
 
+		if (total_ckpt_size > (size_t)INT_MAX)
+			return 1;
+		if (cape_copy_to_scratch(&ucx_scratch_send,
+					 &ucx_scratch_send_cap,
+					 total_ckpt, total_ckpt_size) != 0)
+			return 1;
+		send_msg_size = (int)total_ckpt_size;
+
 		//send size of message
 		cape_ucx_sendrecv(&send_msg_size, sizeof(int), partner,
 						  &recv_msg_size, sizeof(int), partner,
 						  token_size);
 
-		recv_msg = malloc(sizeof(char) * recv_msg_size) ;
+		if (recv_msg_size < 0 ||
+		    cape_scratch_reserve(&ucx_scratch_recv, &ucx_scratch_recv_cap,
+					 (size_t)recv_msg_size) != 0)
+			return 1;
 
 		//send data
-		cape_ucx_sendrecv(send_msg, send_msg_size, partner,
-						  recv_msg, recv_msg_size, partner,
+		cape_ucx_sendrecv(ucx_scratch_send, (size_t)send_msg_size, partner,
+						  ucx_scratch_recv, (size_t)recv_msg_size, partner,
 						  token_data);
 
-		ckpt_stream = open_binary_memstream(&ckpt_data, &ckpt_size);
-		fwrite(recv_msg, recv_msg_size, 1, ckpt_stream);
-		fflush(ckpt_stream);
-
-		rc = merge_external_checkpoint(ckpt_stream, ckpt_data, ckpt_size);
-
+		ckpt_stream = fmemopen(ucx_scratch_recv,
+				       (size_t)recv_msg_size, "rb");
+		if (ckpt_stream == NULL)
+			return 1;
+		rc = merge_external_checkpoint(ckpt_stream, ucx_scratch_recv,
+					       (size_t)recv_msg_size);
 		fclose(ckpt_stream);
-		/* open_memstream buffer + UCX recv buffer must be freed
-		 * each iteration; otherwise the monitor leaks O(log N) ×
-		 * msg-size per allreduce call. */
-		free(ckpt_data);
-		ckpt_data = NULL;
-		ckpt_size = 0;
-		free(recv_msg);
-		recv_msg = NULL;
-
-
-		send_msg = total_ckpt;
-		send_msg_size = total_ckpt_size;
+		if (rc != 0)
+			return rc;
 
 		CAPE_PROFILE_ADD_NS(allreduce_total_ns, step_start_ns);
 		CAPE_PROFILE_INC(allreduce_steps);
@@ -2891,23 +2971,10 @@ int hypercube_allreduce(){
 
 int require_allreduce_checkpoint(){
 	int rc = 0;
-	//rc = prepare_allreduce_checkpoint();	
-
 	rc=  merge_external_checkpoint(final_ckpt_stream, final_ckpt, final_ckpt_size);		
 	fclose(final_ckpt_stream);
-	/* open_memstream's buffer survives fclose — caller must free it.
-	 * Without this the per-phase ckpt buffer accumulates and the
-	 * monitor's RSS grows as O(phases × peers × dirty_per_phase),
-	 * which OOMs at large node counts. */
 	free(final_ckpt);
 	final_ckpt = NULL;
-	final_ckpt_size = 0;
-	
-	
-	
-
-	
-	
 		
 	if (is_power_of_two(num_nodes) && (total_ckpt_size < LARGE_CHECKPOINT)){
 		//Use Hypercube algorithm
@@ -2919,25 +2986,19 @@ int require_allreduce_checkpoint(){
 		 
 	}	
 	
-	/* Flush so total_ckpt / total_ckpt_size are up-to-date
-	 * (open_memstream only updates on fflush/fclose). */
-	fflush(total_ckpt_stream);
+	if (cape_total_stream_update_size() != 0)
+		return 1;
 
-	/* open_memstream is write-only — fread from it returns 0.
-	 * Open a readable stream from the buffer for injection. */
 	fclose(total_ckpt_stream);
+	total_ckpt_stream = NULL;
 	{
 		FILE *inject_stream = fmemopen(total_ckpt, total_ckpt_size, "rb");
 		size_t inject_size = total_ckpt_size;
+		if (inject_stream == NULL)
+			return 1;
 		rc = inject_checkpoint_with_write_access(inject_stream, &inject_size, &save_regs);
-		/* inject_checkpoint() fcloses the stream internally; do
-		 * NOT fclose(inject_stream) here or we double-close. */
 	}
-	/* Same as final_ckpt above: open_memstream buffer must be freed
-	 * explicitly so it doesn't accumulate across allreduce calls. */
-	free(total_ckpt);
-	total_ckpt = NULL;
-	total_ckpt_size = 0;
+	cape_total_release();
 
 	return rc;
 }
