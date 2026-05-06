@@ -2576,16 +2576,7 @@ static int inject_checkpoint_with_write_access(FILE *stream, size_t *file_size,
   int require_inject_checkpoint() {
   	int rc =0;
   	
- // 	print_data_in_ckpt_list(final_list_ckpt_head);
-  	
-  	//Join L part into checkpoint
-//  	rc = join_checkpoint(TOTAL_CHECKPOINT, final_list_ckpt_head);
-// 	final_list_ckpt_head = NULL;
-// 	final_list_ckpt_tail = NULL;
-  	
-
-  	
-  	//Inject checkpoint	
+	//Inject checkpoint	
 	rc = inject_checkpoint_with_write_access(total_ckpt_stream, &total_ckpt_size, &save_regs); 	
   	 
   	
@@ -2700,18 +2691,9 @@ done:
  		fclose(after_ckpt_stream);
  		after_ckpt_size = 0;
  		
- 		 		
-// 		print_data_in_list(data_list_head);
-// 		print_data_in_ckpt_list(final_list_ckpt_head);
- 		
- 		
  	}
  	
- //	join_checkpoint(TOTAL_CHECKPOINT, final_list_ckpt_head);
- //	final_list_ckpt_head = NULL;
- //	final_list_ckpt_tail = NULL;
- 	
- 	dprintf("Monitor %ld: After wait for all checkpoint - final_ckpt_size = %zu\n", node, final_ckpt_size);
+	dprintf("Monitor %ld: After wait for all checkpoint - final_ckpt_size = %zu\n", node, final_ckpt_size);
  	
  	if (rc!=0) printf("Monitor %ld: Error on require_waitfor_checkpoint\n", node);
  	return rc; 	
