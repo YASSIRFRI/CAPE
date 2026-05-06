@@ -1421,7 +1421,6 @@ int init_jobs_per_node();
 int read_current_stack_start(unsigned int pid, unsigned long src, unsigned long dst, int len);
 int read_current_brk(unsigned int pid, unsigned long src, unsigned long dst, int len);
 int ioctl_read_data(unsigned int pid, unsigned long src, void *dst, int len);
-int ioctl_write_data(unsigned int pid, const void *src, unsigned long dst, int len);
 int ioctl_clear_write_protect(unsigned int pid, unsigned long dst);
 void tracer_wait ( pid_t pid, int * status, int options, struct user * u );
 int lock_process_memory(unsigned int pid);
@@ -1832,13 +1831,10 @@ int read_current_brk(unsigned int pid, unsigned long src, unsigned long dst, int
 int ioctl_read_data(unsigned int pid, unsigned long src, void *dst, int len){
 	return read_remote_memory(pid, src, dst, (size_t)len) == 0 ? 1 : 0;
 }
-/* -----------------------------------------------------
- * ioctl_write_data(): wite data into memory of the process
- * -----------------------------------------------------
- */
-int ioctl_write_data(unsigned int pid, const void *src, unsigned long dst, int len){
-	return write_remote_memory(pid, src, dst, (size_t)len);
-}
+
+//int ioctl_write_data(unsigned int pid, const void *src, unsigned long dst, int len){
+	//return write_remote_memory(pid, src, dst, (size_t)len);
+//}
 /* -----------------------------------------------------------------
  * iotcl_clear_write_protect(): Version 2.0
  * Clear write protected and save address, data of a page
@@ -2583,8 +2579,6 @@ int inject_checkpoint(FILE *stream, size_t *file_size, struct user_regs_struct *
 				//printf("\nNode %ld: addr = %lx - current_ckpt_struct = MD", node, addr);	
 				break;
 		}
-		
-  		
   		//read data from checkpoint  		
   		//read len from checkpoint
   		len = 0;
@@ -2618,8 +2612,7 @@ int inject_checkpoint(FILE *stream, size_t *file_size, struct user_regs_struct *
   		}
   		file_pointer +=len;
   		fseek(stream, file_pointer, SEEK_SET);  		
- 		
-  		rc = ioctl_write_data(child_id, buff, addr, len);
+  		rc = write_remote_memory(child_id, buff, addr,(size_t)len);
   		free(buff);
   		if (rc != 0) {
   			fprintf(stderr,
@@ -2991,6 +2984,7 @@ int add_to_final_ckpt_list(struct shared_data_ckpt *plist, struct shared_data *p
  	{
 		buff = NULL;
  		//read address from after checkpoint
+		printf("Merging Data: file pointer: %d\n",file_pointer);
   		fread(&addr, sizeof(unsigned long), 1, s_stream);
   		file_pointer += sizeof(unsigned long);
  		fseek(s_stream, (long)file_pointer, SEEK_SET);
@@ -3136,15 +3130,6 @@ int add_to_final_ckpt_list(struct shared_data_ckpt *plist, struct shared_data *p
  
  
  
- /* --------------------------------------------------------------------
-  * merge_external_checkpoint(): Verion 4.0 => version 5.0
-  * => merge checkpoint that is sent from others nodes
-  * 	if (t1 >= t2) 
-  * 		{ C <- t1 ; C <- R1 ; C <- S2; C <- S1}
-  * 	else
-  * 		{ C <- t2 ; C <- R2 ; C <- S1; C <- S2}
-  * -------------------------------------------------------------------- 
-  */
 int merge_external_checkpoint(FILE *src_ckpt_stream, 		\
 							  unsigned char *src_ckpt_data, \
 							  size_t src_ckpt_size 	)
@@ -3161,26 +3146,21 @@ int merge_external_checkpoint(FILE *src_ckpt_stream, 		\
 
  	if (src_ckpt_size == 0 ) return 1;
 
- 	//IF total_ckpt = NULL: Write Source Checkpoint to Total checkpoint
  	if(total_ckpt_size==0)
  	{
  		total_ckpt_stream = open_binary_memstream(&total_ckpt, &total_ckpt_size);
  		fwrite(src_ckpt_data, src_ckpt_size, 1, total_ckpt_stream);
  		fflush(total_ckpt_stream);
-
 		return 0;
  	}
 
  	/* Save total_ckpt buffer and close the write stream */
-	fflush(total_ckpt_stream);
+	//fflush(total_ckpt_stream);
 	tmp_ckpt = total_ckpt;
 	tmp_size = total_ckpt_size;
 	fclose(total_ckpt_stream);
 	total_ckpt_size = 0;
 
-	/* Open READABLE streams from the buffers.
-	 * open_memstream is write-only; fread from it returns 0.
-	 * Use fmemopen for reading. */
 	tmp_read_stream = fmemopen(tmp_ckpt, tmp_size, "rb");
 	src_read_stream = fmemopen(src_ckpt_data, src_ckpt_size, "rb");
 
