@@ -1183,6 +1183,8 @@ static FILE *cape_total_open_scratch_stream(size_t need)
 {
     FILE *stream;
 
+    if (need == SIZE_MAX)
+        return NULL;
     if (cape_scratch_reserve(&ucx_scratch_merge, &ucx_scratch_merge_cap,
                              need + 1) != 0)
         return NULL;
@@ -2700,6 +2702,11 @@ int merge_external_checkpoint(FILE *src_ckpt_stream, 		\
 		goto done;
 	}
 
+	if (tmp_size > SIZE_MAX - src_ckpt_size ||
+	    tmp_size + src_ckpt_size > SIZE_MAX - 4096) {
+		rc = 1;
+		goto done;
+	}
 	total_ckpt_stream = cape_total_open_scratch_stream(tmp_size + src_ckpt_size + 4096);
 	if (total_ckpt_stream == NULL) {
 		rc = 1;
@@ -2975,27 +2982,39 @@ int require_allreduce_checkpoint(){
 	fclose(final_ckpt_stream);
 	free(final_ckpt);
 	final_ckpt = NULL;
+	final_ckpt_size = 0;
+	if (rc != 0) {
+		cape_total_release();
+		return rc;
+	}
 		
-	if (is_power_of_two(num_nodes) && (total_ckpt_size < LARGE_CHECKPOINT)){
-		//Use Hypercube algorithm
+	if (!is_power_of_two(num_nodes) && (total_ckpt_size < LARGE_CHECKPOINT)){
 	    rc = hypercube_allreduce();
-		//rc = ring_allreduce();
 	}	
-	else {	//Large file checkpoint or number of nodes is not power of 2	
+	else {	
 		rc = ring_allreduce();
-		 
 	}	
+	if (rc != 0) {
+		cape_total_release();
+		return rc;
+	}
 	
-	if (cape_total_stream_update_size() != 0)
+	if (cape_total_stream_update_size() != 0) {
+		cape_total_release();
 		return 1;
+	}
 
-	fclose(total_ckpt_stream);
-	total_ckpt_stream = NULL;
+	if (total_ckpt_stream != NULL) {
+		fclose(total_ckpt_stream);
+		total_ckpt_stream = NULL;
+	}
 	{
 		FILE *inject_stream = fmemopen(total_ckpt, total_ckpt_size, "rb");
 		size_t inject_size = total_ckpt_size;
-		if (inject_stream == NULL)
+		if (inject_stream == NULL) {
+			cape_total_release();
 			return 1;
+		}
 		rc = inject_checkpoint_with_write_access(inject_stream, &inject_size, &save_regs);
 	}
 	cape_total_release();
