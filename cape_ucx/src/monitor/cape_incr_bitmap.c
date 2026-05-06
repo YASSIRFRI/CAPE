@@ -59,15 +59,8 @@ struct page_node * list_head = NULL, * list_end = NULL;
 struct shared_data * data_list_head = NULL;
 struct shared_data * data_list_tail = NULL;
 
-//list to manage incremental checkpoint of share-data attribute variables
-struct shared_data_ckpt * list_ckpt_head = NULL;
-struct shared_data_ckpt * list_ckpt_tail = NULL;
-
-struct shared_data_ckpt * final_list_ckpt_head = NULL;
-struct shared_data_ckpt * final_list_ckpt_tail = NULL;
-
 int process_state = 0; //to follow the state of process
-int child_id, parent_id;
+int child_id;
 int control_fd = -1;
 int userfault_fd = -1;
 static int epoll_fd = -1;
@@ -119,7 +112,6 @@ static inline unsigned wbmp_popcount(const uint8_t *b) {
 
 struct shared_data *is_in_share_data_list(unsigned long int addr,
 					  struct shared_data *list);
-int add_item_to_list_ckpt(struct shared_data_ckpt *p);
 
 struct bmp_page_view {
 	uint64_t       addr;
@@ -507,67 +499,19 @@ fail:
 	return 1;
 }
 
-static void collect_l_word(unsigned long addr, const void *word,
-			   unsigned char cflag)
-{
-	struct shared_data *plist;
-	struct shared_data_ckpt item;
-
-	plist = is_in_share_data_list(addr, data_list_head);
-	if (plist == NULL || plist->properties == D_SHARED)
-		return;
-
-	if (cflag == ENTRY_CHECKPOINT) {
-		if (plist->properties == D_THEAD_PRIVATE ||
-		    plist->properties == D_PRIVATE ||
-		    plist->properties == D_LAST_PRIVATE)
-			return;
-	} else {
-		if (plist->properties == D_THEAD_PRIVATE ||
-		    plist->properties == D_PRIVATE ||
-		    plist->properties == D_COPY_IN ||
-		    plist->properties == D_FIRST_PRIVATE)
-			return;
-	}
-
-	memset(&item, 0, sizeof(item));
-	item.addr = addr;
-	memcpy(item.data, word, CAPE_WORD);
-	add_item_to_list_ckpt(&item);
-}
-
-static void collect_l_words_from_page(unsigned long page_addr,
-				      const unsigned char *before_page,
-				      const unsigned char *after_page,
-				      unsigned char cflag)
-{
-	size_t off;
-
-	if (data_list_head == NULL)
-		return;
-	for (off = 0; off < BMP_PAGE_SIZE; off += CAPE_WORD) {
-		if (memcmp(before_page + off, after_page + off, CAPE_WORD) != 0)
-			collect_l_word(page_addr + off, after_page + off, cflag);
-	}
-}
-
-unsigned long old_brk = 0, new_brk = 0, heap_top, child_data_start;
+unsigned long child_data_start;
 
 struct user_regs_struct save_regs;
 unsigned long node;
 int num_nodes;
-int total_ckpt_flag = 0;
 int ckpt_flag = 0; // to save the state of checkpoint that is received
 
-int number_of_packages; // number of data packages is sent at each slave
 int current_node=1; //current slave is communicating with master 
 int current_job =0; //count the current job
 unsigned long number_of_jobs; //save number of step that will be sent from CAPE program
 int jobs_per_node; //save the number of step that is divided to a node
 
 unsigned long timespan = 1 ; // timespan of checkpoints
-
-char *pre_node_ip, *next_node_ip, *current_node_ip, * main_node_ip;
 
 //checkpoint variables
 unsigned char *after_ckpt, *final_ckpt, *total_ckpt, *buffer_ckpt;
@@ -1139,18 +1083,18 @@ static void cape_ucx_wait(void *req, size_t expect_len, int check_len,
         exit(1);
     }
     cape_ucx_req_t *r = (cape_ucx_req_t *)req;
-    //unsigned idle_iters = 0;
+    unsigned idle_iters = 0;
     while (!r->completed) {
         unsigned events = ucp_worker_progress(ucp_worker);
         CAPE_PROFILE_INC(ucx_progress_calls);
-        // if (events == 0) {
-        //     if (++idle_iters >= 64) {
-        //         sched_yield();
-        //         idle_iters = 0;
-        //     }
-        // } else {
-        //     idle_iters = 0;
-        // }
+        if (events == 0) {
+            if (++idle_iters >= 1024) {
+                sched_yield();
+                idle_iters = 0;
+            }
+        } else {
+            idle_iters = 0;
+        }
     }
     CAPE_PROFILE_ADD_NS(ucx_wait_ns, wait_start_ns);
     CAPE_PROFILE_ADD_NS(ucx_progress_ns, wait_start_ns);
@@ -1449,7 +1393,9 @@ static void ucx_exchange_addresses_via_fs(const char *dir, const char *jobid,
 /* Initialize UCX context, worker, and endpoints */
 static void cape_ucx_init(void)
 {
-    setenv("UCX_RNDV_THRESH", "inf", 0);
+    const char *rndv_override = getenv("CAPE_UCX_RNDV_THRESH");
+    if (rndv_override != NULL && rndv_override[0] != '\0')
+        setenv("UCX_RNDV_THRESH", rndv_override, 1);
 
     /* 1. Get rank and size */
 #ifdef USE_PMIX
@@ -1640,10 +1586,7 @@ int clear_list(struct page_node *list);
 int send_int_value_to_child(int value);
 int get_long_int_from_child(unsigned long *value);
 int init_jobs_per_node();
-int read_current_stack_start(unsigned int pid, unsigned long src, unsigned long dst, int len);
-int read_current_brk(unsigned int pid, unsigned long src, unsigned long dst, int len);
 int ioctl_read_data(unsigned int pid, unsigned long src, void *dst, int len);
-int ioctl_clear_write_protect(unsigned int pid, unsigned long dst);
 void tracer_wait ( pid_t pid, int * status, int options, struct user * u );
 int lock_process_memory(unsigned int pid);
 int unlock_process_memory(unsigned int pid);
@@ -1664,8 +1607,6 @@ void end_shared_data();
 // int require_inject_workshare_checkpoint();
 
 int require_allreduce_checkpoint();
-int allreduce_checkpoint();
-void print_data_in_list(struct shared_data *list);
 int cape_receive_userfaultfd_setup(void);
 int cape_wait_for_child_event(pid_t pid, int *status);
 int cape_drain_userfaultfd(void);
@@ -1682,12 +1623,9 @@ int cape_drain_userfaultfd(void);
  */
 int main(int argc, char * argv[]){
 	char * exec_file; 
-	int addr, i, state, status, old, sys_num, rc;
+	int status, rc;
 	struct user u ;
-	siginfo_t child_siginfo;
-	struct sigaction sa;
-	int tc = 0, flag_192 = 0, main_flag = 0, opt, reuse = 1;
-	struct user_regs_struct regs, newregs;
+	struct user_regs_struct regs;
 	int control_pair[2];
 	char control_fd_text[32];
 
@@ -1956,24 +1894,6 @@ int clear_list(struct page_node *list){
 	list_end = NULL;
 	return 0;
 }
-/* ----------------------------------------------------------------
- * clear_list_ckpt(): clear list of final_list_ckpt
- * ----------------------------------------------------------------
- */
-int clear_list_data_ckpt(struct shared_data_ckpt *list){
-	
-	if(list == NULL) return 0;	
-	struct shared_data_ckpt * temp_node, * current_node;	
-	current_node = list;
-	while(current_node){
-		temp_node = current_node;
-		current_node = current_node->next;
-		free(temp_node);
-	}
-	list = NULL;
-	return 0;
-}
-
 
 /* ---------------------------------------------------
  *  send_int_value_to_child(): version 2.0
@@ -2013,87 +1933,12 @@ int init_jobs_per_node(){
 	return rc;	
 	
  }
-/* ---------------------------------------------------
- * read_current_stack_start(): read the start adress of stack 
- * ---------------------------------------------------
- */
-int read_current_stack_start(unsigned int pid, unsigned long src, unsigned long dst, int len){
-	char maps_path[64];
-	FILE *maps;
-	char line[512];
-	unsigned long long start, end;
-	char perms[5];
-
-	snprintf(maps_path, sizeof(maps_path), "/proc/%u/maps", pid);
-	maps = fopen(maps_path, "r");
-	if (maps == NULL)
-		return 0;
-
-	while (fgets(line, sizeof(line), maps) != NULL) {
-		if (sscanf(line, "%llx-%llx %4s", &start, &end, perms) != 3)
-			continue;
-		if (strstr(line, "[stack]") == NULL)
-			continue;
-		fclose(maps);
-		return (int)start;
-	}
-
-	fclose(maps);
-	return 0;
-}
-/* ---------------------------------------------------
- * read_current_brk(): read the top address of heap
- * ---------------------------------------------------
- */
-int read_current_brk(unsigned int pid, unsigned long src, unsigned long dst, int len){
-	char maps_path[64];
-	FILE *maps;
-	char line[512];
-	unsigned long long start, end;
-	char perms[5];
-
-	snprintf(maps_path, sizeof(maps_path), "/proc/%u/maps", pid);
-	maps = fopen(maps_path, "r");
-	if (maps == NULL)
-		return 0;
-
-	while (fgets(line, sizeof(line), maps) != NULL) {
-		if (sscanf(line, "%llx-%llx %4s", &start, &end, perms) != 3)
-			continue;
-		if (strstr(line, "[heap]") == NULL)
-			continue;
-		fclose(maps);
-		return (int)end;
-	}
-
-	fclose(maps);
-	return 0;
-}
 /* -----------------------------------------------------
  * ioctl_read_data(): Read data from memory of the process
  * -----------------------------------------------------
  */
 int ioctl_read_data(unsigned int pid, unsigned long src, void *dst, int len){
 	return read_remote_memory(pid, src, dst, (size_t)len) == 0 ? 1 : 0;
-}
-
-//int ioctl_write_data(unsigned int pid, const void *src, unsigned long dst, int len){
-	//return write_remote_memory(pid, src, dst, (size_t)len);
-//}
-/* -----------------------------------------------------------------
- * iotcl_clear_write_protect(): Version 2.0
- * Clear write protected and save address, data of a page
- * 	Data wil be save into a list and manage by list_head and list_end
- * 	Data structure: <addr, data>, <addr, data>,...
- * 	This list will be sorted by ascending
- * -----------------------------------------------------------------
- */
- int ioctl_clear_write_protect(unsigned int pid, unsigned long dst){
-	if (cape_capture_dirty_page(pid, dst) != 0)
-		return 1;
-	if (cape_userfault_writeprotect(dst & ~(PAGE_SIZE - 1), PAGE_SIZE, 0) == -1)
-		return 1;
-	return 0;
 }
 
 /* ---------------------------------------------------------------
@@ -2182,40 +2027,6 @@ void end_shared_data(){
 	}
 	
 }
-
-
-/* ==================================================================
- * Print data in list: This function to test the list to ensure that it is correct
- * ==================================================================
- */
- void print_data_in_list(struct shared_data *list){
-	 struct shared_data *pp;
-	 pp = list;
-	 if (pp==NULL) printf("\nNode %ld: In the list: EMPTY", node);
-	 while(pp!=NULL){
-		 printf( "\nNode %ld - In the list : addr = %lx - len = %d  - properties = %d - level =%d - datatype = %d",
-		 node, pp->addr, pp->len, pp->properties, pp->level, pp->datatype);	
-		 pp = pp->next;
-	 }
- }
- 
- /* ==================================================================
- * Print data in ckpt list: This function to test the list to ensure that it is correct
- * ==================================================================
- */
- void print_data_in_ckpt_list(struct shared_data_ckpt *list){
-	 
-	 struct shared_data_ckpt *ppt;
-	 ppt = list;
-	 
-	 while(ppt!=NULL){
-		 float f;
-		  memcpy(&f, ppt->data, CAPE_WORD);	
-		  printf( "\nNode %ld - In CKPT list : addr = %lx  -  Value = %f", node, ppt->addr, f);	
-		  
-		 ppt = ppt->next;
-	 }
- }
  
  
  /* --------------------------------------------------------------------
@@ -2238,82 +2049,6 @@ struct shared_data * is_in_share_data_list(unsigned long int addr, struct shared
 	}
 	return NULL;
 }
-
-/* ---------------------------------------------------------------------
- * And an item to list checkpoint of share-data attribute variables
- * Input: struct share_data_ckpt *p
- * Output: a list that is managed by list_ckpt_head and list_ckpt_tail
- * ---------------------------------------------------------------------
- */
-int add_item_to_list_ckpt(struct shared_data_ckpt *p){
-	struct shared_data_ckpt *pt, *tmp;
-	
-	
-	pt = malloc(sizeof(struct shared_data_ckpt));
-	if (pt == NULL)
-		return 1;
-	pt->addr = p->addr ;
-	memcpy(pt->data, p->data, CAPE_WORD);
-	pt->prev = NULL;
-	pt->next = NULL;
-	
-	float f= 0.0;
-	memcpy(&f, pt->data, CAPE_WORD);	
-	printf("\nREQUIRE TO ADD IN CKPT LIST: Node %ld : 0x%lx is ADDED to list ckpt - value = %f", node, pt->addr, f);
-	
-	if(list_ckpt_head == NULL){
-		list_ckpt_head = pt;
-		list_ckpt_tail = pt;
-		
-		float f= 0.0;
-		memcpy(&f, list_ckpt_head->data, CAPE_WORD);
-		printf("\nNEW IN CKPT LIST: Node %ld : 0x%lx is ADDED to list ckpt - value = %f", node, list_ckpt_head->addr, f);	
-		
-		
-		return 0;
-	}
-	
-	//insert at the end of list
-	if( pt->addr > list_ckpt_tail->addr){
-		pt->prev = list_ckpt_tail ;
-		list_ckpt_tail->next = pt;
-		list_ckpt_tail = pt;
-		return 0;
-	}			
-			
-	//insert at the begin of list
-	if (pt->addr < list_ckpt_head->addr){
-			pt->next = list_ckpt_head ;
-			list_ckpt_head->prev = pt;
-			list_ckpt_head = pt;
-			return 0;
-	}
-	
-	//find the possition and insert
-	tmp = list_ckpt_head;
-	while((tmp->next!=NULL) && (tmp->addr < pt->addr))
-				tmp = tmp->next;
-	
-	if(tmp->addr == pt->addr){
-		memcpy(tmp->data, pt->data, CAPE_WORD);
-		free(pt);
-		
-		//float f= 0.0;
-		//memcpy(&f, tmp->data, CAPE_WORD);	
-		//printf("\nAAAAAAAAAAA IN CKPT LIST: Node %ld : 0x%lx is ADDED to list ckpt - value = %f", node, tmp->addr , f);	
-		
-		return 0;
-	}
-	
-	//printf("\nIN CKPT LIST: Node %ld : 0x%lx is APPENDED to list ckpt", node, pt->addr);	
-	pt->next = tmp;
-	pt->prev = tmp->prev;
-	tmp->prev->next = pt;
-	tmp->prev = pt;	
-	
-	return 0;	
-
-}  
 
 /*-------------------------------------------------------------------------
  * generate_checkpoint() : version 5.0
@@ -2498,63 +2233,6 @@ int send_checkpoint(int destination){
 	return 0;
 }
 
-/*---------------------------------------------------------------------
- * join_checkpoint(): to join part S and part L of a checkpoint
- * input: 
- * 		S - is managed by final_ckpt
- * 		L - is managed by list_ckpt_head
- *  output: C - is managed by final_ckpt
- * 		structures of C: [SSD]----------S--------- [ SD] -------L---------
- */
-int join_checkpoint (int file_name, struct shared_data_ckpt * list){
-	
-	 struct shared_data_ckpt *p1;
-	 unsigned long ckpt_struct;
-	 ckpt_struct = SD; //default value
-	 
-	 if(list == NULL) return 1;
-	 p1 = list;
-
-	//printf("\nCALL JOIN CHECKPOINT\n");
-
-	switch (file_name){
-		case FINAL_CHECKPOINT:
-			   //Open checkpoint file if it is closed
-				if (final_ckpt_size == 0){
-					final_ckpt_stream = open_binary_memstream(&final_ckpt, &final_ckpt_size);
-				}
-				else{
-					fseek(final_ckpt_stream, final_ckpt_size,SEEK_SET);
-				}
-				//Write signal of data structure
-				fwrite(&ckpt_struct, sizeof(unsigned long), 1, final_ckpt_stream);
-				//read all node in list and save into checkpoint file
-				while(p1!=NULL){
-					fwrite(&p1->addr, sizeof(unsigned long), 1, final_ckpt_stream);
-					fwrite(p1->data, CAPE_WORD, 1, final_ckpt_stream);
-					p1 = p1->next;
-				}
-				fflush(final_ckpt_stream);
-			break;
-			
-		case TOTAL_CHECKPOINT:
-				fseek(total_ckpt_stream, total_ckpt_size,SEEK_SET);
-				//Write signal of data structure
-				fwrite(&ckpt_struct, sizeof(unsigned long), 1, total_ckpt_stream);
-				//read all node in list and save into checkpoint file
-				while(p1!=NULL){
-					fwrite(&p1->addr, sizeof(unsigned long), 1, total_ckpt_stream);
-					fwrite(p1->data, CAPE_WORD, 1, total_ckpt_stream);
-					p1 = p1->next;
-				}
-				fflush(total_ckpt_stream);
-
-			break;
-	} 
-	 return 0;	 
- }
-
-
 /* ------------------------------------------------------------------------
  * require_send_checkpoint(): version 3.0 => NOT USED in version 4.0
  * 	Require send checkpoint from to slave, and from slave to master
@@ -2568,12 +2246,6 @@ int join_checkpoint (int file_name, struct shared_data_ckpt * list){
 int require_send_checkpoint(){
 	
 	int rc = 0;	
-	//Merge S and L, and then delete L form memory
-//	print_data_in_ckpt_list(list_ckpt_head);
-	
-	join_checkpoint(FINAL_CHECKPOINT, list_ckpt_head);
-	list_ckpt_head = NULL;
-	list_ckpt_tail = NULL;
 	
 	if (node==0){
 		current_job++;
@@ -2923,449 +2595,174 @@ static int inject_checkpoint_with_write_access(FILE *stream, size_t *file_size,
 
 
  
- /*---------------------------------------------------------------------
-  * add_to_final_ckpt_list(): L = L1 + L2
-  * => add item in sharing-data variables list into L
-  * The result will be managed by final_list_ckpt_head
-  * --------------------------------------------------------------------
-  */
-int add_to_final_ckpt_list(struct shared_data_ckpt *plist, struct shared_data *prop){
-	struct shared_data_ckpt *pt, *tmp;
-	
-	pt = malloc(sizeof(struct shared_data_ckpt));
-	if (pt == NULL)
-		return 1;
-	pt->addr = plist->addr ;
-	memcpy(pt->data, plist->data, CAPE_WORD);
-	pt->prev = NULL;
-	pt->next = NULL;
-
-	
-	if(final_list_ckpt_head == NULL){
-		final_list_ckpt_head = pt;
-		final_list_ckpt_tail = pt;
-		return 0;
-	}
-	//insert at the end of list
-	if( pt->addr > final_list_ckpt_tail->addr){
-		pt->prev = final_list_ckpt_tail ;
-		final_list_ckpt_tail->next = pt;
-		final_list_ckpt_tail = pt;
-		return 0;
-	}
-	//insert at the begin of list
-	if (pt->addr < final_list_ckpt_head->addr){
-		pt->next = final_list_ckpt_head ;
-		final_list_ckpt_head->prev = pt;
-		final_list_ckpt_head = pt;
-		return 0;
-	}
-	
-	//find the possition and insert
-	tmp = final_list_ckpt_head;
-	while((tmp->next!=NULL) && (tmp->addr < pt->addr))
-			tmp = tmp->next;
-					
-	//This part will act on data, depends on its properties
-	if(tmp->addr == pt->addr){
-		free(pt);
-		pt = plist;
-		if ((prop->properties == D_LAST_PRIVATE) || 
-				(prop->properties == D_SHARED) ||
-				(prop->properties == D_COPY_IN))
-		{
-			memcpy(tmp->data, pt->data, CAPE_WORD);
-			return 0;
-		}
-		
-		//D_REDUCTION_SUM
-		if (prop->properties == D_REDUCTION_SUM){
-			if(prop->datatype == CAPE_FLOAT){
-				float f=0.0, f1=0.0, f2=0.0;
-				memcpy(&f1,tmp->data, CAPE_WORD);
-				memcpy(&f2,pt->data, CAPE_WORD);
-				f = f1 + f2;
-				memcpy(tmp->data, &f, CAPE_WORD);											
-
-				return 0;
-			}
-			if((prop->datatype == CAPE_INT) || (prop->properties = CAPE_LONG))
-			{
-				int f=0, f1=0, f2=0;
-				memcpy(&f1,tmp->data, sizeof(int));
-				memcpy(&f2,pt->data, sizeof(int));
-				f = f1 + f2;											
-				memcpy(tmp->data, &f, sizeof(int));
-				//printf("\n Sum - int = %d",f); 
-				return 0;
-			}
-			if((prop->datatype == CAPE_UNSIGNED_INT) || (prop->properties = CAPE_UNSIGNED_LONG))
-			{
-				int f=0, f1=0, f2=0;
-				memcpy(&f1,tmp->data, sizeof(unsigned int));
-				memcpy(&f2,pt->data, sizeof(unsigned int));
-				f = f1 + f2;
-				memcpy(tmp->data, &f, sizeof(unsigned int));
-				//printf("\n Sum - unsigned int = %ld",f); 
-				return 0;
-			}
-			if((prop->datatype == CAPE_BYTE) || (prop->properties = CAPE_CHAR))
-			{
-				int f=0, f1=0, f2=0;
-				memcpy(&f1,tmp->data, sizeof(char));
-				memcpy(&f2,pt->data, sizeof(char));
-				f = f1 + f2;
-				memcpy(tmp->data, &f, sizeof(char));
-				return 0;
-			}
-			if(prop->datatype == CAPE_UNSIGNED_CHAR) 
-			{
-				int f=0, f1=0, f2=0;
-				memcpy(&f1,tmp->data, sizeof(unsigned char));
-				memcpy(&f2,pt->data, sizeof(unsigned char));
-				f = f1 + f2;
-				memcpy(tmp->data, &f, sizeof(unsigned char));
-				return 0;
-			}
-			return 1; //error
-		}//end if D_REDUCTION_SUM	
-		
-		//D_REDUCTION_MUL
-		if (prop->properties == D_REDUCTION_MUL){
-			if(prop->datatype == CAPE_FLOAT){
-				float f=0.0, f1=0.0, f2=0.0;
-				memcpy(&f1,tmp->data, CAPE_WORD);
-				memcpy(&f2,pt->data, CAPE_WORD);
-				f = f1 * f2;
-				memcpy(tmp->data, &f, CAPE_WORD);											
-				//printf("\n Sum = %f",f); 
-				return 0;
-			}
-			if((prop->datatype == CAPE_INT) || (prop->properties = CAPE_LONG))
-			{
-				int f=0, f1=0, f2=0;
-				memcpy(&f1,tmp->data, sizeof(int));
-				memcpy(&f2,pt->data, sizeof(int));
-				f = f1 * f2;											
-				memcpy(tmp->data, &f, sizeof(int));
-				//printf("\n Sum - int = %d",f); 
-				return 0;
-			}
-			if((prop->datatype == CAPE_UNSIGNED_INT) || (prop->properties = CAPE_UNSIGNED_LONG))
-			{
-				int f=0, f1=0, f2=0;
-				memcpy(&f1,tmp->data, sizeof(unsigned int));
-				memcpy(&f2,pt->data, sizeof(unsigned int));
-				f = f1 * f2;
-				memcpy(tmp->data, &f, sizeof(unsigned int));
-				//printf("\n Sum - unsigned int = %ld",f); 
-				return 0;
-			}
-			if((prop->datatype == CAPE_BYTE) || (prop->properties = CAPE_CHAR))
-			{
-				int f=0, f1=0, f2=0;
-				memcpy(&f1,tmp->data, sizeof(char));
-				memcpy(&f2,pt->data, sizeof(char));
-				f = f1 * f2 ;
-				memcpy(tmp->data, &f, sizeof(char));
-				return 0;
-			}
-			if(prop->datatype == CAPE_UNSIGNED_CHAR) 
-			{
-				int f=0, f1=0, f2=0;
-				memcpy(&f1,tmp->data, sizeof(unsigned char));
-				memcpy(&f2,pt->data, sizeof(unsigned char));
-				f = f1 * f2;
-				memcpy(tmp->data, &f, sizeof(unsigned char));
-				return 0;
-			}
-			return 1; //error
-		}//end if D_REDUCTION_MUL
-		
-		
-		//D_REDUCTION_MAX
-		if (prop->properties == D_REDUCTION_MAX){
-			if(prop->datatype == CAPE_FLOAT){
-				float f=0.0, f1=0.0, f2=0.0;
-				memcpy(&f1,tmp->data, CAPE_WORD);
-				memcpy(&f2,pt->data, CAPE_WORD);
-				f = (f1 >= f2)? f1 : f2 ;
-				memcpy(tmp->data, &f, CAPE_WORD);											
-				//printf("\n Sum = %f",f); 
-				return 0;
-			}
-			if((prop->datatype == CAPE_INT) || (prop->properties = CAPE_LONG))
-			{
-				int f=0, f1=0, f2=0;
-				memcpy(&f1,tmp->data, sizeof(int));
-				memcpy(&f2,pt->data, sizeof(int));
-				f = (f1 >= f2)? f1 : f2 ;											
-				memcpy(tmp->data, &f, sizeof(int));
-				//printf("\n Sum - int = %d",f); 
-				return 0;
-			}
-			if((prop->datatype == CAPE_UNSIGNED_INT) || (prop->properties = CAPE_UNSIGNED_LONG))
-			{
-				int f=0, f1=0, f2=0;
-				memcpy(&f1,tmp->data, sizeof(unsigned int));
-				memcpy(&f2,pt->data, sizeof(unsigned int));
-				f = (f1 >= f2)? f1 : f2 ;
-				memcpy(tmp->data, &f, sizeof(unsigned int));
-				//printf("\n Sum - unsigned int = %ld",f); 
-				return 0;
-			}
-			if((prop->datatype == CAPE_BYTE) || (prop->properties = CAPE_CHAR))
-			{
-				int f=0, f1=0, f2=0;
-				memcpy(&f1,tmp->data, sizeof(char));
-				memcpy(&f2,pt->data, sizeof(char));
-				f = (f1 >= f2)? f1 : f2 ;
-				memcpy(tmp->data, &f, sizeof(char));
-				return 0;
-			}
-			if(prop->datatype == CAPE_UNSIGNED_CHAR) 
-			{
-				int f=0, f1=0, f2=0;
-				memcpy(&f1,tmp->data, sizeof(unsigned char));
-				memcpy(&f2,pt->data, sizeof(unsigned char));
-				f = (f1 >= f2)? f1 : f2 ;
-				memcpy(tmp->data, &f, sizeof(unsigned char));
-				return 0;
-			}
-			return 1; //error
-		}//end if D_REDUCTION_MAX
-		
-		
-		//D_REDUCTION_MIN
-		if (prop->properties == D_REDUCTION_MIN){
-			if(prop->datatype == CAPE_FLOAT){
-				float f=0.0, f1=0.0, f2=0.0;
-				memcpy(&f1,tmp->data, CAPE_WORD);
-				memcpy(&f2,pt->data, CAPE_WORD);
-				f = (f1 >= f2)? f2 : f1 ;
-				memcpy(tmp->data, &f, CAPE_WORD);											
-				//printf("\n Sum = %f",f); 
-				return 0;
-			}
-			if((prop->datatype == CAPE_INT) || (prop->properties = CAPE_LONG))
-			{
-				int f=0, f1=0, f2=0;
-				memcpy(&f1,tmp->data, sizeof(int));
-				memcpy(&f2,pt->data, sizeof(int));
-				f = (f1 >= f2)? f2 : f1 ;											
-				memcpy(tmp->data, &f, sizeof(int));
-				//printf("\n Sum - int = %d",f); 
-				return 0;
-			}
-			if((prop->datatype == CAPE_UNSIGNED_INT) || (prop->properties = CAPE_UNSIGNED_LONG))
-			{
-				int f=0, f1=0, f2=0;
-				memcpy(&f1,tmp->data, sizeof(unsigned int));
-				memcpy(&f2,pt->data, sizeof(unsigned int));
-				f = (f1 >= f2)? f2 : f1 ;
-				memcpy(tmp->data, &f, sizeof(unsigned int));
-				//printf("\n Sum - unsigned int = %ld",f); 
-				return 0;
-			}
-			if((prop->datatype == CAPE_BYTE) || (prop->properties = CAPE_CHAR))
-			{
-				int f=0, f1=0, f2=0;
-				memcpy(&f1,tmp->data, sizeof(char));
-				memcpy(&f2,pt->data, sizeof(char));
-				f = (f1 >= f2)? f2 : f1 ;
-				memcpy(tmp->data, &f, sizeof(char));
-				return 0;
-			}
-			if(prop->datatype == CAPE_UNSIGNED_CHAR) 
-			{
-				int f=0, f1=0, f2=0;
-				memcpy(&f1,tmp->data, sizeof(unsigned char));
-				memcpy(&f2,pt->data, sizeof(unsigned char));
-				f = (f1 >= f2)? f2 : f1 ;
-				memcpy(tmp->data, &f, sizeof(unsigned char));
-				return 0;
-			}
-			return 1; //error
-		}//end if D_REDUCTION_MIN
-	
-		return 1; //error
-	}//end if tmp->addr = pt->addr	
-
-	pt->next = tmp;
-	pt->prev = tmp->prev;
-	tmp->prev->next = pt;
-	tmp->prev = pt;
-	return 0;
-	
- }
  
 
-/*----------------------------------------------------------------------
- * merge_data(): vesion CAPE50 
- * 	Merge s_stream file into Total_CKTP file, from s_position
- * -------------------------------------------------------------------- 
- */ 
- int merge_data(FILE * s_stream, \
-				unsigned char * s_data, \
-				size_t s_size, 
-				size_t s_position, int fflag ) {
+// /*----------------------------------------------------------------------
+//  * merge_data(): vesion CAPE50 
+//  * 	Merge s_stream file into Total_CKTP file, from s_position
+//  * -------------------------------------------------------------------- 
+//  */ 
+//  int merge_data(FILE * s_stream, \
+// 				unsigned char * s_data, \
+// 				size_t s_size, 
+// 				size_t s_position, int fflag ) {
 	
-	size_t file_pointer = 0;
-	unsigned long current_ckpt_struct;
-	unsigned char *buff = NULL;
- 	unsigned long addr;
- 	int len;
+// 	size_t file_pointer = 0;
+// 	unsigned long current_ckpt_struct;
+// 	unsigned char *buff = NULL;
+//  	unsigned long addr;
+//  	int len;
 	
-	current_ckpt_struct = SSD; //initial checkpoint struct
+// 	current_ckpt_struct = SSD; //initial checkpoint struct
 	
-	file_pointer += s_position;
- 	fseek(s_stream, (long)file_pointer, SEEK_SET);
+// 	file_pointer += s_position;
+//  	fseek(s_stream, (long)file_pointer, SEEK_SET);
  	
- 	while(file_pointer < s_size)
- 	{
-		buff = NULL;
- 		//read address from after checkpoint
-		printf("Merging Data: file pointer: %d\n",file_pointer);
-  		fread(&addr, sizeof(unsigned long), 1, s_stream);
-  		file_pointer += sizeof(unsigned long);
- 		fseek(s_stream, (long)file_pointer, SEEK_SET);
+//  	while(file_pointer < s_size)
+//  	{
+// 		buff = NULL;
+//  		//read address from after checkpoint
+// 		printf("Merging Data: file pointer: %d\n",file_pointer);
+//   		fread(&addr, sizeof(unsigned long), 1, s_stream);
+//   		file_pointer += sizeof(unsigned long);
+//  		fseek(s_stream, (long)file_pointer, SEEK_SET);
   		
-  		struct shared_data *pro = NULL;
-  		struct shared_data_ckpt *plist = NULL;
+//   		struct shared_data *pro = NULL;
+//   		struct shared_data_ckpt *plist = NULL;
   		
-  		//if addr is the struct signal, not an adress, then we read address again, and write signal into total_ckpt
-  		switch(addr){
-			case EP:
-				fread(&addr, sizeof(unsigned long), 1, s_stream);
-				file_pointer += sizeof(unsigned long);
-				fseek(s_stream, file_pointer, SEEK_SET);
-				current_ckpt_struct = EP;
+//   		//if addr is the struct signal, not an adress, then we read address again, and write signal into total_ckpt
+//   		switch(addr){
+// 			case EP:
+// 				fread(&addr, sizeof(unsigned long), 1, s_stream);
+// 				file_pointer += sizeof(unsigned long);
+// 				fseek(s_stream, file_pointer, SEEK_SET);
+// 				current_ckpt_struct = EP;
 
-				//write signal into total checkpoint
-				fwrite(&current_ckpt_struct, sizeof(unsigned long), 1, total_ckpt_stream);
+// 				//write signal into total checkpoint
+// 				fwrite(&current_ckpt_struct, sizeof(unsigned long), 1, total_ckpt_stream);
 
-				break;
-			case SSD:
-				fread(&addr, sizeof(unsigned long), 1, s_stream);
-				file_pointer += sizeof(unsigned long);
-				fseek(s_stream, file_pointer, SEEK_SET);
-				current_ckpt_struct = SSD;
+// 				break;
+// 			case SSD:
+// 				fread(&addr, sizeof(unsigned long), 1, s_stream);
+// 				file_pointer += sizeof(unsigned long);
+// 				fseek(s_stream, file_pointer, SEEK_SET);
+// 				current_ckpt_struct = SSD;
 
-				//write signal into total checkpoint
-				fwrite(&current_ckpt_struct, sizeof(unsigned long), 1, total_ckpt_stream);
+// 				//write signal into total checkpoint
+// 				fwrite(&current_ckpt_struct, sizeof(unsigned long), 1, total_ckpt_stream);
 
-				break;
-			case SD:
-				fread(&addr, sizeof(unsigned long), 1, s_stream);
-				file_pointer += sizeof(unsigned long);
-				fseek(s_stream, file_pointer, SEEK_SET);
-				current_ckpt_struct = SD;
-				//write signal into total checkpoint
+// 				break;
+// 			case SD:
+// 				fread(&addr, sizeof(unsigned long), 1, s_stream);
+// 				file_pointer += sizeof(unsigned long);
+// 				fseek(s_stream, file_pointer, SEEK_SET);
+// 				current_ckpt_struct = SD;
+// 				//write signal into total checkpoint
 
-				pro = is_in_share_data_list(addr, data_list_head);
-				if ((pro!=NULL) && (pro->properties != D_SHARED))
-				{
-					if (fflag ==FINAL_CHECKPOINT){
-						plist = malloc(sizeof(struct shared_data_ckpt));
-						if (plist == NULL)
-							return 1;
-						plist->addr = addr;
-						plist->prev = NULL;
-						plist->next = NULL;
-					}
-					break;
-				}
-				else{
-					fwrite(&current_ckpt_struct, sizeof(unsigned long), 1, total_ckpt_stream);
-				}
-				break;
+// 				pro = is_in_share_data_list(addr, data_list_head);
+// 				if ((pro!=NULL) && (pro->properties != D_SHARED))
+// 				{
+// 					if (fflag ==FINAL_CHECKPOINT){
+// 						plist = malloc(sizeof(struct shared_data_ckpt));
+// 						if (plist == NULL)
+// 							return 1;
+// 						plist->addr = addr;
+// 						plist->prev = NULL;
+// 						plist->next = NULL;
+// 					}
+// 					break;
+// 				}
+// 				else{
+// 					fwrite(&current_ckpt_struct, sizeof(unsigned long), 1, total_ckpt_stream);
+// 				}
+// 				break;
 
-			case MD:
-				fread(&addr, sizeof(unsigned long), 1, s_stream);
-				file_pointer += sizeof(unsigned long);
-				fseek(s_stream, file_pointer, SEEK_SET);
-				current_ckpt_struct = MD;
-				//write signal into total checkpoint
-				fwrite(&current_ckpt_struct, sizeof(unsigned long), 1, total_ckpt_stream);
-				break;
-		}
+// 			case MD:
+// 				fread(&addr, sizeof(unsigned long), 1, s_stream);
+// 				file_pointer += sizeof(unsigned long);
+// 				fseek(s_stream, file_pointer, SEEK_SET);
+// 				current_ckpt_struct = MD;
+// 				//write signal into total checkpoint
+// 				fwrite(&current_ckpt_struct, sizeof(unsigned long), 1, total_ckpt_stream);
+// 				break;
+// 		}
 
-  		//read data and write to total checkpoint
-  		switch(current_ckpt_struct){
-			case EP:
-				len = PAGE_SIZE;
-				//read data from checkpoint
-				buff = (unsigned char *) malloc(len);
-				if (buff == NULL) {
-					free(plist);
-					return 1;
-				}
-				fread(buff, len, 1,s_stream);
-				file_pointer +=len;
-				fseek(s_stream, file_pointer, SEEK_SET);
+//   		//read data and write to total checkpoint
+//   		switch(current_ckpt_struct){
+// 			case EP:
+// 				len = PAGE_SIZE;
+// 				//read data from checkpoint
+// 				buff = (unsigned char *) malloc(len);
+// 				if (buff == NULL) {
+// 					free(plist);
+// 					return 1;
+// 				}
+// 				fread(buff, len, 1,s_stream);
+// 				file_pointer +=len;
+// 				fseek(s_stream, file_pointer, SEEK_SET);
 
-				//write into total checkpoint
-				fwrite(&addr, sizeof(unsigned long), 1, total_ckpt_stream);
-				fwrite(buff, len, 1, total_ckpt_stream);
-				break;
-			case SSD:
-				  //read len from checkpoint
-				len = 0;
-				fread(&len, sizeof(int), 1, s_stream);
-				file_pointer += sizeof(int);
-				fseek(s_stream, file_pointer, SEEK_SET);
+// 				//write into total checkpoint
+// 				fwrite(&addr, sizeof(unsigned long), 1, total_ckpt_stream);
+// 				fwrite(buff, len, 1, total_ckpt_stream);
+// 				break;
+// 			case SSD:
+// 				  //read len from checkpoint
+// 				len = 0;
+// 				fread(&len, sizeof(int), 1, s_stream);
+// 				file_pointer += sizeof(int);
+// 				fseek(s_stream, file_pointer, SEEK_SET);
 
-				 //read data from checkpoint
-				buff = (unsigned char *) malloc(len);
-				if (buff == NULL) {
-					free(plist);
-					return 1;
-				}
-				fread(buff, len, 1,s_stream);
-				file_pointer +=len;
-				fseek(s_stream, file_pointer, SEEK_SET);
+// 				 //read data from checkpoint
+// 				buff = (unsigned char *) malloc(len);
+// 				if (buff == NULL) {
+// 					free(plist);
+// 					return 1;
+// 				}
+// 				fread(buff, len, 1,s_stream);
+// 				file_pointer +=len;
+// 				fseek(s_stream, file_pointer, SEEK_SET);
 
-				//write into total checkpoint
-				fwrite(&addr, sizeof(unsigned long), 1, total_ckpt_stream);
-				fwrite(&len, sizeof(int), 1, total_ckpt_stream);
-				fwrite(buff, len, 1, total_ckpt_stream);
-				break;
-			case SD:
-				len = CAPE_WORD;
-				//read data from checkpoint
-				buff = (unsigned char *) malloc(len);
-				if (buff == NULL) {
-					free(plist);
-					return 1;
-				}
-				fread(buff, len, 1,s_stream);
-				file_pointer +=len;
-				fseek(s_stream, file_pointer, SEEK_SET);
+// 				//write into total checkpoint
+// 				fwrite(&addr, sizeof(unsigned long), 1, total_ckpt_stream);
+// 				fwrite(&len, sizeof(int), 1, total_ckpt_stream);
+// 				fwrite(buff, len, 1, total_ckpt_stream);
+// 				break;
+// 			case SD:
+// 				len = CAPE_WORD;
+// 				//read data from checkpoint
+// 				buff = (unsigned char *) malloc(len);
+// 				if (buff == NULL) {
+// 					free(plist);
+// 					return 1;
+// 				}
+// 				fread(buff, len, 1,s_stream);
+// 				file_pointer +=len;
+// 				fseek(s_stream, file_pointer, SEEK_SET);
 
-				if((pro!=NULL) && (pro->properties != D_SHARED))
-				{
-					if (fflag ==FINAL_CHECKPOINT){
-						memcpy(plist->data, buff, len);
-						add_to_final_ckpt_list(plist, pro);
-					}
-					break;
-				}
-				else{
-					//write into final checkpoint
-					fwrite(&addr, sizeof(unsigned long), 1, total_ckpt_stream);
-					fwrite(buff, len, 1, total_ckpt_stream);
-				}
+// 				if((pro!=NULL) && (pro->properties != D_SHARED))
+// 				{
+// 					if (fflag ==FINAL_CHECKPOINT){
+// 						memcpy(plist->data, buff, len);
+// 						add_to_final_ckpt_list(plist, pro);
+// 					}
+// 					break;
+// 				}
+// 				else{
+// 					//write into final checkpoint
+// 					fwrite(&addr, sizeof(unsigned long), 1, total_ckpt_stream);
+// 					fwrite(buff, len, 1, total_ckpt_stream);
+// 				}
 
-				break;
-			case MD:
-				break;
-		}
-		free(buff);
-		free(plist);
- 	}
-	fflush(total_ckpt_stream);
-	return 0;
-}
+// 				break;
+// 			case MD:
+// 				break;
+// 		}
+// 		free(buff);
+// 		free(plist);
+//  	}
+// 	fflush(total_ckpt_stream);
+// 	return 0;
+// }
  
  
  
