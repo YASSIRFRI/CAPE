@@ -519,6 +519,7 @@ FILE *after_ckpt_stream;
 FILE *final_ckpt_stream;
 FILE *total_ckpt_stream;
 size_t after_ckpt_size, final_ckpt_size, total_ckpt_size;
+static int final_ckpt_uses_scratch;
 int buffer_size;
 
 //Workshare checkpoints
@@ -551,9 +552,13 @@ typedef struct {
 	unsigned long waitpid_calls, wait_loops;
 	unsigned long poll_calls, poll_timeouts;
 	unsigned long ucx_progress_calls;
+	unsigned long ucx_progress_active_calls, ucx_progress_idle_calls;
 	unsigned long ucx_sendrecv_calls;
+	unsigned long ucx_sendrecv_size_calls, ucx_sendrecv_data_calls;
 	unsigned long ucx_send_calls, ucx_recv_calls;
 	unsigned long ucx_send_bytes, ucx_recv_bytes;
+	unsigned long ucx_sendrecv_size_bytes, ucx_sendrecv_data_bytes;
+	unsigned long ucx_wait_recv_calls, ucx_wait_send_calls;
 	unsigned long ucx_bootstrap_wait_iters;
 	unsigned long sigtrap_count;
 	unsigned long generate_ckpt_calls;
@@ -569,8 +574,10 @@ typedef struct {
 	unsigned long long poll_ns;
 	unsigned long long ucx_progress_ns;
 	unsigned long long ucx_sendrecv_ns;
+	unsigned long long ucx_sendrecv_size_ns, ucx_sendrecv_data_ns;
 	unsigned long long ucx_send_ns, ucx_recv_ns;
 	unsigned long long ucx_wait_ns;
+	unsigned long long ucx_wait_recv_ns, ucx_wait_send_ns;
 	unsigned long long ucx_bootstrap_wait_ns;
 	unsigned long long generate_ckpt_ns;
 	unsigned long long merge_ext_ns;
@@ -591,6 +598,14 @@ static cape_profile_t cape_profile;
 		+ (_now_ts.tv_nsec - (start).tv_nsec)); \
 } while (0)
 
+static unsigned long long cape_profile_elapsed_ns(struct timespec start)
+{
+	struct timespec now;
+	clock_gettime(CLOCK_MONOTONIC, &now);
+	return (unsigned long long)((now.tv_sec - start.tv_sec) * 1000000000ULL
+				    + (now.tv_nsec - start.tv_nsec));
+}
+
 static void cape_profile_report(void)
 {
 	fprintf(stderr, "\n[DICKPT PROFILE] Node %ld  (ms = ns/1e6)\n", node);
@@ -606,10 +621,15 @@ static void cape_profile_report(void)
 	P_NS(process_vm_write_ns); P_CNT(process_vm_write_calls); P_CNT(process_vm_write_bytes);
 	P_NS(generate_ckpt_ns); P_CNT(generate_ckpt_calls);
 	P_NS(ucx_progress_ns); P_CNT(ucx_progress_calls);
+	P_CNT(ucx_progress_active_calls); P_CNT(ucx_progress_idle_calls);
 	P_NS(ucx_sendrecv_ns); P_CNT(ucx_sendrecv_calls);
+	P_NS(ucx_sendrecv_size_ns); P_CNT(ucx_sendrecv_size_calls); P_CNT(ucx_sendrecv_size_bytes);
+	P_NS(ucx_sendrecv_data_ns); P_CNT(ucx_sendrecv_data_calls); P_CNT(ucx_sendrecv_data_bytes);
 	P_NS(ucx_send_ns); P_CNT(ucx_send_calls); P_CNT(ucx_send_bytes);
 	P_NS(ucx_recv_ns); P_CNT(ucx_recv_calls); P_CNT(ucx_recv_bytes);
 	P_NS(ucx_wait_ns);
+	P_NS(ucx_wait_recv_ns); P_CNT(ucx_wait_recv_calls);
+	P_NS(ucx_wait_send_ns); P_CNT(ucx_wait_send_calls);
 	P_NS(merge_ext_ns); P_CNT(merge_ext_calls);
 	P_NS(allreduce_total_ns); P_CNT(allreduce_steps);
 	P_NS(ucx_bootstrap_wait_ns); P_CNT(ucx_bootstrap_wait_iters);
@@ -624,6 +644,11 @@ static void cape_profile_report(void)
 #define CAPE_PROFILE_INC(field) do { } while (0)
 #define CAPE_PROFILE_ADD(field, value) do { } while (0)
 #define CAPE_PROFILE_ADD_NS(field, start) do { } while (0)
+static unsigned long long cape_profile_elapsed_ns(struct timespec start)
+{
+	(void)start;
+	return 0;
+}
 static inline void cape_profile_report(void) {}
 #endif
 
@@ -1035,6 +1060,10 @@ static unsigned char *ucx_scratch_send;
 static unsigned char *ucx_scratch_recv;
 static unsigned char *ucx_scratch_merge;
 static unsigned char *ucx_scratch_total_in;
+static ucp_mem_h ucx_scratch_send_memh;
+static ucp_mem_h ucx_scratch_recv_memh;
+static ucp_mem_h ucx_scratch_merge_memh;
+static ucp_mem_h ucx_scratch_total_in_memh;
 static size_t ucx_scratch_send_cap;
 static size_t ucx_scratch_recv_cap;
 static size_t ucx_scratch_merge_cap;
@@ -1095,33 +1124,16 @@ static size_t cape_parse_size_env(const char *name, size_t fallback)
 
 static int cape_scratch_reserve(unsigned char **buf, size_t *cap, size_t need)
 {
-    size_t new_cap;
-    unsigned char *new_buf;
-
     if (need == 0)
         need = 1;
     if (*cap >= need)
         return 0;
 
-    new_cap = *cap;
-    if (new_cap < ucx_scratch_initial_cap)
-        new_cap = ucx_scratch_initial_cap;
-    if (new_cap == 0)
-        new_cap = 64ull * 1024ull * 1024ull;
-    while (new_cap < need) {
-        if (new_cap > SIZE_MAX / 2) {
-            new_cap = need;
-            break;
-        }
-        new_cap *= 2;
-    }
-
-    if (posix_memalign((void **)&new_buf, 4096, new_cap) != 0)
-        return 1;
-    free(*buf);
-    *buf = new_buf;
-    *cap = new_cap;
-    return 0;
+    fprintf(stderr,
+            "CAPE UCX: scratch buffer too small (need=%zu cap=%zu); "
+            "increase CAPE_UCX_SCRATCH_BYTES\n",
+            need, *cap);
+    return 1;
 }
 
 static int cape_copy_to_scratch(unsigned char **buf, size_t *cap,
@@ -1136,24 +1148,70 @@ static int cape_copy_to_scratch(unsigned char **buf, size_t *cap,
 
 static int cape_ucx_scratch_init(void)
 {
+    const size_t default_scratch = 2ull * 1024ull * 1024ull * 1024ull;
+
     ucx_scratch_initial_cap = cape_parse_size_env("CAPE_UCX_SCRATCH_BYTES",
-                                                  64ull * 1024ull * 1024ull);
-    if (cape_scratch_reserve(&ucx_scratch_send, &ucx_scratch_send_cap,
-                             ucx_scratch_initial_cap) != 0 ||
-        cape_scratch_reserve(&ucx_scratch_recv, &ucx_scratch_recv_cap,
-                             ucx_scratch_initial_cap) != 0 ||
-        cape_scratch_reserve(&ucx_scratch_merge, &ucx_scratch_merge_cap,
-                             ucx_scratch_initial_cap) != 0 ||
-        cape_scratch_reserve(&ucx_scratch_total_in, &ucx_scratch_total_in_cap,
-                             ucx_scratch_initial_cap) != 0) {
-        fprintf(stderr, "CAPE UCX: failed to allocate scratch buffers\n");
+                                                  default_scratch);
+    if (posix_memalign((void **)&ucx_scratch_send, 4096,
+                       ucx_scratch_initial_cap) != 0 ||
+        posix_memalign((void **)&ucx_scratch_recv, 4096,
+                       ucx_scratch_initial_cap) != 0 ||
+        posix_memalign((void **)&ucx_scratch_merge, 4096,
+                       ucx_scratch_initial_cap) != 0 ||
+        posix_memalign((void **)&ucx_scratch_total_in, 4096,
+                       ucx_scratch_initial_cap) != 0) {
+        fprintf(stderr,
+                "CAPE UCX: failed to allocate four %zu-byte scratch buffers\n",
+                ucx_scratch_initial_cap);
         return 1;
+    }
+    ucx_scratch_send_cap = ucx_scratch_recv_cap = ucx_scratch_merge_cap =
+        ucx_scratch_total_in_cap = ucx_scratch_initial_cap;
+
+    {
+        ucp_mem_map_params_t mp;
+        ucs_status_t st;
+
+        memset(&mp, 0, sizeof(mp));
+        mp.field_mask = UCP_MEM_MAP_PARAM_FIELD_ADDRESS |
+                        UCP_MEM_MAP_PARAM_FIELD_LENGTH |
+                        UCP_MEM_MAP_PARAM_FIELD_FLAGS |
+                        UCP_MEM_MAP_PARAM_FIELD_MEMORY_TYPE;
+        mp.length = ucx_scratch_initial_cap;
+        mp.flags = UCP_MEM_MAP_LOCK;
+        mp.memory_type = UCS_MEMORY_TYPE_HOST;
+
+#define CAPE_MAP_SCRATCH(ptr, memh, name) do { \
+        mp.address = (ptr); \
+        st = ucp_mem_map(ucp_context, &mp, &(memh)); \
+        if (st != UCS_OK) { \
+            fprintf(stderr, "CAPE UCX: ucp_mem_map(%s, %zu bytes) failed: %s\n", \
+                    (name), ucx_scratch_initial_cap, ucs_status_string(st)); \
+            return 1; \
+        } \
+    } while (0)
+
+        CAPE_MAP_SCRATCH(ucx_scratch_send, ucx_scratch_send_memh, "send");
+        CAPE_MAP_SCRATCH(ucx_scratch_recv, ucx_scratch_recv_memh, "recv");
+        CAPE_MAP_SCRATCH(ucx_scratch_merge, ucx_scratch_merge_memh, "merge");
+        CAPE_MAP_SCRATCH(ucx_scratch_total_in, ucx_scratch_total_in_memh, "total_in");
+#undef CAPE_MAP_SCRATCH
     }
     return 0;
 }
 
 static void cape_ucx_scratch_cleanup(void)
 {
+    if (ucx_scratch_send_memh != NULL)
+        ucp_mem_unmap(ucp_context, ucx_scratch_send_memh);
+    if (ucx_scratch_recv_memh != NULL)
+        ucp_mem_unmap(ucp_context, ucx_scratch_recv_memh);
+    if (ucx_scratch_merge_memh != NULL)
+        ucp_mem_unmap(ucp_context, ucx_scratch_merge_memh);
+    if (ucx_scratch_total_in_memh != NULL)
+        ucp_mem_unmap(ucp_context, ucx_scratch_total_in_memh);
+    ucx_scratch_send_memh = ucx_scratch_recv_memh = NULL;
+    ucx_scratch_merge_memh = ucx_scratch_total_in_memh = NULL;
     free(ucx_scratch_send);
     free(ucx_scratch_recv);
     free(ucx_scratch_merge);
@@ -1179,22 +1237,74 @@ static int cape_total_stream_update_size(void)
     return 0;
 }
 
+static ucp_mem_h cape_scratch_memh_for(const void *ptr)
+{
+    const unsigned char *p = ptr;
+
+    if (ptr == NULL)
+        return NULL;
+    if (ucx_scratch_send != NULL &&
+        p >= ucx_scratch_send && p < ucx_scratch_send + ucx_scratch_send_cap)
+        return ucx_scratch_send_memh;
+    if (ucx_scratch_recv != NULL &&
+        p >= ucx_scratch_recv && p < ucx_scratch_recv + ucx_scratch_recv_cap)
+        return ucx_scratch_recv_memh;
+    if (ucx_scratch_merge != NULL &&
+        p >= ucx_scratch_merge && p < ucx_scratch_merge + ucx_scratch_merge_cap)
+        return ucx_scratch_merge_memh;
+    if (ucx_scratch_total_in != NULL &&
+        p >= ucx_scratch_total_in &&
+        p < ucx_scratch_total_in + ucx_scratch_total_in_cap)
+        return ucx_scratch_total_in_memh;
+    return NULL;
+}
+
+static int cape_total_scratch_buffer(const unsigned char *avoid,
+                                     unsigned char **buf,
+                                     size_t *cap)
+{
+    if (avoid == ucx_scratch_merge) {
+        *buf = ucx_scratch_total_in;
+        *cap = ucx_scratch_total_in_cap;
+    } else {
+        *buf = ucx_scratch_merge;
+        *cap = ucx_scratch_merge_cap;
+    }
+    return 0;
+}
+
 static FILE *cape_total_open_scratch_stream(size_t need)
 {
     FILE *stream;
+    unsigned char *buf;
+    size_t cap;
 
     if (need == SIZE_MAX)
         return NULL;
-    if (cape_scratch_reserve(&ucx_scratch_merge, &ucx_scratch_merge_cap,
-                             need + 1) != 0)
+    cape_total_scratch_buffer(total_ckpt, &buf, &cap);
+    if (cape_scratch_reserve(&buf, &cap, need + 1) != 0)
         return NULL;
-    stream = fmemopen(ucx_scratch_merge, ucx_scratch_merge_cap, "wb");
+    stream = fmemopen(buf, cap, "wb");
     if (stream == NULL)
         return NULL;
-    total_ckpt = ucx_scratch_merge;
+    total_ckpt = buf;
     total_ckpt_size = 0;
     total_ckpt_uses_scratch = 1;
     total_ckpt_stream = stream;
+    return stream;
+}
+
+static FILE *cape_final_open_scratch_stream(unsigned char **bufloc,
+                                            size_t *sizeloc)
+{
+    FILE *stream;
+
+    stream = fmemopen(ucx_scratch_merge, ucx_scratch_merge_cap, "wb");
+    if (stream == NULL)
+        return NULL;
+    *bufloc = ucx_scratch_merge;
+    *sizeloc = 0;
+    final_ckpt_uses_scratch = 1;
     return stream;
 }
 
@@ -1211,15 +1321,15 @@ static void cape_total_release(void)
     total_ckpt_uses_scratch = 0;
 }
 
-static void cape_ucx_wait(void *req, size_t expect_len, int check_len,
-                          ucp_tag_t *out_tag)
+static unsigned long long cape_ucx_wait(void *req, size_t expect_len,
+					int check_len, ucp_tag_t *out_tag)
 {
 	CAPE_PROFILE_NS_VAR(wait_start_ns);
 	CAPE_PROFILE_NS_START(wait_start_ns);
 
     if (out_tag) *out_tag = 0;
     if (req == NULL)
-        return;
+        return 0;
     if (UCS_PTR_IS_ERR(req)) {
         fprintf(stderr, "CAPE UCX error: %s\n",
                 ucs_status_string(UCS_PTR_STATUS(req)));
@@ -1231,16 +1341,23 @@ static void cape_ucx_wait(void *req, size_t expect_len, int check_len,
         unsigned events = ucp_worker_progress(ucp_worker);
         CAPE_PROFILE_INC(ucx_progress_calls);
         if (events == 0) {
+            CAPE_PROFILE_INC(ucx_progress_idle_calls);
             if (++idle_iters >= 1000000) {
                 sched_yield();
                 idle_iters = 0;
             }
         } else {
+            CAPE_PROFILE_INC(ucx_progress_active_calls);
             idle_iters = 0;
         }
     }
-    CAPE_PROFILE_ADD_NS(ucx_wait_ns, wait_start_ns);
-    CAPE_PROFILE_ADD_NS(ucx_progress_ns, wait_start_ns);
+#ifdef CAPE_PROFILE
+    unsigned long long wait_ns = cape_profile_elapsed_ns(wait_start_ns);
+    CAPE_PROFILE_ADD(ucx_wait_ns, wait_ns);
+    CAPE_PROFILE_ADD(ucx_progress_ns, wait_ns);
+#else
+    unsigned long long wait_ns = 0;
+#endif
     if (out_tag)
         *out_tag = r->sender_tag;
     if (r->status != UCS_OK) {
@@ -1264,22 +1381,70 @@ static void cape_ucx_wait(void *req, size_t expect_len, int check_len,
     r->recv_len   = 0;
     r->sender_tag = 0;
     ucp_request_free(req);
+    return wait_ns;
 }
 
 #define CAPE_UCX_TAG(sender_rank, token) \
     ((uint64_t)((((uint32_t)(sender_rank) & 0x0fffU) << 20) | ((uint32_t)(token) & 0x000fffffU)))
 #define CAPE_UCX_TAG_MASK  ((uint64_t)0x00000000ffffffffULL)
 
-/* Simultaneous tag send/receive (mimics MPI_Sendrecv). */
-static void cape_ucx_sendrecv(
+static ucp_tag_message_h cape_ucx_probe_msg(ucp_tag_t recv_tag,
+                                            ucp_tag_recv_info_t *info,
+                                            unsigned long long *wait_ns_out)
+{
+    ucp_tag_message_h msg;
+    unsigned idle_iters = 0;
+    CAPE_PROFILE_NS_VAR(wait_start_ns);
+    CAPE_PROFILE_NS_START(wait_start_ns);
+
+    for (;;) {
+        msg = ucp_tag_probe_nb(ucp_worker, recv_tag, CAPE_UCX_TAG_MASK,
+                               1, info);
+        if (msg != NULL)
+            break;
+
+        {
+            unsigned events = ucp_worker_progress(ucp_worker);
+            CAPE_PROFILE_INC(ucx_progress_calls);
+            if (events == 0) {
+                CAPE_PROFILE_INC(ucx_progress_idle_calls);
+                if (++idle_iters >= 1000000) {
+                    sched_yield();
+                    idle_iters = 0;
+                }
+            } else {
+                CAPE_PROFILE_INC(ucx_progress_active_calls);
+                idle_iters = 0;
+            }
+        }
+    }
+
+#ifdef CAPE_PROFILE
+    *wait_ns_out = cape_profile_elapsed_ns(wait_start_ns);
+    CAPE_PROFILE_ADD(ucx_wait_ns, *wait_ns_out);
+    CAPE_PROFILE_ADD(ucx_progress_ns, *wait_ns_out);
+#else
+    *wait_ns_out = 0;
+#endif
+    return msg;
+}
+
+static size_t cape_ucx_sendrecv_probe(
         const void *sendbuf, size_t sendlen, int dest,
-        void       *recvbuf, size_t recvlen, int src,
+        void       *recvbuf, size_t recvcap, int src,
         uint32_t    token)
 {
     CAPE_PROFILE_NS_VAR(start_ns);
     CAPE_PROFILE_NS_START(start_ns);
     ucp_tag_t send_tag = CAPE_UCX_TAG(node, token);
     ucp_tag_t recv_tag = CAPE_UCX_TAG(src,  token);
+    ucp_tag_recv_info_t info;
+    ucp_tag_message_h msg;
+    ucp_mem_h send_memh = cape_scratch_memh_for(sendbuf);
+    ucp_mem_h recv_memh = cape_scratch_memh_for(recvbuf);
+    unsigned long long probe_wait_ns = 0;
+    unsigned long long recv_wait_ns;
+    unsigned long long send_wait_ns;
 
     ucp_request_param_t sp = {
         .op_attr_mask = UCP_OP_ATTR_FIELD_CALLBACK,
@@ -1292,17 +1457,90 @@ static void cape_ucx_sendrecv(
         .cb.recv      = cape_recv_cb
     };
 
-    void *rreq = ucp_tag_recv_nbx(ucp_worker, recvbuf, recvlen,
-                                   recv_tag, CAPE_UCX_TAG_MASK, &rp);
-    void *sreq = ucp_tag_send_nbx(ucp_endpoints[dest], sendbuf, sendlen,
-                                   send_tag, &sp);
+    if (send_memh != NULL) {
+        sp.op_attr_mask |= UCP_OP_ATTR_FIELD_MEMH;
+        sp.memh = send_memh;
+    }
+    if (recv_memh != NULL) {
+        rp.op_attr_mask |= UCP_OP_ATTR_FIELD_MEMH;
+        rp.memh = recv_memh;
+    }
 
-    cape_ucx_wait(rreq, recvlen, 1, NULL);
-    cape_ucx_wait(sreq, 0, 0, NULL);
-    CAPE_PROFILE_ADD_NS(ucx_sendrecv_ns, start_ns);
-    CAPE_PROFILE_INC(ucx_sendrecv_calls);
-    CAPE_PROFILE_ADD(ucx_send_bytes, (uint64_t)sendlen);
-    CAPE_PROFILE_ADD(ucx_recv_bytes, (uint64_t)recvlen);
+	void *sreq = ucp_tag_send_nbx(ucp_endpoints[dest], sendbuf, sendlen,
+	                                  send_tag, &sp);
+	if (UCS_PTR_IS_ERR(sreq)) {
+		fprintf(stderr, "CAPE UCX send failed before probe: %s\n",
+			ucs_status_string(UCS_PTR_STATUS(sreq)));
+		exit(1);
+	}
+	msg = cape_ucx_probe_msg(recv_tag, &info, &probe_wait_ns);
+    if (info.length > recvcap) {
+        fprintf(stderr,
+                "CAPE UCX: probed message too large (len=%zu cap=%zu); "
+                "increase CAPE_UCX_SCRATCH_BYTES\n",
+                info.length, recvcap);
+        exit(1);
+    }
+
+    void *rreq = ucp_tag_msg_recv_nbx(ucp_worker, recvbuf, info.length,
+                                      msg, &rp);
+    recv_wait_ns = cape_ucx_wait(rreq, info.length, 1, NULL);
+    send_wait_ns = cape_ucx_wait(sreq, 0, 0, NULL);
+#ifdef CAPE_PROFILE
+    {
+        unsigned long long sendrecv_ns = cape_profile_elapsed_ns(start_ns);
+        CAPE_PROFILE_ADD(ucx_sendrecv_ns, sendrecv_ns);
+        CAPE_PROFILE_INC(ucx_sendrecv_calls);
+        CAPE_PROFILE_ADD(ucx_send_bytes, (uint64_t)sendlen);
+        CAPE_PROFILE_ADD(ucx_recv_bytes, (uint64_t)info.length);
+        CAPE_PROFILE_ADD(ucx_wait_recv_ns, probe_wait_ns + recv_wait_ns);
+        CAPE_PROFILE_ADD(ucx_wait_send_ns, send_wait_ns);
+        CAPE_PROFILE_INC(ucx_wait_recv_calls);
+        CAPE_PROFILE_INC(ucx_wait_send_calls);
+        CAPE_PROFILE_ADD(ucx_sendrecv_data_ns, sendrecv_ns);
+        CAPE_PROFILE_INC(ucx_sendrecv_data_calls);
+        CAPE_PROFILE_ADD(ucx_sendrecv_data_bytes, (uint64_t)sendlen);
+    }
+#endif
+    return info.length;
+}
+
+static unsigned char *cape_ucx_recv_probe_alloc(size_t *recvlen, int src,
+                                                uint32_t token)
+{
+    CAPE_PROFILE_NS_VAR(start_ns);
+    CAPE_PROFILE_NS_START(start_ns);
+    ucp_tag_t recv_tag = CAPE_UCX_TAG(src, token);
+    ucp_tag_recv_info_t info;
+    ucp_tag_message_h msg;
+    unsigned long long probe_wait_ns = 0;
+    unsigned long long recv_wait_ns;
+    unsigned char *buf;
+    ucp_request_param_t rp = {
+        .op_attr_mask = UCP_OP_ATTR_FIELD_CALLBACK
+                      | UCP_OP_ATTR_FIELD_FLAGS,
+        .flags        = UCP_OP_ATTR_FLAG_NO_IMM_CMPL,
+        .cb.recv      = cape_recv_cb
+    };
+
+    msg = cape_ucx_probe_msg(recv_tag, &info, &probe_wait_ns);
+    buf = malloc(info.length == 0 ? 1 : info.length);
+    if (buf == NULL) {
+        perror("malloc(probed UCX recv)");
+        exit(1);
+    }
+
+    void *req = ucp_tag_msg_recv_nbx(ucp_worker, buf, info.length, msg, &rp);
+    recv_wait_ns = cape_ucx_wait(req, info.length, 1, NULL);
+#ifdef CAPE_PROFILE
+    CAPE_PROFILE_ADD_NS(ucx_recv_ns, start_ns);
+    CAPE_PROFILE_INC(ucx_recv_calls);
+    CAPE_PROFILE_ADD(ucx_recv_bytes, (uint64_t)info.length);
+    CAPE_PROFILE_ADD(ucx_wait_recv_ns, probe_wait_ns + recv_wait_ns);
+    CAPE_PROFILE_INC(ucx_wait_recv_calls);
+#endif
+    *recvlen = info.length;
+    return buf;
 }
 
 /* Simple blocking send via UCX tag. */
@@ -1315,11 +1553,18 @@ static void cape_ucx_send(const void *buf, size_t len, int dest, uint32_t token)
         .op_attr_mask = UCP_OP_ATTR_FIELD_CALLBACK,
         .cb.send      = cape_send_cb
     };
+    ucp_mem_h memh = cape_scratch_memh_for(buf);
+    if (memh != NULL) {
+        sp.op_attr_mask |= UCP_OP_ATTR_FIELD_MEMH;
+        sp.memh = memh;
+    }
     void *req = ucp_tag_send_nbx(ucp_endpoints[dest], buf, len, tag, &sp);
-    cape_ucx_wait(req, 0, 0, NULL);
+    unsigned long long send_wait_ns = cape_ucx_wait(req, 0, 0, NULL);
     CAPE_PROFILE_ADD_NS(ucx_send_ns, start_ns);
     CAPE_PROFILE_INC(ucx_send_calls);
     CAPE_PROFILE_ADD(ucx_send_bytes, (uint64_t)len);
+    CAPE_PROFILE_ADD(ucx_wait_send_ns, send_wait_ns);
+    CAPE_PROFILE_INC(ucx_wait_send_calls);
 }
 
 /* Simple blocking recv via UCX tag. */
@@ -1334,11 +1579,18 @@ static void cape_ucx_recv(void *buf, size_t len, int src, uint32_t token)
         .flags        = UCP_OP_ATTR_FLAG_NO_IMM_CMPL,
         .cb.recv      = cape_recv_cb
     };
+    ucp_mem_h memh = cape_scratch_memh_for(buf);
+    if (memh != NULL) {
+        rp.op_attr_mask |= UCP_OP_ATTR_FIELD_MEMH;
+        rp.memh = memh;
+    }
     void *req = ucp_tag_recv_nbx(ucp_worker, buf, len, tag, CAPE_UCX_TAG_MASK, &rp);
-    cape_ucx_wait(req, len, 1, NULL);
+    unsigned long long recv_wait_ns = cape_ucx_wait(req, len, 1, NULL);
     CAPE_PROFILE_ADD_NS(ucx_recv_ns, start_ns);
     CAPE_PROFILE_INC(ucx_recv_calls);
     CAPE_PROFILE_ADD(ucx_recv_bytes, (uint64_t)len);
+    CAPE_PROFILE_ADD(ucx_wait_recv_ns, recv_wait_ns);
+    CAPE_PROFILE_INC(ucx_wait_recv_calls);
 }
 
 /* Tag tokens for different message types to avoid collisions */
@@ -2232,7 +2484,15 @@ void end_shared_data(){
 	size_t cap = 0, n = 0, k;
 
 	//open the stream memory file
-	stream = open_binary_memstream(ckpt_data, ckpt_size);
+	if (ckpt_data == &final_ckpt) {
+		stream = cape_final_open_scratch_stream(ckpt_data, ckpt_size);
+	} else {
+		stream = open_binary_memstream(ckpt_data, ckpt_size);
+	}
+	if (stream == NULL) {
+		fprintf(stderr, "Monitor %ld: failed to open checkpoint stream\n", node);
+		exit(1);
+	}
 
 	//get the registers
 	ptrace(PTRACE_GETREGS, child_id, NULL, &save_regs);
@@ -2306,6 +2566,21 @@ void end_shared_data(){
 	}
 
 	fflush(stream);
+	if (ferror(stream)) {
+		fprintf(stderr,
+			"Monitor %ld: checkpoint stream write failed; "
+			"increase CAPE_UCX_SCRATCH_BYTES\n",
+			node);
+		exit(1);
+	}
+	{
+		long pos = ftell(stream);
+		if (pos < 0) {
+			perror("ftell(checkpoint stream)");
+			exit(1);
+		}
+		*ckpt_size = (size_t)pos;
+	}
 	CAPE_PROFILE_ADD_NS(generate_ckpt_ns, profile_start_ns);
 	CAPE_PROFILE_INC(generate_ckpt_calls);
 	return stream;
@@ -2356,20 +2631,14 @@ int require_generate_checkpoint(){
  * --------------------------------------
  */
 int send_checkpoint(int destination){
-	/* First send the size so the receiver knows how much to allocate */
-	int sz = (int)final_ckpt_size;
-	cape_ucx_send(&sz, sizeof(int), destination, TAG_CKPT_DATA);
-	/* Then send the checkpoint data */
-	cape_ucx_send(final_ckpt, final_ckpt_size, destination, TAG_CKPT_DATA + 1);
+	cape_ucx_send(final_ckpt, final_ckpt_size, destination, TAG_CKPT_DATA);
 
 	fclose(final_ckpt_stream);
-	/* open_memstream's buffer survives fclose — caller must free it.
-	 * Without this the per-phase ckpt buffer accumulates and the
-	 * monitor's RSS grows as O(phases × peers × dirty_per_phase),
-	 * which OOMs at large node counts. */
-	free(final_ckpt);
+	if (!final_ckpt_uses_scratch)
+		free(final_ckpt);
 	final_ckpt = NULL;
 	final_ckpt_size = 0;
+	final_ckpt_uses_scratch = 0;
 	return 0;
 }
 
@@ -2419,15 +2688,11 @@ int require_send_checkpoint(){
  * ----------------------------------------
  */
  FILE * receive_checkpoint(int source, unsigned char **ckpt_data, size_t *ckpt_size) {
-	int nbytes;
 	unsigned char *buffer;
+	size_t nbytes;
 	FILE *stream;
 
-	/* Receive the size first */
-	cape_ucx_recv(&nbytes, sizeof(int), source, TAG_CKPT_DATA);
-	buffer = malloc(nbytes);
-	/* Receive the checkpoint data */
-	cape_ucx_recv(buffer, nbytes, source, TAG_CKPT_DATA + 1);
+	buffer = cape_ucx_recv_probe_alloc(&nbytes, source, TAG_CKPT_DATA);
 
 	//open the stream memory file
 	stream = open_binary_memstream(ckpt_data, ckpt_size);
@@ -2659,6 +2924,13 @@ int merge_external_checkpoint(FILE *src_ckpt_stream, 		\
 
  	if(total_ckpt_size==0)
  	{
+		if (cape_scratch_memh_for(src_ckpt_data) != NULL) {
+			total_ckpt = src_ckpt_data;
+			total_ckpt_size = src_ckpt_size;
+			total_ckpt_uses_scratch = 1;
+			total_ckpt_stream = NULL;
+			return 0;
+		}
 		total_ckpt_stream = cape_total_open_scratch_stream(src_ckpt_size);
 		if (total_ckpt_stream == NULL)
 			return 1;
@@ -2674,11 +2946,15 @@ int merge_external_checkpoint(FILE *src_ckpt_stream, 		\
 	old_total_was_scratch = total_ckpt_uses_scratch;
 	tmp_size = total_ckpt_size;
 
-	if (cape_copy_to_scratch(&ucx_scratch_total_in,
-				 &ucx_scratch_total_in_cap,
-				 old_total, tmp_size) != 0)
-		return 1;
-	tmp_ckpt = ucx_scratch_total_in;
+	if (old_total_was_scratch) {
+		tmp_ckpt = old_total;
+	} else {
+		if (cape_copy_to_scratch(&ucx_scratch_total_in,
+					 &ucx_scratch_total_in_cap,
+					 old_total, tmp_size) != 0)
+			return 1;
+		tmp_ckpt = ucx_scratch_total_in;
+	}
 
 	if (total_ckpt_stream != NULL) {
 		fclose(total_ckpt_stream);
@@ -2686,6 +2962,8 @@ int merge_external_checkpoint(FILE *src_ckpt_stream, 		\
 	}
 	if (!old_total_was_scratch)
 		free(old_total);
+	total_ckpt = tmp_ckpt;
+	total_ckpt_uses_scratch = 1;
 	total_ckpt_size = 0;
 
 	tmp_read_stream = fmemopen(tmp_ckpt, tmp_size, "rb");
@@ -2797,23 +3075,25 @@ int require_broadcast_checkpoint(){
 	int i;
 	if(node==0)
 	{
-		buffer_size = final_ckpt_size;
 		buffer_ckpt = final_ckpt;
 		/* Master sends size and data to all slaves */
 		for(i = 1; i < num_nodes; i++){
-			cape_ucx_send(&buffer_size, sizeof(int), i, TAG_BCAST_SIZE);
-			cape_ucx_send(buffer_ckpt, buffer_size, i, TAG_BCAST_DATA);
+			cape_ucx_send(buffer_ckpt, final_ckpt_size, i, TAG_BCAST_DATA);
 		}
 	}
 	else
 	{
 		/* Slaves receive size and data from master */
-		cape_ucx_recv(&buffer_size, sizeof(int), 0, TAG_BCAST_SIZE);
-		buffer_ckpt = malloc(buffer_size);
-		cape_ucx_recv(buffer_ckpt, buffer_size, 0, TAG_BCAST_DATA);
+		size_t recv_size;
+		buffer_ckpt = cape_ucx_recv_probe_alloc(&recv_size, 0, TAG_BCAST_DATA);
+		if (recv_size > (size_t)INT_MAX) {
+			free(buffer_ckpt);
+			return 1;
+		}
+		buffer_size = (int)recv_size;
 		//open the stream memory file
 		after_ckpt_stream = open_binary_memstream(&after_ckpt, &after_ckpt_size);
-		fwrite(buffer_ckpt, buffer_size, 1, after_ckpt_stream);
+		fwrite(buffer_ckpt, recv_size, 1, after_ckpt_stream);
 		fflush(after_ckpt_stream);
 		free(buffer_ckpt);
 	}
@@ -2856,60 +3136,57 @@ int mylog2(unsigned int n){
 int ring_allreduce(){
 	int rc = 0;
 
-	int message_size;
+	size_t message_size;
+	size_t recv_message_size = 0;
+	unsigned char *send_buffer;
+	unsigned char *recv_buffer;
+	size_t recv_cap;
 	FILE *ckpt_stream;
 
 	int left;
 	int right;
 	int i;
 
-	if (total_ckpt_size > (size_t)INT_MAX)
-		return 1;
-	if (cape_copy_to_scratch(&ucx_scratch_send, &ucx_scratch_send_cap,
-				 total_ckpt, total_ckpt_size) != 0)
-		return 1;
-	message_size = (int)total_ckpt_size;
-	int recv_message_size = 0;
+	send_buffer = total_ckpt;
+	message_size = total_ckpt_size;
+	recv_buffer = ucx_scratch_recv;
+	recv_cap = ucx_scratch_recv_cap;
 
 	left = ( node - 1 + num_nodes ) % num_nodes;
 	right = (node + 1 ) % num_nodes ;
 
-
-
 	for(i = 1 ; i < num_nodes; i++){
-		uint32_t token_size = TAG_ALLREDUCE_BASE + (i * 2);
 		uint32_t token_data = TAG_ALLREDUCE_BASE + (i * 2) + 1;
+		CAPE_PROFILE_NS_VAR(step_start_ns);
+		CAPE_PROFILE_NS_START(step_start_ns);
 
-		//send size of message
-		cape_ucx_sendrecv(&message_size, sizeof(int), right,
-						  &recv_message_size, sizeof(int), left,
-						  token_size);
+		recv_message_size = cape_ucx_sendrecv_probe(send_buffer,
+							    message_size, right,
+							    recv_buffer,
+							    recv_cap, left,
+							    token_data);
 
-		if (recv_message_size < 0 ||
-		    cape_scratch_reserve(&ucx_scratch_recv, &ucx_scratch_recv_cap,
-					 (size_t)recv_message_size) != 0)
-			return 1;
-
-		//send data
-		cape_ucx_sendrecv(ucx_scratch_send, (size_t)message_size, right,
-						  ucx_scratch_recv, (size_t)recv_message_size, left,
-						  token_data);
-
-		ckpt_stream = fmemopen(ucx_scratch_recv,
-				       (size_t)recv_message_size, "rb");
+		ckpt_stream = fmemopen(recv_buffer, recv_message_size, "rb");
 		if (ckpt_stream == NULL)
 			return 1;
-		rc = merge_external_checkpoint(ckpt_stream, ucx_scratch_recv,
-					       (size_t)recv_message_size);
+		rc = merge_external_checkpoint(ckpt_stream, recv_buffer,
+					       recv_message_size);
 		fclose(ckpt_stream);
 		if (rc != 0)
 			return rc;
-		if (cape_copy_to_scratch(&ucx_scratch_send, &ucx_scratch_send_cap,
-					 ucx_scratch_recv,
-					 (size_t)recv_message_size) != 0)
-			return 1;
-		message_size = recv_message_size;
 
+		send_buffer = recv_buffer;
+		message_size = recv_message_size;
+		if (recv_buffer == ucx_scratch_recv) {
+			recv_buffer = ucx_scratch_send;
+			recv_cap = ucx_scratch_send_cap;
+		} else {
+			recv_buffer = ucx_scratch_recv;
+			recv_cap = ucx_scratch_recv_cap;
+		}
+
+		CAPE_PROFILE_ADD_NS(allreduce_total_ns, step_start_ns);
+		CAPE_PROFILE_INC(allreduce_steps);
 	}
 
     return rc;
@@ -2921,49 +3198,34 @@ int hypercube_allreduce(){
 	int i;
 	int nsteps = 0;
 	int partner;
-	int send_msg_size=0, recv_msg_size=0;
+	size_t send_msg_size = 0, recv_msg_size = 0;
 
 	FILE *ckpt_stream;
 
 	nsteps = mylog2 (num_nodes);
 
 	for(i = 0; i < nsteps; i ++){
-		uint32_t token_size = TAG_ALLREDUCE_BASE + (i * 2);
 		uint32_t token_data = TAG_ALLREDUCE_BASE + (i * 2) + 1;
 		CAPE_PROFILE_NS_VAR(step_start_ns);
 		CAPE_PROFILE_NS_START(step_start_ns);
 
 		partner = node ^ (1 << i);
 
-		if (total_ckpt_size > (size_t)INT_MAX)
-			return 1;
-		if (cape_copy_to_scratch(&ucx_scratch_send,
-					 &ucx_scratch_send_cap,
-					 total_ckpt, total_ckpt_size) != 0)
-			return 1;
-		send_msg_size = (int)total_ckpt_size;
-
-		//send size of message
-		cape_ucx_sendrecv(&send_msg_size, sizeof(int), partner,
-						  &recv_msg_size, sizeof(int), partner,
-						  token_size);
-
-		if (recv_msg_size < 0 ||
-		    cape_scratch_reserve(&ucx_scratch_recv, &ucx_scratch_recv_cap,
-					 (size_t)recv_msg_size) != 0)
-			return 1;
-
-		//send data
-		cape_ucx_sendrecv(ucx_scratch_send, (size_t)send_msg_size, partner,
-						  ucx_scratch_recv, (size_t)recv_msg_size, partner,
-						  token_data);
+		send_msg_size = total_ckpt_size;
+		recv_msg_size = cape_ucx_sendrecv_probe(total_ckpt,
+							send_msg_size,
+							partner,
+							ucx_scratch_recv,
+							ucx_scratch_recv_cap,
+							partner,
+							token_data);
 
 		ckpt_stream = fmemopen(ucx_scratch_recv,
-				       (size_t)recv_msg_size, "rb");
+				       recv_msg_size, "rb");
 		if (ckpt_stream == NULL)
 			return 1;
 		rc = merge_external_checkpoint(ckpt_stream, ucx_scratch_recv,
-					       (size_t)recv_msg_size);
+					       recv_msg_size);
 		fclose(ckpt_stream);
 		if (rc != 0)
 			return rc;
@@ -2980,20 +3242,20 @@ int require_allreduce_checkpoint(){
 	int rc = 0;
 	rc=  merge_external_checkpoint(final_ckpt_stream, final_ckpt, final_ckpt_size);		
 	fclose(final_ckpt_stream);
-	free(final_ckpt);
+	if (!final_ckpt_uses_scratch)
+		free(final_ckpt);
 	final_ckpt = NULL;
 	final_ckpt_size = 0;
+	final_ckpt_uses_scratch = 0;
 	if (rc != 0) {
 		cape_total_release();
 		return rc;
 	}
 		
-	if (!is_power_of_two(num_nodes) && (total_ckpt_size < LARGE_CHECKPOINT)){
-	    rc = hypercube_allreduce();
-	}	
-	else {	
+	if (is_power_of_two(num_nodes))
+		rc = hypercube_allreduce();
+	else
 		rc = ring_allreduce();
-	}	
 	if (rc != 0) {
 		cape_total_release();
 		return rc;
