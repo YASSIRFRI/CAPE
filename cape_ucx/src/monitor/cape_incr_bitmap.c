@@ -1148,7 +1148,7 @@ static int cape_copy_to_scratch(unsigned char **buf, size_t *cap,
 
 static int cape_ucx_scratch_init(void)
 {
-    const size_t default_scratch = 2ull * 1024ull * 1024ull * 1024ull;
+    const size_t default_scratch = 256ull * 1024ull * 1024ull;
 
     ucx_scratch_initial_cap = cape_parse_size_env("CAPE_UCX_SCRATCH_BYTES",
                                                   default_scratch);
@@ -1178,7 +1178,7 @@ static int cape_ucx_scratch_init(void)
                         UCP_MEM_MAP_PARAM_FIELD_FLAGS |
                         UCP_MEM_MAP_PARAM_FIELD_MEMORY_TYPE;
         mp.length = ucx_scratch_initial_cap;
-        mp.flags = UCP_MEM_MAP_LOCK;
+        mp.flags = UCP_MEM_MAP_NONBLOCK;
         mp.memory_type = UCS_MEMORY_TYPE_HOST;
 
 #define CAPE_MAP_SCRATCH(ptr, memh, name) do { \
