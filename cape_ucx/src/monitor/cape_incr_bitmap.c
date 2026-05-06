@@ -2595,179 +2595,6 @@ static int inject_checkpoint_with_write_access(FILE *stream, size_t *file_size,
 
 
  
- 
-
-// /*----------------------------------------------------------------------
-//  * merge_data(): vesion CAPE50 
-//  * 	Merge s_stream file into Total_CKTP file, from s_position
-//  * -------------------------------------------------------------------- 
-//  */ 
-//  int merge_data(FILE * s_stream, \
-// 				unsigned char * s_data, \
-// 				size_t s_size, 
-// 				size_t s_position, int fflag ) {
-	
-// 	size_t file_pointer = 0;
-// 	unsigned long current_ckpt_struct;
-// 	unsigned char *buff = NULL;
-//  	unsigned long addr;
-//  	int len;
-	
-// 	current_ckpt_struct = SSD; //initial checkpoint struct
-	
-// 	file_pointer += s_position;
-//  	fseek(s_stream, (long)file_pointer, SEEK_SET);
- 	
-//  	while(file_pointer < s_size)
-//  	{
-// 		buff = NULL;
-//  		//read address from after checkpoint
-// 		printf("Merging Data: file pointer: %d\n",file_pointer);
-//   		fread(&addr, sizeof(unsigned long), 1, s_stream);
-//   		file_pointer += sizeof(unsigned long);
-//  		fseek(s_stream, (long)file_pointer, SEEK_SET);
-  		
-//   		struct shared_data *pro = NULL;
-//   		struct shared_data_ckpt *plist = NULL;
-  		
-//   		//if addr is the struct signal, not an adress, then we read address again, and write signal into total_ckpt
-//   		switch(addr){
-// 			case EP:
-// 				fread(&addr, sizeof(unsigned long), 1, s_stream);
-// 				file_pointer += sizeof(unsigned long);
-// 				fseek(s_stream, file_pointer, SEEK_SET);
-// 				current_ckpt_struct = EP;
-
-// 				//write signal into total checkpoint
-// 				fwrite(&current_ckpt_struct, sizeof(unsigned long), 1, total_ckpt_stream);
-
-// 				break;
-// 			case SSD:
-// 				fread(&addr, sizeof(unsigned long), 1, s_stream);
-// 				file_pointer += sizeof(unsigned long);
-// 				fseek(s_stream, file_pointer, SEEK_SET);
-// 				current_ckpt_struct = SSD;
-
-// 				//write signal into total checkpoint
-// 				fwrite(&current_ckpt_struct, sizeof(unsigned long), 1, total_ckpt_stream);
-
-// 				break;
-// 			case SD:
-// 				fread(&addr, sizeof(unsigned long), 1, s_stream);
-// 				file_pointer += sizeof(unsigned long);
-// 				fseek(s_stream, file_pointer, SEEK_SET);
-// 				current_ckpt_struct = SD;
-// 				//write signal into total checkpoint
-
-// 				pro = is_in_share_data_list(addr, data_list_head);
-// 				if ((pro!=NULL) && (pro->properties != D_SHARED))
-// 				{
-// 					if (fflag ==FINAL_CHECKPOINT){
-// 						plist = malloc(sizeof(struct shared_data_ckpt));
-// 						if (plist == NULL)
-// 							return 1;
-// 						plist->addr = addr;
-// 						plist->prev = NULL;
-// 						plist->next = NULL;
-// 					}
-// 					break;
-// 				}
-// 				else{
-// 					fwrite(&current_ckpt_struct, sizeof(unsigned long), 1, total_ckpt_stream);
-// 				}
-// 				break;
-
-// 			case MD:
-// 				fread(&addr, sizeof(unsigned long), 1, s_stream);
-// 				file_pointer += sizeof(unsigned long);
-// 				fseek(s_stream, file_pointer, SEEK_SET);
-// 				current_ckpt_struct = MD;
-// 				//write signal into total checkpoint
-// 				fwrite(&current_ckpt_struct, sizeof(unsigned long), 1, total_ckpt_stream);
-// 				break;
-// 		}
-
-//   		//read data and write to total checkpoint
-//   		switch(current_ckpt_struct){
-// 			case EP:
-// 				len = PAGE_SIZE;
-// 				//read data from checkpoint
-// 				buff = (unsigned char *) malloc(len);
-// 				if (buff == NULL) {
-// 					free(plist);
-// 					return 1;
-// 				}
-// 				fread(buff, len, 1,s_stream);
-// 				file_pointer +=len;
-// 				fseek(s_stream, file_pointer, SEEK_SET);
-
-// 				//write into total checkpoint
-// 				fwrite(&addr, sizeof(unsigned long), 1, total_ckpt_stream);
-// 				fwrite(buff, len, 1, total_ckpt_stream);
-// 				break;
-// 			case SSD:
-// 				  //read len from checkpoint
-// 				len = 0;
-// 				fread(&len, sizeof(int), 1, s_stream);
-// 				file_pointer += sizeof(int);
-// 				fseek(s_stream, file_pointer, SEEK_SET);
-
-// 				 //read data from checkpoint
-// 				buff = (unsigned char *) malloc(len);
-// 				if (buff == NULL) {
-// 					free(plist);
-// 					return 1;
-// 				}
-// 				fread(buff, len, 1,s_stream);
-// 				file_pointer +=len;
-// 				fseek(s_stream, file_pointer, SEEK_SET);
-
-// 				//write into total checkpoint
-// 				fwrite(&addr, sizeof(unsigned long), 1, total_ckpt_stream);
-// 				fwrite(&len, sizeof(int), 1, total_ckpt_stream);
-// 				fwrite(buff, len, 1, total_ckpt_stream);
-// 				break;
-// 			case SD:
-// 				len = CAPE_WORD;
-// 				//read data from checkpoint
-// 				buff = (unsigned char *) malloc(len);
-// 				if (buff == NULL) {
-// 					free(plist);
-// 					return 1;
-// 				}
-// 				fread(buff, len, 1,s_stream);
-// 				file_pointer +=len;
-// 				fseek(s_stream, file_pointer, SEEK_SET);
-
-// 				if((pro!=NULL) && (pro->properties != D_SHARED))
-// 				{
-// 					if (fflag ==FINAL_CHECKPOINT){
-// 						memcpy(plist->data, buff, len);
-// 						add_to_final_ckpt_list(plist, pro);
-// 					}
-// 					break;
-// 				}
-// 				else{
-// 					//write into final checkpoint
-// 					fwrite(&addr, sizeof(unsigned long), 1, total_ckpt_stream);
-// 					fwrite(buff, len, 1, total_ckpt_stream);
-// 				}
-
-// 				break;
-// 			case MD:
-// 				break;
-// 		}
-// 		free(buff);
-// 		free(plist);
-//  	}
-// 	fflush(total_ckpt_stream);
-// 	return 0;
-// }
- 
- 
- 
- 
- 
 int merge_external_checkpoint(FILE *src_ckpt_stream, 		\
 							  unsigned char *src_ckpt_data, \
 							  size_t src_ckpt_size 	)
@@ -3116,7 +2943,6 @@ int hypercube_allreduce(){
 		fflush(ckpt_stream);
 
 		rc = merge_external_checkpoint(ckpt_stream, ckpt_data, ckpt_size);
-		join_checkpoint(TOTAL_CHECKPOINT, final_list_ckpt_head);
 
 		fclose(ckpt_stream);
 		/* open_memstream buffer + UCX recv buffer must be freed
@@ -3142,16 +2968,7 @@ int require_allreduce_checkpoint(){
 	int rc = 0;
 	//rc = prepare_allreduce_checkpoint();	
 
-	final_list_ckpt_head = list_ckpt_head;
-	final_list_ckpt_tail = list_ckpt_tail;
-//	print_data_in_ckpt_list(final_list_ckpt_head);
-	
-	
 	rc=  merge_external_checkpoint(final_ckpt_stream, final_ckpt, final_ckpt_size);		
-	join_checkpoint(TOTAL_CHECKPOINT, final_list_ckpt_head);
-	
-	
-	
 	fclose(final_ckpt_stream);
 	/* open_memstream's buffer survives fclose — caller must free it.
 	 * Without this the per-phase ckpt buffer accumulates and the
@@ -3196,11 +3013,6 @@ int require_allreduce_checkpoint(){
 	free(total_ckpt);
 	total_ckpt = NULL;
 	total_ckpt_size = 0;
-	clear_list_data_ckpt(final_list_ckpt_head);
-	list_ckpt_head = NULL;
-	list_ckpt_tail = NULL;
-	final_list_ckpt_head = NULL;
-	final_list_ckpt_tail = NULL;
 
 	return rc;
 }
