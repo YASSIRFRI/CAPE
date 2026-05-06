@@ -1563,22 +1563,21 @@ static void cape_ucx_init(void)
      * is easy to miss. Suppress with CAPE_UCX_QUIET=1. */
     if (getenv("CAPE_UCX_QUIET") == NULL && num_nodes > 1) {
         int peer = (node == 0) ? 1 : 0;
-        fprintf(stderr, "[CAPE-UCX-DIAG rank=%lu] init reached diagnostic; peer=%d follows\n",
+        fprintf(stdout, "[CAPE-UCX-DIAG rank=%lu] init reached diagnostic; peer=%d follows\n",
                 node, peer);
-        fprintf(stderr,
+        fprintf(stdout,
                 "[CAPE-UCX-DIAG rank=%lu] hint: CAPE_UCX_TLS=rc_x,sm,self (or rc_v,ud_v,sm,self),\n"
                 "[CAPE-UCX-DIAG rank=%lu]       CAPE_UCX_NET_DEVICES=mlx5_0:1, UCX_LOG_LEVEL=info\n",
                 node, node);
-        fflush(stderr);
-        ucp_worker_print_info(ucp_worker, stderr);
-        ucp_ep_print_info(ucp_endpoints[peer], stderr);
-        fprintf(stderr, "[CAPE-UCX-DIAG rank=%lu] end of dump\n", node);
-        fflush(stderr);
+        fflush(stdout);
+        ucp_worker_print_info(ucp_worker, stdout);
+        ucp_ep_print_info(ucp_endpoints[peer], stdout);
+        fprintf(stdout, "[CAPE-UCX-DIAG rank=%lu] end of dump\n", node);
+        fflush(stdout);
     } else {
-        /* Make absence visible: at least confirm init completed. */
-        fprintf(stderr, "[CAPE-UCX-DIAG rank=%lu] init complete (diag suppressed: quiet=%s nodes=%d)\n",
+        fprintf(stdout, "[CAPE-UCX-DIAG rank=%lu] init complete (diag suppressed: quiet=%s nodes=%d)\n",
                 node, getenv("CAPE_UCX_QUIET") ? "1" : "0", num_nodes);
-        fflush(stderr);
+        fflush(stdout);
     }
 }
 
