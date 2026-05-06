@@ -110,8 +110,7 @@ static inline unsigned wbmp_popcount(const uint8_t *b) {
 	return n;
 }
 
-struct shared_data *is_in_share_data_list(unsigned long int addr,
-					  struct shared_data *list);
+
 
 struct bmp_page_view {
 	uint64_t       addr;
@@ -1397,6 +1396,17 @@ static void cape_ucx_init(void)
     if (rndv_override != NULL && rndv_override[0] != '\0')
         setenv("UCX_RNDV_THRESH", rndv_override, 1);
 
+    /* Force a transport list (e.g. CAPE_UCX_TLS=rc_x,sm,self for IB,
+     * or rc_v,ud_v,sm,self). Without this UCX auto-selects and on some
+     * clusters silently falls back to TCP — which looks like 100 MB/s
+     * throughput in the profile instead of 10+ GB/s on RDMA. */
+    const char *tls_override = getenv("CAPE_UCX_TLS");
+    if (tls_override != NULL && tls_override[0] != '\0')
+        setenv("UCX_TLS", tls_override, 1);
+    const char *netdev_override = getenv("CAPE_UCX_NET_DEVICES");
+    if (netdev_override != NULL && netdev_override[0] != '\0')
+        setenv("UCX_NET_DEVICES", netdev_override, 1);
+
     /* 1. Get rank and size */
 #ifdef USE_PMIX
     PMIX_PROC_CONSTRUCT(&pmix_myproc);
@@ -1545,6 +1555,21 @@ static void cape_ucx_init(void)
 #endif
 
     ucp_worker_release_address(ucp_worker, local_addr);
+
+    /* Diagnostic: dump the transport actually selected for the first peer
+     * endpoint so we can tell at a glance whether RDMA was picked or UCX
+     * silently fell back to TCP. Only rank 0 to avoid log spam. Suppress
+     * with CAPE_UCX_QUIET=1. */
+    if (node == 0 && getenv("CAPE_UCX_QUIET") == NULL && num_nodes > 1) {
+        fprintf(stderr, "CAPE UCX: rank 0 worker/endpoint info follows\n");
+        fprintf(stderr,
+                "  hint: set CAPE_UCX_TLS=rc_x,sm,self (or rc_v,ud_v,sm,self)\n"
+                "        to force RDMA, CAPE_UCX_NET_DEVICES=mlx5_0:1 to pin HCA,\n"
+                "        UCX_LOG_LEVEL=info for full transport selection log.\n");
+        ucp_worker_print_info(ucp_worker, stderr);
+        ucp_ep_print_info(ucp_endpoints[1 % num_nodes], stderr);
+        fflush(stderr);
+    }
 }
 
 /* Finalize UCX (close endpoints, destroy worker, cleanup context) */
@@ -2028,28 +2053,6 @@ void end_shared_data(){
 	
 }
  
- 
- /* --------------------------------------------------------------------
-  * is_in_share_data_list(address, list):
-  * to check an address is existed in share_data_list ?
-  * input: 
-  *  - address
-  *  - a pointer that point to share data list
-  * output: true or false
-  * --------------------------------------------------------------------
-  */
-  
-struct shared_data * is_in_share_data_list(unsigned long int addr, struct shared_data *list){
-	struct shared_data *ps = list;
-	while(ps != NULL){
-		if (addr >= ps->addr && addr < (ps->addr + ps->len)){
-			return ps;
-		}
-		ps = ps->next;
-	}
-	return NULL;
-}
-
 /*-------------------------------------------------------------------------
  * generate_checkpoint() : version 5.0
  * 	generate DICKPT and save to a stream memory file
@@ -2414,132 +2417,44 @@ out:
  * -----------------------------------
  */
 int inject_checkpoint(FILE *stream, size_t *file_size, struct user_regs_struct * regs){
-	unsigned char *buff;
-	unsigned long addr, current_sp_addr, ts;
-	unsigned char return_addr[4];
+	unsigned long marker, ts;
 	unsigned long file_pointer = 0;
-	int len, rc=0; 
-	unsigned long current_ckpt_struct;
-	current_ckpt_struct = SSD;  	
-	
-	//save the next instruction
+	int rc = 0;
+
 	ptrace(PTRACE_GETREGS, child_id, NULL, regs);
-	current_sp_addr = regs->rsp;
-	ioctl_read_data(child_id, current_sp_addr + 4, return_addr, 4);
-	  	
-  	/*
-  	 * 1. Open file: No need, because this file have been openned at the receiving time
-  	 * 2. Read regestry
-  	 * 3. While file!= NULL: Read checkpoint data -> Write to memory
-  	 */
-  	
-  	//Open checkpoint file: at the receiving checkpoint function
-  	//Read the Registry information
 
-  	fseek(stream, 0, SEEK_SET); 
-  	fread(&ts, sizeof(unsigned long), 1, stream);
-  	file_pointer = sizeof(unsigned long);
-  	fseek(stream, file_pointer, SEEK_SET);
-  	fread(regs, sizeof(struct user_regs_struct), 1, stream);
-  	file_pointer += sizeof(struct user_regs_struct);
-  	fseek(stream, file_pointer , SEEK_SET);
-  	
-	//printf("\nNode %ld: prepare to inject checkpoint", node);
-  	while(file_pointer < *file_size)
-  	{
-  		//read address or signal from checkpoint
-  		fread(&addr, sizeof(unsigned long), 1, stream);
-  		file_pointer += sizeof(unsigned long);
-  		fseek(stream, file_pointer, SEEK_SET); 	
-  		
-  		//printf("\nNode %ld: addr = %ld", node, addr);
-  		
-  		//it it is signal, read address again
-  		switch(addr){
-			case BMP_S:
-				rc = inject_bitmap_section_from_stream(stream, *file_size,
-								       &file_pointer);
-				if (rc != 0)
-					goto out_close;
-				fseek(stream, file_pointer, SEEK_SET);
-				continue;
-			case SSD:
-				fread(&addr, sizeof(unsigned long), 1, stream);
-				file_pointer += sizeof(unsigned long);
-				fseek(stream, file_pointer, SEEK_SET);				
-				current_ckpt_struct = SSD;
-				
-				//printf("\nNode %ld: addr = %lx - current_ckpt_struct = SSD", node, addr);			
-				break;
-			case SD:
-				fread(&addr, sizeof(unsigned long), 1, stream);
-				file_pointer += sizeof(unsigned long);
-				fseek(stream, file_pointer, SEEK_SET);				
-				current_ckpt_struct = SD;	
-				break;
-			case EP:
-				fread(&addr, sizeof(unsigned long), 1, stream);
-				file_pointer += sizeof(unsigned long);
-				fseek(stream, file_pointer, SEEK_SET);				
-				current_ckpt_struct = EP;	
-				//printf("\nNode %ld: addr = %ld - current_ckpt_struct = EP", node, addr);
-				break;
-			case MD:
-				fread(&addr, sizeof(unsigned long), 1, stream);
-				file_pointer += sizeof(unsigned long);
-				fseek(stream, file_pointer, SEEK_SET);				
-				current_ckpt_struct = MD;
-				//printf("\nNode %ld: addr = %lx - current_ckpt_struct = MD", node, addr);	
-				break;
+	fseek(stream, 0, SEEK_SET);
+	fread(&ts, sizeof(unsigned long), 1, stream);
+	file_pointer = sizeof(unsigned long);
+	fseek(stream, file_pointer, SEEK_SET);
+	fread(regs, sizeof(struct user_regs_struct), 1, stream);
+	file_pointer += sizeof(struct user_regs_struct);
+	fseek(stream, file_pointer, SEEK_SET);
+
+	while (file_pointer < *file_size) {
+		if (fread(&marker, sizeof(marker), 1, stream) != 1) {
+			rc = 1;
+			break;
 		}
-  		//read data from checkpoint  		
-  		//read len from checkpoint
-  		len = 0;
-  		switch(current_ckpt_struct){
-			case EP:
-				len = PAGE_SIZE;
-				break;
-			case SSD:
-				fread(&len, sizeof(int), 1, stream);
-				file_pointer += sizeof(int);
-				fseek(stream, file_pointer, SEEK_SET);
-				break;
-			case SD:
-				len = CAPE_WORD;
-				break;
-			case MD:
-				break;
-		} 
-  		if (len <= 0)
-  			continue;
+		file_pointer += sizeof(marker);
+		if (marker != BMP_S) {
+			fprintf(stderr,
+				"Monitor %ld: unexpected ckpt marker %lu at offset %lu\n",
+				node, marker, file_pointer - sizeof(marker));
+			rc = 1;
+			break;
+		}
+		rc = inject_bitmap_section_from_stream(stream, *file_size,
+						       &file_pointer);
+		if (rc != 0)
+			break;
+		fseek(stream, file_pointer, SEEK_SET);
+	}
 
-  		buff = (unsigned char *) malloc(len);
-  		if (buff == NULL) {
-  			rc = 1;
-  			break;
-  		}
-  		if (fread(buff, len, 1, stream) != 1) {
-  			free(buff);
-  			rc = 1;
-  			break;
-  		}
-  		file_pointer +=len;
-  		fseek(stream, file_pointer, SEEK_SET);  		
-  		rc = write_remote_memory(child_id, buff, addr,(size_t)len);
-  		free(buff);
-  		if (rc != 0) {
-  			fprintf(stderr,
-  				"Monitor %ld: failed to inject checkpoint data at 0x%lx len=%d: %s\n",
-  				node, addr, len, strerror(errno));
-  			break;
-  		}
-  	}  	
-  	
-out_close:
-  	fclose(stream); 
-  	*file_size = 0;
-  	return rc;
-  }
+	fclose(stream);
+	*file_size = 0;
+	return rc;
+}
 
 static int inject_checkpoint_with_write_access(FILE *stream, size_t *file_size,
 		struct user_regs_struct *regs)
