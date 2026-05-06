@@ -52,6 +52,14 @@
 #define D_REDUCTION_OR  215
 #define D_REDUCTION_XOR 216
 
+/* Declare a reduction variable to the monitor. App packs:
+ *   rax = address of the variable
+ *   rdx = S_DECLARE_REDUCTION | (datatype << 32) | (op << 40)
+ * The monitor appends {addr, datatype, properties=op, len=size_of(datatype)}
+ * to data_list_head. Used by merge_bitmap_sections to apply the reduction
+ * op when both checkpoints dirty the same word. */
+#define S_DECLARE_REDUCTION 220
+
 //Define datatypes of CAPE
 #define CAPE_CHAR 1 			//  This is the traditional ASCII character that is numbered by integers between 0 and 127.
 #define CAPE_BYTE 3				//  This is an 8-bit positive integer betwee 0 and 255, i.e., a byte.

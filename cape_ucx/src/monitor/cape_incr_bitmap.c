@@ -227,6 +227,210 @@ static int write_bitmap_page_payload(FILE *out, const struct bmp_page_view *pg)
 	return 0;
 }
 
+/* ===== reduction lookup / apply =====
+ * data_list_head is the per-rank reduction hashmap (linear list, fine
+ * for the tiny scalar counts we expect). merge_bitmap_sections checks
+ * each dirty word's address; if it's a declared reduction variable,
+ * the two sides' values are combined with the variable's op instead
+ * of newer-wins. */
+static unsigned reduction_size(unsigned char dt)
+{
+	switch (dt) {
+	case CAPE_CHAR: case CAPE_BYTE: case CAPE_UNSIGNED_CHAR:
+		return 1;
+	case CAPE_SHORT: case CAPE_UNSIGNED_SHORT:
+		return 2;
+	case CAPE_INT: case CAPE_UNSIGNED_INT: case CAPE_FLOAT:
+		return 4;
+	case CAPE_LONG: case CAPE_UNSIGNED_LONG: case CAPE_DOUBLE:
+	case CAPE_LONG_LONG: case CAPE_LONG_LONG_INT:
+		return 8;
+	default:
+		return 4;
+	}
+}
+
+static struct shared_data *lookup_reduction(unsigned long addr)
+{
+	struct shared_data *p;
+	for (p = data_list_head; p != NULL; p = p->next) {
+		if (p->addr != addr)
+			continue;
+		if (p->properties >= D_REDUCTION_SUM &&
+		    p->properties <= D_REDUCTION_XOR)
+			return p;
+	}
+	return NULL;
+}
+
+#define APPLY_BIN(T, OP) do { T a, b; memcpy(&a, acc, sizeof(T)); \
+	memcpy(&b, in, sizeof(T)); a = (T)(a OP b); \
+	memcpy(acc, &a, sizeof(T)); } while (0)
+#define APPLY_MAX(T) do { T a, b; memcpy(&a, acc, sizeof(T)); \
+	memcpy(&b, in, sizeof(T)); if (b > a) memcpy(acc, in, sizeof(T)); \
+	} while (0)
+#define APPLY_MIN(T) do { T a, b; memcpy(&a, acc, sizeof(T)); \
+	memcpy(&b, in, sizeof(T)); if (b < a) memcpy(acc, in, sizeof(T)); \
+	} while (0)
+
+static void apply_reduction(unsigned char op, unsigned char dt,
+			    void *acc, const void *in)
+{
+	switch (op) {
+	case D_REDUCTION_SUM:
+		switch (dt) {
+		case CAPE_INT: APPLY_BIN(int32_t, +); break;
+		case CAPE_UNSIGNED_INT: APPLY_BIN(uint32_t, +); break;
+		case CAPE_LONG: case CAPE_LONG_LONG: case CAPE_LONG_LONG_INT:
+			APPLY_BIN(int64_t, +); break;
+		case CAPE_UNSIGNED_LONG: APPLY_BIN(uint64_t, +); break;
+		case CAPE_FLOAT: APPLY_BIN(float, +); break;
+		case CAPE_DOUBLE: APPLY_BIN(double, +); break;
+		}
+		break;
+	case D_REDUCTION_MUL:
+		switch (dt) {
+		case CAPE_INT: APPLY_BIN(int32_t, *); break;
+		case CAPE_UNSIGNED_INT: APPLY_BIN(uint32_t, *); break;
+		case CAPE_LONG: case CAPE_LONG_LONG: case CAPE_LONG_LONG_INT:
+			APPLY_BIN(int64_t, *); break;
+		case CAPE_UNSIGNED_LONG: APPLY_BIN(uint64_t, *); break;
+		case CAPE_FLOAT: APPLY_BIN(float, *); break;
+		case CAPE_DOUBLE: APPLY_BIN(double, *); break;
+		}
+		break;
+	case D_REDUCTION_MAX:
+		switch (dt) {
+		case CAPE_INT: APPLY_MAX(int32_t); break;
+		case CAPE_UNSIGNED_INT: APPLY_MAX(uint32_t); break;
+		case CAPE_LONG: case CAPE_LONG_LONG: case CAPE_LONG_LONG_INT:
+			APPLY_MAX(int64_t); break;
+		case CAPE_UNSIGNED_LONG: APPLY_MAX(uint64_t); break;
+		case CAPE_FLOAT: APPLY_MAX(float); break;
+		case CAPE_DOUBLE: APPLY_MAX(double); break;
+		}
+		break;
+	case D_REDUCTION_MIN:
+		switch (dt) {
+		case CAPE_INT: APPLY_MIN(int32_t); break;
+		case CAPE_UNSIGNED_INT: APPLY_MIN(uint32_t); break;
+		case CAPE_LONG: case CAPE_LONG_LONG: case CAPE_LONG_LONG_INT:
+			APPLY_MIN(int64_t); break;
+		case CAPE_UNSIGNED_LONG: APPLY_MIN(uint64_t); break;
+		case CAPE_FLOAT: APPLY_MIN(float); break;
+		case CAPE_DOUBLE: APPLY_MIN(double); break;
+		}
+		break;
+	case D_REDUCTION_AND: APPLY_BIN(uint64_t, &); break;
+	case D_REDUCTION_OR:  APPLY_BIN(uint64_t, |); break;
+	case D_REDUCTION_XOR: APPLY_BIN(uint64_t, ^); break;
+	}
+}
+
+/* Decode a packed bitmap_page_view into dense word/have arrays. */
+static void unpack_page(const struct bmp_page_view *pg,
+			uint32_t out_words[BMP_WORDS_PER_PAGE],
+			uint8_t  out_have[BMP_WORDS_PER_PAGE])
+{
+	unsigned w, k = 0;
+	memset(out_have, 0, BMP_WORDS_PER_PAGE);
+	if (pg == NULL)
+		return;
+	for (w = 0; w < BMP_WORDS_PER_PAGE; ++w) {
+		if (wbmp_get(pg->word_bmp, w)) {
+			memcpy(&out_words[w],
+			       pg->changed + (size_t)k * sizeof(uint32_t),
+			       sizeof(uint32_t));
+			out_have[w] = 1;
+			k++;
+		}
+	}
+}
+
+static int emit_merged_page(FILE *out, uint64_t addr,
+			    const struct bmp_page_view *o,
+			    const struct bmp_page_view *n)
+{
+	uint32_t o_words[BMP_WORDS_PER_PAGE], n_words[BMP_WORDS_PER_PAGE];
+	uint8_t  o_have[BMP_WORDS_PER_PAGE],  n_have[BMP_WORDS_PER_PAGE];
+	uint32_t out_words[BMP_WORDS_PER_PAGE];
+	uint8_t  bmp[BMP_WORD_BMP_BYTES];
+	unsigned out_count = 0, w = 0;
+	size_t bytes;
+
+	unpack_page(o, o_words, o_have);
+	unpack_page(n, n_words, n_have);
+	memset(bmp, 0, sizeof(bmp));
+
+	while (w < BMP_WORDS_PER_PAGE) {
+		int os = o_have[w], ns = n_have[w];
+		struct shared_data *r;
+		unsigned sz;
+
+		if (!os && !ns) { w++; continue; }
+
+		r = lookup_reduction((unsigned long)addr + (unsigned long)w * 4u);
+		sz = (r != NULL) ? reduction_size(r->datatype) : 0;
+
+		if (r != NULL && sz == 8 && w + 1 < BMP_WORDS_PER_PAGE) {
+			int o_full = o_have[w] && o_have[w + 1];
+			int n_full = n_have[w] && n_have[w + 1];
+			uint64_t lo, hi, res;
+			uint32_t lo32, hi32;
+
+			if (o_full && n_full) {
+				memcpy(&lo, &o_words[w], sizeof(uint64_t));
+				memcpy(&hi, &n_words[w], sizeof(uint64_t));
+				res = lo;
+				apply_reduction(r->properties, r->datatype,
+						&res, &hi);
+			} else if (o_full) {
+				memcpy(&res, &o_words[w], sizeof(uint64_t));
+			} else if (n_full) {
+				memcpy(&res, &n_words[w], sizeof(uint64_t));
+			} else {
+				goto per_word;   /* partial coverage; fall back */
+			}
+			memcpy(&lo32, (uint8_t *)&res, sizeof(uint32_t));
+			memcpy(&hi32, (uint8_t *)&res + 4, sizeof(uint32_t));
+			wbmp_set(bmp, w);
+			wbmp_set(bmp, w + 1);
+			out_words[out_count++] = lo32;
+			out_words[out_count++] = hi32;
+			w += 2;
+			continue;
+		}
+per_word:
+		{
+			uint32_t v;
+			if (r != NULL && os && ns) {
+				v = o_words[w];
+				apply_reduction(r->properties, r->datatype,
+						&v, &n_words[w]);
+			} else if (os && ns) {
+				v = n_words[w];
+			} else if (os) {
+				v = o_words[w];
+			} else {
+				v = n_words[w];
+			}
+			wbmp_set(bmp, w);
+			out_words[out_count++] = v;
+		}
+		w++;
+	}
+
+	if (fwrite(bmp, BMP_WORD_BMP_BYTES, 1, out) != 1)
+		return 1;
+	bytes = (size_t)out_count * sizeof(uint32_t);
+	if (bytes != 0 && fwrite(out_words, bytes, 1, out) != 1)
+		return 1;
+	return 0;
+}
+
+/* Two-pointer walk over sorted page lists. Pages on only one side go
+ * out verbatim. Pages on both sides go through emit_merged_page, which
+ * does word-level merging with reduction lookup. */
 static int merge_bitmap_sections(FILE *out,
 				 const struct bmp_section_view *older,
 				 const struct bmp_section_view *newer)
@@ -234,7 +438,11 @@ static int merge_bitmap_sections(FILE *out,
 	unsigned long marker = BMP_S;
 	uint32_t total = 0, i;
 	uint32_t ia = 0, ib = 0;
-	const struct bmp_page_view **out_pages = NULL;
+	struct merge_slot {
+		uint64_t addr;
+		const struct bmp_page_view *o;
+		const struct bmp_page_view *n;
+	} *slots = NULL;
 	size_t cap;
 
 	if (!older->present && !newer->present)
@@ -247,21 +455,27 @@ static int merge_bitmap_sections(FILE *out,
 			return 1;
 		return 0;
 	}
-	out_pages = malloc(cap * sizeof(*out_pages));
-	if (out_pages == NULL)
+	slots = calloc(cap, sizeof(*slots));
+	if (slots == NULL)
 		return 1;
 
 	while (ia < older->n_pages || ib < newer->n_pages) {
 		if (ib >= newer->n_pages ||
 		    (ia < older->n_pages &&
 		     older->pages[ia].addr < newer->pages[ib].addr)) {
-			out_pages[total++] = &older->pages[ia++];
+			slots[total].addr = older->pages[ia].addr;
+			slots[total].o = &older->pages[ia++];
+			total++;
 		} else if (ia >= older->n_pages ||
 			   newer->pages[ib].addr < older->pages[ia].addr) {
-			out_pages[total++] = &newer->pages[ib++];
+			slots[total].addr = newer->pages[ib].addr;
+			slots[total].n = &newer->pages[ib++];
+			total++;
 		} else {
-			out_pages[total++] = &newer->pages[ib++];
-			ia++;
+			slots[total].addr = newer->pages[ib].addr;
+			slots[total].o = &older->pages[ia++];
+			slots[total].n = &newer->pages[ib++];
+			total++;
 		}
 	}
 
@@ -269,19 +483,27 @@ static int merge_bitmap_sections(FILE *out,
 	    fwrite(&total, sizeof(total), 1, out) != 1)
 		goto fail;
 	for (i = 0; i < total; ++i) {
-		uint64_t addr = out_pages[i]->addr;
-		if (fwrite(&addr, sizeof(addr), 1, out) != 1)
+		uint64_t a = slots[i].addr;
+		if (fwrite(&a, sizeof(a), 1, out) != 1)
 			goto fail;
 	}
 	for (i = 0; i < total; ++i) {
-		if (write_bitmap_page_payload(out, out_pages[i]) != 0)
-			goto fail;
+		if (slots[i].o != NULL && slots[i].n != NULL) {
+			if (emit_merged_page(out, slots[i].addr,
+					     slots[i].o, slots[i].n) != 0)
+				goto fail;
+		} else {
+			const struct bmp_page_view *pg = slots[i].o ?
+				slots[i].o : slots[i].n;
+			if (write_bitmap_page_payload(out, pg) != 0)
+				goto fail;
+		}
 	}
-	free(out_pages);
+	free(slots);
 	return 0;
 
 fail:
-	free(out_pages);
+	free(slots);
 	return 1;
 }
 
@@ -1555,7 +1777,7 @@ int main(int argc, char * argv[]){
 		if(WIFSTOPPED(status) && WSTOPSIG(status) == SIGTRAP) {
 				int dx = 0;
 				ptrace(PTRACE_GETREGS, child_id, NULL, &regs);
-				dx = regs.rdx;
+				dx = (int)(regs.rdx & 0xFFFFFFFFu);
 				CAPE_PROFILE_INC(sigtrap_count);
 				switch(dx){
 					case S_LOCK_PROCESS_MEMORY:  //Lock process 		
@@ -1613,6 +1835,29 @@ int main(int argc, char * argv[]){
 					case S_END_SHARE_DATA:
 						end_shared_data();
 						break;
+
+					case S_DECLARE_REDUCTION: {
+						/* rax = addr; rdx high bytes = datatype, op */
+						unsigned long addr_v = regs.rax;
+						unsigned char dt = (unsigned char)((regs.rdx >> 32) & 0xFFu);
+						unsigned char op = (unsigned char)((regs.rdx >> 40) & 0xFFu);
+						struct shared_data *sd = malloc(sizeof(*sd));
+						if (sd == NULL) { perror("malloc(shared_data)"); exit(1); }
+						memset(sd, 0, sizeof(*sd));
+						sd->addr = addr_v;
+						sd->datatype = dt;
+						sd->properties = op;
+						sd->len = (unsigned int)reduction_size(dt);
+						sd->level = 0;
+						sd->prev = data_list_tail;
+						sd->next = NULL;
+						if (data_list_tail != NULL)
+							data_list_tail->next = sd;
+						else
+							data_list_head = sd;
+						data_list_tail = sd;
+						break;
+					}
 
 
 					case S_APP_SEND_NUMBER_OF_JOBS: //get number of job from child process
@@ -2155,10 +2400,6 @@ int add_item_to_list_ckpt(struct shared_data_ckpt *p){
 		}
 		if (nc == 0)
 			continue;
-
-		collect_l_words_from_page(old_node->addr,
-					  (const unsigned char *)old_node->data,
-					  current_page, cflag);
 
 		pp[n].addr = (uint64_t)old_node->addr;
 		pp[n].n_changed = nc;
@@ -3185,34 +3426,21 @@ int merge_external_checkpoint(FILE *src_ckpt_stream, 		\
 		fwrite(tmp_ckpt, sizeof(unsigned long) + sizeof(struct user_regs_struct), 1, total_ckpt_stream);
 		fflush(total_ckpt_stream);
 
-		//Write merged bitmap S into Total_ckpt, with S1 winning conflicts.
+		/* Reduction-aware bitmap merge subsumes the old L section:
+		 * dirty words at reduction-variable addresses get combined
+		 * here, the rest follow newer-wins. No L data is emitted. */
 		rc = merge_bitmap_sections(total_ckpt_stream, &src_bmp, &tmp_bmp);
 		if (rc != 0)
 			goto done;
-
-		//Write L2 into Total_ckpt
-		merge_data(src_read_stream, src_ckpt_data, src_ckpt_size, src_bmp.end, FINAL_CHECKPOINT);
-
-		//Write L1 into Total_ckpt
-		merge_data(tmp_read_stream, tmp_ckpt, tmp_size, tmp_bmp.end, TOTAL_CHECKPOINT);
-
 	}
  	else
  	{
-		//Write t2 and R2 into Total_ckpt
 		fwrite(src_ckpt_data, sizeof(unsigned long) + sizeof(struct user_regs_struct), 1, total_ckpt_stream);
 		fflush(total_ckpt_stream);
 
-		//Write merged bitmap S into Total_ckpt, with S2 winning conflicts.
 		rc = merge_bitmap_sections(total_ckpt_stream, &tmp_bmp, &src_bmp);
 		if (rc != 0)
 			goto done;
-
-		//Write L1 into Total_ckpt
-		merge_data(tmp_read_stream, tmp_ckpt, tmp_size, tmp_bmp.end, TOTAL_CHECKPOINT);
-
-		//Write L2 into Total_ckpt
-		merge_data(src_read_stream, src_ckpt_data, src_ckpt_size, src_bmp.end, FINAL_CHECKPOINT);
 	}
 
 done:

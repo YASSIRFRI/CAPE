@@ -209,8 +209,12 @@ dickpt_write_stress:
 	@mkdir -p $(EXE_FOLDER)
 	$(DICKPT_COMPILE) $(C_FOLDER)/apps/cape_write_stress_manual.c $(DICKPT_RUNTIME) -o $(EXE_FOLDER)/dickpt_write_stress
 
+dickpt_reduction_manual:
+	@mkdir -p $(EXE_FOLDER)
+	$(DICKPT_COMPILE) $(C_FOLDER)/apps/cape_reduction_manual.c $(DICKPT_RUNTIME) -o $(EXE_FOLDER)/dickpt_reduction_manual
+
 # Build monitor + all dickpt apps
-dickpt: dickpt_monitor dickpt_mul_manual dickpt_matvec_manual dickpt_gradient_manual dickpt_memwrite_manual dickpt_write_stress
+dickpt: dickpt_monitor dickpt_mul_manual dickpt_matvec_manual dickpt_gradient_manual dickpt_memwrite_manual dickpt_write_stress dickpt_reduction_manual
 
 # ── Clean ─────────────────────────────────────────────────────────────────────
 cleanall:
@@ -219,7 +223,7 @@ cleanall:
 .PHONY: all apps cleanall \
         dickpt dickpt_monitor dickpt_bitmap_monitor dickpt_bitmap_master_slave_monitor dickpt_mul_manual \
         dickpt_matvec_manual dickpt_gradient_manual dickpt_memwrite_manual \
-        dickpt_write_stress \
+        dickpt_write_stress dickpt_reduction_manual \
         cape_mamult cape_mamult2d cape_matvec cape_gradient cape_memwrite \
         cape_write_stress cape_bitmap_write_stress \
         cape_pi cape_prime cape_prime_number \

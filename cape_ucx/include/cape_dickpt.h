@@ -102,6 +102,19 @@ static inline unsigned long dickpt_read_node(void)      { return __cape_signal_r
 static inline unsigned long dickpt_read_num_nodes(void)  { return __cape_signal_read(97); }
 static inline unsigned long dickpt_read_ckpt_flag(void)  { return __cape_signal_read(96); }
 
+/* Declare a scalar reduction variable. The monitor stores
+ * (addr, datatype, op) in its hashmap; merge_bitmap_sections looks up
+ * dirty word addresses and applies the op when both sides changed it. */
+static inline void dickpt_declare_reduction(void *addr, int datatype, int op)
+{
+    register unsigned long _val asm("rax") = (unsigned long)addr;
+    register unsigned long _code asm("rdx") =
+        (unsigned long)S_DECLARE_REDUCTION
+        | ((unsigned long)(unsigned char)datatype << 32)
+        | ((unsigned long)(unsigned char)op       << 40);
+    __asm__ volatile ("int $3" : "+r"(_val), "+r"(_code) : : "memory");
+}
+
 /* Send values to monitor */
 static inline void dickpt_send_data_start(unsigned long addr) { __cape_signal_val(95, addr); }
 static inline void dickpt_send_num_jobs(unsigned long n)      { __cape_signal_val(S_APP_SEND_NUMBER_OF_JOBS, n); }
