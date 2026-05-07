@@ -63,9 +63,16 @@ for _pfx in "${EBROOTPMIX:-__none__}" \
     fi
 done
 
+if [ -n "${EBROOTUCC:-}" ]; then
+    UCC_INC="${EBROOTUCC}/include"; UCC_LIB="${EBROOTUCC}/lib"
+else
+    echo "ERROR: cannot locate UCC installation (EBROOTUCC unset)." >&2; exit 1
+fi
+
 MAKE_ARGS=(
     EXE_FOLDER="${BUILD_DIR}/bin" O_FOLDER="${BUILD_DIR}/obj" L_FOLDER="${BUILD_DIR}/lib"
     UCX_SRC="${UCX_INC}" UCX_GEN="${UCX_INC}" UCX_LIB="${UCX_LIB}"
+    UCC_SRC="${UCC_INC}" UCC_LIB="${UCC_LIB}"
     "PMIX_FLAGS=${PMIX_FLAGS}" "PMIX_LINK=${PMIX_LINK}" CC=gcc
 )
 
