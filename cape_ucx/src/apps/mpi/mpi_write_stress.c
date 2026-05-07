@@ -2,8 +2,8 @@
  * write_stress (pure MPI version):
  *   Per-rank row in a 2D state, mirroring the CAPE/DICKPT layout.
  *   Each phase: zero the full state, write scattered random values
- *   into own row, MPI_Allreduce(BXOR) merges every rank's row into
- *   all ranks' state.
+ *   into own row, then exchange rows with MPI_Sendrecv so every rank
+ *   ends with the full state without a collective row merge.
  */
 #include <mpi.h>
 #include <stdint.h>
@@ -111,6 +111,27 @@ static int verify(const unsigned int *rows, int n, int num_ranks,
 	return errors;
 }
 
+static void exchange_rows_sendrecv(unsigned int *rows, int n,
+				   int rank, int num_ranks, int phase)
+{
+	int left = (rank - 1 + num_ranks) % num_ranks;
+	int right = (rank + 1) % num_ranks;
+	int step;
+
+	for (step = 0; step < num_ranks - 1; step++) {
+		int send_owner = (rank - step + num_ranks) % num_ranks;
+		int recv_owner = (rank - step - 1 + num_ranks) % num_ranks;
+		unsigned int *send_row =
+			rows + ((size_t)send_owner * (size_t)n);
+		unsigned int *recv_row =
+			rows + ((size_t)recv_owner * (size_t)n);
+
+		MPI_Sendrecv(send_row, n, MPI_UNSIGNED, right, phase,
+			     recv_row, n, MPI_UNSIGNED, left, phase,
+			     MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+	}
+}
+
 static double sum_phases(const double *values, int phases)
 {
 	double total = 0.0;
@@ -152,38 +173,38 @@ static void print_metric(const char *label, const double *m, int num_ranks)
 }
 
 static void profile_report(int rank, int num_ranks, int n, int phases, int rep,
-			   size_t total_cells, double barrier_s,
-			   double total_s, double verify_s,
+			   double barrier_s, double total_s, double verify_s,
 			   const double *phase_zero_s,
 			   const double *phase_work_s,
-			   const double *phase_allreduce_s,
+			   const double *phase_sendrecv_s,
 			   const double *phase_total_s)
 {
 	double barrier_m[3], total_m[3], zero_m[3], work_m[3];
-	double allreduce_m[3], phase_total_m[3], verify_m[3];
+	double sendrecv_m[3], phase_total_m[3], verify_m[3];
 	double zero_min[MAX_PHASES], zero_sum[MAX_PHASES], zero_max[MAX_PHASES];
 	double work_min[MAX_PHASES], work_sum[MAX_PHASES], work_max[MAX_PHASES];
 	double comm_min[MAX_PHASES], comm_sum[MAX_PHASES], comm_max[MAX_PHASES];
 	double phase_min[MAX_PHASES], phase_sum[MAX_PHASES], phase_max[MAX_PHASES];
 	double zero_total = sum_phases(phase_zero_s, phases);
 	double work_total = sum_phases(phase_work_s, phases);
-	double allreduce_total = sum_phases(phase_allreduce_s, phases);
+	double sendrecv_total = sum_phases(phase_sendrecv_s, phases);
 	double phase_total = sum_phases(phase_total_s, phases);
-	size_t bytes_per_collective = total_cells * sizeof(unsigned int);
-	size_t bytes_per_rank_total = bytes_per_collective * (size_t)phases;
+	size_t bytes_per_step = (size_t)n * sizeof(unsigned int);
+	size_t bytes_per_phase = bytes_per_step * (size_t)(num_ranks - 1);
+	size_t bytes_per_rank_total = bytes_per_phase * (size_t)phases;
 	int p;
 
 	reduce_profile_metric(barrier_s, barrier_m, rank);
 	reduce_profile_metric(total_s, total_m, rank);
 	reduce_profile_metric(zero_total, zero_m, rank);
 	reduce_profile_metric(work_total, work_m, rank);
-	reduce_profile_metric(allreduce_total, allreduce_m, rank);
+	reduce_profile_metric(sendrecv_total, sendrecv_m, rank);
 	reduce_profile_metric(phase_total, phase_total_m, rank);
 	reduce_profile_metric(verify_s, verify_m, rank);
 
 	reduce_profile_array(phase_zero_s, zero_min, zero_sum, zero_max, phases);
 	reduce_profile_array(phase_work_s, work_min, work_sum, work_max, phases);
-	reduce_profile_array(phase_allreduce_s, comm_min, comm_sum, comm_max, phases);
+	reduce_profile_array(phase_sendrecv_s, comm_min, comm_sum, comm_max, phases);
 	reduce_profile_array(phase_total_s, phase_min, phase_sum, phase_max, phases);
 
 	if (rank != 0)
@@ -197,18 +218,19 @@ static void profile_report(int rank, int num_ranks, int n, int phases, int rep,
 	print_metric("total wall", total_m, num_ranks);
 	print_metric("zero state", zero_m, num_ranks);
 	print_metric("user compute", work_m, num_ranks);
-	print_metric("MPI_Allreduce", allreduce_m, num_ranks);
+	print_metric("MPI_Sendrecv", sendrecv_m, num_ranks);
 	print_metric("phase total", phase_total_m, num_ranks);
 	print_metric("verify", verify_m, num_ranks);
 	fprintf(stderr,
-		"  allreduce payload : count=%zu MPI_UNSIGNED  bytes/collective/rank=%zu  bytes/rep/rank=%zu\n",
-		total_cells, bytes_per_collective, bytes_per_rank_total);
+		"  sendrecv payload  : row_count=%d MPI_UNSIGNED  steps/phase=%d  bytes/phase/rank=%zu send + %zu recv  bytes/rep/rank=%zu send + %zu recv\n",
+		n, num_ranks - 1, bytes_per_phase, bytes_per_phase,
+		bytes_per_rank_total, bytes_per_rank_total);
 	fprintf(stderr, "  per-phase breakdown:\n");
 	for (p = 0; p < phases; p++) {
 		fprintf(stderr,
 			"    phase %2d  zero=%8.3f/%8.3f/%8.3f  "
 			"compute=%8.3f/%8.3f/%8.3f  "
-			"allreduce=%8.3f/%8.3f/%8.3f  "
+			"sendrecv=%8.3f/%8.3f/%8.3f  "
 			"total=%8.3f/%8.3f/%8.3f\n",
 			p,
 			zero_min[p] * 1000.0,
@@ -283,7 +305,7 @@ int main(int argc, char *argv[])
 		unsigned int *my_row = rows + ((size_t)rank * (size_t)n);
 		double phase_zero_s[MAX_PHASES] = {0.0};
 		double phase_work_s[MAX_PHASES] = {0.0};
-		double phase_allreduce_s[MAX_PHASES] = {0.0};
+		double phase_sendrecv_s[MAX_PHASES] = {0.0};
 		double phase_total_s[MAX_PHASES] = {0.0};
 		double barrier_start_s, barrier_s;
 		double total_start_s, total_s;
@@ -310,9 +332,8 @@ int main(int argc, char *argv[])
 			phase_work_s[p] = MPI_Wtime() - t_start_s;
 
 			t_start_s = MPI_Wtime();
-			MPI_Allreduce(MPI_IN_PLACE, rows, (int)total_cells,
-				      MPI_UNSIGNED, MPI_BXOR, MPI_COMM_WORLD);
-			phase_allreduce_s[p] = MPI_Wtime() - t_start_s;
+			exchange_rows_sendrecv(rows, n, rank, num_ranks, p);
+			phase_sendrecv_s[p] = MPI_Wtime() - t_start_s;
 			phase_total_s[p] = MPI_Wtime() - phase_start_s;
 		}
 
@@ -334,9 +355,9 @@ int main(int argc, char *argv[])
 		}
 		if (do_profile)
 			profile_report(rank, num_ranks, n, phases, rep,
-				       total_cells, barrier_s, total_s, verify_s,
+				       barrier_s, total_s, verify_s,
 				       phase_zero_s, phase_work_s,
-				       phase_allreduce_s, phase_total_s);
+				       phase_sendrecv_s, phase_total_s);
 	}
 
 	free(rows);
