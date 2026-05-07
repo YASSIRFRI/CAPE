@@ -129,6 +129,12 @@ struct bmp_section_view {
 	struct bmp_page_view *pages;   /* sorted by addr */
 };
 
+struct bmp_merge_slot {
+	uint64_t addr;
+	const struct bmp_page_view *local;
+	struct bmp_page_view *remote;
+};
+
 static int ckpt_read_mem(const unsigned char *data, size_t size,
 			 size_t *pos, void *dst, size_t n)
 {
@@ -198,6 +204,87 @@ static int parse_bitmap_section(const unsigned char *data, size_t size,
 	}
 
 	view->end = pos;
+	return 0;
+}
+
+static int parse_bitmap_metadata(const unsigned char *data, size_t size,
+				 size_t payload_pos,
+				 struct bmp_section_view *view)
+{
+	size_t pos = payload_pos;
+	unsigned long marker;
+	uint32_t i;
+
+	memset(view, 0, sizeof(*view));
+	view->start = payload_pos;
+	view->end = payload_pos;
+
+	if (pos > size || size - pos < sizeof(unsigned long))
+		return 1;
+	memcpy(&marker, data + pos, sizeof(marker));
+	if (marker != BMP_S)
+		return 1;
+	pos += sizeof(marker);
+
+	view->present = 1;
+	if (ckpt_read_mem(data, size, &pos, &view->n_pages,
+			  sizeof(view->n_pages)) != 0)
+		return 1;
+
+	if (view->n_pages != 0) {
+		view->pages = calloc(view->n_pages, sizeof(*view->pages));
+		if (view->pages == NULL)
+			return 1;
+	}
+
+	for (i = 0; i < view->n_pages; ++i) {
+		uint64_t addr;
+		if (ckpt_read_mem(data, size, &pos, &addr, sizeof(addr)) != 0)
+			return 1;
+		view->pages[i].addr = addr;
+	}
+
+	view->end = pos;
+	return 0;
+}
+
+static int build_bitmap_merge_slots(const struct bmp_section_view *local,
+				    struct bmp_section_view *remote,
+				    struct bmp_merge_slot **slots_out,
+				    uint32_t *nslots_out)
+{
+	uint32_t ia = 0, ib = 0, total = 0;
+	size_t cap = (size_t)local->n_pages + (size_t)remote->n_pages;
+	struct bmp_merge_slot *slots;
+
+	if (cap > UINT32_MAX)
+		return 1;
+	slots = calloc(cap == 0 ? 1 : cap, sizeof(*slots));
+	if (slots == NULL)
+		return 1;
+
+	while (ia < local->n_pages || ib < remote->n_pages) {
+		if (ib >= remote->n_pages ||
+		    (ia < local->n_pages &&
+		     local->pages[ia].addr < remote->pages[ib].addr)) {
+			slots[total].addr = local->pages[ia].addr;
+			slots[total].local = &local->pages[ia++];
+			total++;
+		} else if (ia >= local->n_pages ||
+			   remote->pages[ib].addr < local->pages[ia].addr) {
+			slots[total].addr = remote->pages[ib].addr;
+			slots[total].remote = &remote->pages[ib++];
+			total++;
+		} else {
+			slots[total].addr = remote->pages[ib].addr;
+			slots[total].local = &local->pages[ia++];
+			slots[total].remote = &remote->pages[ib++];
+			total++;
+		}
+	}
+
+	*slots_out = slots;
+	*nslots_out = total;
 	return 0;
 }
 
@@ -1534,33 +1621,46 @@ static void cape_total_release(void)
     total_ckpt_uses_scratch = 0;
 }
 
-static unsigned long long cape_ucx_wait(void *req, size_t expect_len,
-					int check_len, ucp_tag_t *out_tag)
+static unsigned cape_ucx_progress_once(void)
 {
-	CAPE_PROFILE_NS_VAR(wait_start_ns);
-	CAPE_PROFILE_NS_START(wait_start_ns);
+    unsigned events = ucp_worker_progress(ucp_worker);
 
-    if (out_tag) *out_tag = 0;
+    CAPE_PROFILE_INC(ucx_progress_calls);
+    if (events == 0)
+        CAPE_PROFILE_INC(ucx_progress_idle_calls);
+    else
+        CAPE_PROFILE_INC(ucx_progress_active_calls);
+    return events;
+}
+
+static int cape_ucx_req_completed(void *req)
+{
     if (req == NULL)
-        return 0;
+        return 1;
     if (UCS_PTR_IS_ERR(req)) {
         fprintf(stderr, "CAPE UCX error: %s\n",
                 ucs_status_string(UCS_PTR_STATUS(req)));
         exit(1);
     }
-    cape_ucx_req_t *r = (cape_ucx_req_t *)req;
-    unsigned idle_iters = 0;
-    while (!r->completed) {
-        unsigned events = ucp_worker_progress(ucp_worker);
-        CAPE_PROFILE_INC(ucx_progress_calls);
+    return ((cape_ucx_req_t *)req)->completed;
+}
+
+static void cape_ucx_req_finish(void *req, size_t expect_len,
+                                int check_len, ucp_tag_t *out_tag)
+{
+    cape_ucx_req_t *r;
+
+    if (out_tag)
+        *out_tag = 0;
+    if (req == NULL)
+        return;
+    if (UCS_PTR_IS_ERR(req)) {
+        fprintf(stderr, "CAPE UCX error: %s\n",
+                ucs_status_string(UCS_PTR_STATUS(req)));
+        exit(1);
     }
-#ifdef CAPE_PROFILE
-    unsigned long long wait_ns = cape_profile_elapsed_ns(wait_start_ns);
-    CAPE_PROFILE_ADD(ucx_wait_ns, wait_ns);
-    CAPE_PROFILE_ADD(ucx_progress_ns, wait_ns);
-#else
-    unsigned long long wait_ns = 0;
-#endif
+
+    r = (cape_ucx_req_t *)req;
     if (out_tag)
         *out_tag = r->sender_tag;
     if (r->status != UCS_OK) {
@@ -1572,18 +1672,33 @@ static unsigned long long cape_ucx_wait(void *req, size_t expect_len,
     if (check_len && (r->recv_len != 0) && (r->recv_len != expect_len)) {
         fprintf(stderr, "CAPE UCX recv length mismatch: got=%zu expected=%zu\n",
                 r->recv_len, expect_len);
-        r->completed  = 0;
-        r->status     = UCS_OK;
-        r->recv_len   = 0;
-        r->sender_tag = 0;
         ucp_request_free(req);
         exit(1);
     }
+
     r->completed  = 0;
     r->status     = UCS_OK;
     r->recv_len   = 0;
     r->sender_tag = 0;
     ucp_request_free(req);
+}
+
+static unsigned long long cape_ucx_wait(void *req, size_t expect_len,
+					int check_len, ucp_tag_t *out_tag)
+{
+	CAPE_PROFILE_NS_VAR(wait_start_ns);
+	CAPE_PROFILE_NS_START(wait_start_ns);
+
+    while (!cape_ucx_req_completed(req))
+        cape_ucx_progress_once();
+#ifdef CAPE_PROFILE
+    unsigned long long wait_ns = cape_profile_elapsed_ns(wait_start_ns);
+    CAPE_PROFILE_ADD(ucx_wait_ns, wait_ns);
+    CAPE_PROFILE_ADD(ucx_progress_ns, wait_ns);
+#else
+    unsigned long long wait_ns = 0;
+#endif
+    cape_ucx_req_finish(req, expect_len, check_len, out_tag);
     return wait_ns;
 }
 
@@ -1804,6 +1919,502 @@ static void cape_ucx_recv(void *buf, size_t len, int src, uint32_t token)
 #define TAG_SCATTER_SIZE  0x05
 #define TAG_SCATTER_DATA  0x06
 #define TAG_ALLREDUCE_BASE 0x100
+#define TAG_ALLREDUCE_STREAM_STRIDE 0x1000
+
+#define TAG_ALLREDUCE_STREAM_META(step) \
+    (TAG_ALLREDUCE_BASE + ((uint32_t)(step) * TAG_ALLREDUCE_STREAM_STRIDE))
+#define TAG_ALLREDUCE_STREAM_CHUNK(step, chunk) \
+    (TAG_ALLREDUCE_STREAM_META(step) + 1u + (uint32_t)(chunk))
+
+struct cape_ucx_send_list {
+    void **reqs;
+    size_t count;
+    size_t cap;
+};
+
+struct cape_ucx_pending_recv {
+    void *req;
+    unsigned char *buf;
+    size_t len;
+    unsigned long long probe_wait_ns;
+};
+
+static size_t cape_ucx_stream_chunk_bytes(void)
+{
+    size_t chunk = cape_parse_size_env("CAPE_UCX_STREAM_CHUNK_BYTES",
+                                       8ull * 1024ull * 1024ull);
+
+    if (chunk < BMP_WORD_BMP_BYTES + BMP_WORDS_PER_PAGE * sizeof(uint32_t))
+        chunk = BMP_WORD_BMP_BYTES + BMP_WORDS_PER_PAGE * sizeof(uint32_t);
+    if (chunk > ucx_scratch_recv_cap)
+        chunk = ucx_scratch_recv_cap;
+    if (chunk > ucx_scratch_send_cap)
+        chunk = ucx_scratch_send_cap;
+    return chunk;
+}
+
+static int cape_allreduce_stream_token_ok(unsigned int step)
+{
+    uint32_t first = TAG_ALLREDUCE_STREAM_META(step);
+    uint32_t last = first + TAG_ALLREDUCE_STREAM_STRIDE - 1u;
+
+    return first <= 0x000fffffU && last <= 0x000fffffU;
+}
+
+static int cape_bitmap_metadata_len(const unsigned char *buf, size_t len,
+                                    size_t *meta_len, uint32_t *n_pages)
+{
+    size_t pos = sizeof(unsigned long) + sizeof(struct user_regs_struct);
+    unsigned long marker;
+    uint32_t count;
+
+    if (pos > len || len - pos < sizeof(marker) + sizeof(count))
+        return 1;
+    memcpy(&marker, buf + pos, sizeof(marker));
+    if (marker != BMP_S)
+        return 1;
+    pos += sizeof(marker);
+    memcpy(&count, buf + pos, sizeof(count));
+    pos += sizeof(count);
+    if ((size_t)count > (len - pos) / sizeof(uint64_t))
+        return 1;
+    pos += (size_t)count * sizeof(uint64_t);
+    *meta_len = pos;
+    *n_pages = count;
+    return 0;
+}
+
+static int cape_ucx_send_list_add(struct cape_ucx_send_list *list, void *req)
+{
+    void **new_reqs;
+    size_t new_cap;
+
+    if (req == NULL)
+        return 0;
+    if (UCS_PTR_IS_ERR(req)) {
+        fprintf(stderr, "CAPE UCX send failed: %s\n",
+                ucs_status_string(UCS_PTR_STATUS(req)));
+        return 1;
+    }
+    if (list->count == list->cap) {
+        new_cap = list->cap == 0 ? 16 : list->cap * 2;
+        new_reqs = realloc(list->reqs, new_cap * sizeof(*new_reqs));
+        if (new_reqs == NULL)
+            return 1;
+        list->reqs = new_reqs;
+        list->cap = new_cap;
+    }
+    list->reqs[list->count++] = req;
+    return 0;
+}
+
+static int cape_ucx_post_send_tracked(struct cape_ucx_send_list *list,
+                                      const void *buf, size_t len,
+                                      int dest, uint32_t token)
+{
+    ucp_tag_t tag = CAPE_UCX_TAG(node, token);
+    ucp_request_param_t sp = {
+        .op_attr_mask = UCP_OP_ATTR_FIELD_CALLBACK,
+        .cb.send      = cape_send_cb
+    };
+    ucp_mem_h memh = cape_scratch_memh_for(buf);
+    void *req;
+
+    if (memh != NULL) {
+        sp.op_attr_mask |= UCP_OP_ATTR_FIELD_MEMH;
+        sp.memh = memh;
+    }
+
+    req = ucp_tag_send_nbx(ucp_endpoints[dest], buf, len, tag, &sp);
+    return cape_ucx_send_list_add(list, req);
+}
+
+static unsigned long long cape_ucx_send_list_wait_all(
+        struct cape_ucx_send_list *list)
+{
+    size_t remaining = 0;
+    CAPE_PROFILE_NS_VAR(wait_start_ns);
+    CAPE_PROFILE_NS_START(wait_start_ns);
+
+    for (size_t i = 0; i < list->count; ++i) {
+        if (list->reqs[i] != NULL)
+            remaining++;
+    }
+    while (remaining != 0) {
+        size_t i;
+        int made_progress = 0;
+
+        for (i = 0; i < list->count; ++i) {
+            void *req = list->reqs[i];
+            if (req == NULL)
+                continue;
+            if (cape_ucx_req_completed(req)) {
+                cape_ucx_req_finish(req, 0, 0, NULL);
+                list->reqs[i] = NULL;
+                remaining--;
+                made_progress = 1;
+            }
+        }
+        if (!made_progress)
+            cape_ucx_progress_once();
+    }
+
+#ifdef CAPE_PROFILE
+    {
+        unsigned long long wait_ns = cape_profile_elapsed_ns(wait_start_ns);
+        CAPE_PROFILE_ADD(ucx_wait_ns, wait_ns);
+        CAPE_PROFILE_ADD(ucx_progress_ns, wait_ns);
+        CAPE_PROFILE_ADD(ucx_wait_send_ns, wait_ns);
+        CAPE_PROFILE_INC(ucx_wait_send_calls);
+        return wait_ns;
+    }
+#else
+    return 0;
+#endif
+}
+
+static void cape_ucx_send_list_cleanup(struct cape_ucx_send_list *list)
+{
+    free(list->reqs);
+    list->reqs = NULL;
+    list->count = 0;
+    list->cap = 0;
+}
+
+static int cape_ucx_stream_send_start(const unsigned char *buf, size_t len,
+                                      int dest, unsigned int step,
+                                      struct cape_ucx_send_list *sends)
+{
+    size_t meta_len, pos, chunk_bytes;
+    uint32_t n_pages;
+    uint32_t chunk_idx = 0;
+    uint32_t page = 0;
+
+    memset(sends, 0, sizeof(*sends));
+    if (!cape_allreduce_stream_token_ok(step) ||
+        cape_bitmap_metadata_len(buf, len, &meta_len, &n_pages) != 0)
+        return 1;
+
+    if (cape_ucx_post_send_tracked(sends, buf, meta_len, dest,
+                                   TAG_ALLREDUCE_STREAM_META(step)) != 0)
+        return 1;
+
+    chunk_bytes = cape_ucx_stream_chunk_bytes();
+    pos = meta_len;
+    while (page < n_pages) {
+        size_t chunk_start = pos;
+
+        if (chunk_idx >= TAG_ALLREDUCE_STREAM_STRIDE - 1u)
+            return 1;
+        do {
+            const uint8_t *word_bmp;
+            unsigned n_changed;
+            size_t payload_bytes;
+
+            if (pos > len || len - pos < BMP_WORD_BMP_BYTES)
+                return 1;
+            word_bmp = buf + pos;
+            pos += BMP_WORD_BMP_BYTES;
+            n_changed = wbmp_popcount(word_bmp);
+            payload_bytes = (size_t)n_changed * sizeof(uint32_t);
+            if (pos > len || payload_bytes > len - pos)
+                return 1;
+            pos += payload_bytes;
+            page++;
+        } while (page < n_pages && pos - chunk_start < chunk_bytes);
+
+        if (cape_ucx_post_send_tracked(
+                    sends, buf + chunk_start, pos - chunk_start, dest,
+                    TAG_ALLREDUCE_STREAM_CHUNK(step, chunk_idx)) != 0)
+            return 1;
+        chunk_idx++;
+    }
+
+#ifdef CAPE_PROFILE
+    CAPE_PROFILE_ADD(ucx_send_bytes, (uint64_t)pos);
+#endif
+    return 0;
+}
+
+static int cape_ucx_stream_post_recv(int src, unsigned int step,
+                                     uint32_t chunk_idx,
+                                     unsigned char *buf, size_t cap,
+                                     struct cape_ucx_pending_recv *pending)
+{
+    ucp_tag_t recv_tag = CAPE_UCX_TAG(src,
+                                      TAG_ALLREDUCE_STREAM_CHUNK(step,
+                                                                 chunk_idx));
+    ucp_tag_recv_info_t info;
+    ucp_tag_message_h msg;
+    ucp_mem_h memh = cape_scratch_memh_for(buf);
+    ucp_request_param_t rp = {
+        .op_attr_mask = UCP_OP_ATTR_FIELD_CALLBACK
+                      | UCP_OP_ATTR_FIELD_FLAGS,
+        .flags        = UCP_OP_ATTR_FLAG_NO_IMM_CMPL,
+        .cb.recv      = cape_recv_cb
+    };
+
+    memset(pending, 0, sizeof(*pending));
+    msg = cape_ucx_probe_msg(recv_tag, &info, &pending->probe_wait_ns);
+    if (info.length > cap) {
+        fprintf(stderr,
+                "CAPE UCX: stream chunk too large (len=%zu cap=%zu); "
+                "increase CAPE_UCX_SCRATCH_BYTES or lower CAPE_UCX_STREAM_CHUNK_BYTES\n",
+                info.length, cap);
+        return 1;
+    }
+    if (memh != NULL) {
+        rp.op_attr_mask |= UCP_OP_ATTR_FIELD_MEMH;
+        rp.memh = memh;
+    }
+
+    pending->buf = buf;
+    pending->len = info.length;
+    pending->req = ucp_tag_msg_recv_nbx(ucp_worker, buf, info.length,
+                                        msg, &rp);
+    if (UCS_PTR_IS_ERR(pending->req)) {
+        fprintf(stderr, "CAPE UCX stream recv failed: %s\n",
+                ucs_status_string(UCS_PTR_STATUS(pending->req)));
+        return 1;
+    }
+    return 0;
+}
+
+static unsigned long long cape_ucx_stream_wait_recv(
+        struct cape_ucx_pending_recv *pending)
+{
+    unsigned long long recv_wait_ns;
+
+    recv_wait_ns = cape_ucx_wait(pending->req, pending->len, 1, NULL);
+#ifdef CAPE_PROFILE
+    CAPE_PROFILE_INC(ucx_recv_calls);
+    CAPE_PROFILE_ADD(ucx_recv_bytes, (uint64_t)pending->len);
+    CAPE_PROFILE_ADD(ucx_wait_recv_ns,
+                     pending->probe_wait_ns + recv_wait_ns);
+    CAPE_PROFILE_INC(ucx_wait_recv_calls);
+#endif
+    pending->req = NULL;
+    return recv_wait_ns;
+}
+
+static int cape_stream_parse_remote_chunk(struct bmp_section_view *remote,
+                                          uint32_t *next_page,
+                                          const unsigned char *buf,
+                                          size_t len)
+{
+    size_t pos = 0;
+
+    while (pos < len && *next_page < remote->n_pages) {
+        struct bmp_page_view *pg = &remote->pages[*next_page];
+        unsigned n_changed;
+        size_t payload_bytes;
+
+        if (len - pos < BMP_WORD_BMP_BYTES)
+            return 1;
+        pg->word_bmp = buf + pos;
+        pos += BMP_WORD_BMP_BYTES;
+        n_changed = wbmp_popcount(pg->word_bmp);
+        payload_bytes = (size_t)n_changed * sizeof(uint32_t);
+        if (payload_bytes > len - pos)
+            return 1;
+        pg->n_changed = (uint32_t)n_changed;
+        pg->changed = buf + pos;
+        pos += payload_bytes;
+        (*next_page)++;
+    }
+
+    return pos != len;
+}
+
+static int cape_stream_output_available(FILE *out,
+                                        struct bmp_merge_slot *slots,
+                                        uint32_t nslots,
+                                        uint32_t *slot_idx,
+                                        int remote_is_newer)
+{
+    while (*slot_idx < nslots) {
+        struct bmp_merge_slot *slot = &slots[*slot_idx];
+
+        if (slot->remote != NULL && slot->remote->word_bmp == NULL)
+            break;
+
+        if (slot->local != NULL && slot->remote != NULL) {
+            int rc;
+            if (remote_is_newer)
+                rc = emit_merged_page(out, slot->addr,
+                                      slot->local, slot->remote);
+            else
+                rc = emit_merged_page(out, slot->addr,
+                                      slot->remote, slot->local);
+            if (rc != 0)
+                return 1;
+        } else {
+            const struct bmp_page_view *pg =
+                slot->local != NULL ? slot->local : slot->remote;
+            if (write_bitmap_page_payload(out, pg) != 0)
+                return 1;
+        }
+        (*slot_idx)++;
+        cape_ucx_progress_once();
+    }
+    return 0;
+}
+
+static int cape_stream_merge_partner_checkpoint(int partner,
+                                                unsigned int step,
+                                                unsigned char *remote_meta,
+                                                size_t remote_meta_size,
+                                                unsigned char **old_free_out)
+{
+    const size_t header_len = sizeof(unsigned long) +
+                              sizeof(struct user_regs_struct);
+    struct bmp_section_view local_bmp = {0}, remote_bmp = {0};
+    struct bmp_merge_slot *slots = NULL;
+    uint32_t nslots = 0, slot_idx = 0, remote_next = 0, chunk_idx = 0;
+    unsigned char *old_total;
+    int old_total_was_scratch;
+    unsigned long local_time, remote_time;
+    FILE *out = NULL;
+    int rc = 1;
+    int remote_is_newer;
+    unsigned long marker = BMP_S;
+    struct cape_ucx_pending_recv pending = {0};
+    unsigned char *recv_buf[2] = { ucx_scratch_recv, ucx_scratch_send };
+    size_t recv_cap[2] = { ucx_scratch_recv_cap, ucx_scratch_send_cap };
+    int recv_buf_idx = 0;
+
+    *old_free_out = NULL;
+    if (total_ckpt == NULL || total_ckpt_size < header_len ||
+        remote_meta_size < header_len)
+        return 1;
+    if (cape_total_stream_update_size() != 0)
+        return 1;
+
+    old_total = total_ckpt;
+    old_total_was_scratch = total_ckpt_uses_scratch;
+
+    if (parse_bitmap_section(old_total, total_ckpt_size, header_len,
+                             &local_bmp) != 0 ||
+        parse_bitmap_metadata(remote_meta, remote_meta_size, header_len,
+                              &remote_bmp) != 0 ||
+        build_bitmap_merge_slots(&local_bmp, &remote_bmp,
+                                 &slots, &nslots) != 0)
+        goto done;
+
+    memcpy(&local_time, old_total, sizeof(local_time));
+    memcpy(&remote_time, remote_meta, sizeof(remote_time));
+    remote_is_newer = remote_time > local_time;
+
+    if (total_ckpt_stream != NULL) {
+        fclose(total_ckpt_stream);
+        total_ckpt_stream = NULL;
+    }
+    total_ckpt = old_total;
+    total_ckpt_uses_scratch = old_total_was_scratch;
+    out = cape_total_open_scratch_stream(0);
+    if (out == NULL)
+        goto done;
+
+    if (fwrite(remote_is_newer ? remote_meta : old_total,
+               header_len, 1, out) != 1 ||
+        fwrite(&marker, sizeof(marker), 1, out) != 1 ||
+        fwrite(&nslots, sizeof(nslots), 1, out) != 1)
+        goto done;
+    for (uint32_t i = 0; i < nslots; ++i) {
+        if (fwrite(&slots[i].addr, sizeof(slots[i].addr), 1, out) != 1)
+            goto done;
+    }
+
+    if (remote_bmp.n_pages != 0) {
+        if (cape_ucx_stream_post_recv(partner, step, chunk_idx,
+                                      recv_buf[recv_buf_idx],
+                                      recv_cap[recv_buf_idx],
+                                      &pending) != 0)
+            goto done;
+        chunk_idx++;
+    }
+
+    if (cape_stream_output_available(out, slots, nslots, &slot_idx,
+                                     remote_is_newer) != 0)
+        goto done;
+
+    while (remote_next < remote_bmp.n_pages) {
+        cape_ucx_stream_wait_recv(&pending);
+        if (cape_stream_parse_remote_chunk(&remote_bmp, &remote_next,
+                                           pending.buf, pending.len) != 0)
+            goto done;
+
+        recv_buf_idx = 1 - recv_buf_idx;
+        if (remote_next < remote_bmp.n_pages) {
+            if (cape_ucx_stream_post_recv(partner, step, chunk_idx,
+                                          recv_buf[recv_buf_idx],
+                                          recv_cap[recv_buf_idx],
+                                          &pending) != 0)
+                goto done;
+            chunk_idx++;
+        }
+
+        if (cape_stream_output_available(out, slots, nslots, &slot_idx,
+                                         remote_is_newer) != 0)
+            goto done;
+    }
+
+    if (slot_idx != nslots || cape_total_stream_update_size() != 0)
+        goto done;
+
+    if (!old_total_was_scratch)
+        *old_free_out = old_total;
+    rc = 0;
+
+done:
+    free(slots);
+    free_bitmap_section(&local_bmp);
+    free_bitmap_section(&remote_bmp);
+    if (rc != 0 && pending.req != NULL)
+        cape_ucx_wait(pending.req, pending.len, 0, NULL);
+    return rc;
+}
+
+static int cape_ucx_stream_exchange_merge(int partner, unsigned int step)
+{
+    struct cape_ucx_send_list sends;
+    unsigned char *remote_meta = NULL;
+    unsigned char *old_free = NULL;
+    size_t remote_meta_size = 0;
+    size_t sent_size = total_ckpt_size;
+    int sends_waited = 0;
+    int rc = 1;
+    CAPE_PROFILE_NS_VAR(start_ns);
+    CAPE_PROFILE_NS_START(start_ns);
+
+    if (cape_ucx_stream_send_start(total_ckpt, total_ckpt_size,
+                                   partner, step, &sends) != 0)
+        goto done;
+
+    remote_meta = cape_ucx_recv_probe_alloc(&remote_meta_size, partner,
+                                            TAG_ALLREDUCE_STREAM_META(step));
+    rc = cape_stream_merge_partner_checkpoint(partner, step,
+                                              remote_meta,
+                                              remote_meta_size,
+                                              &old_free);
+    cape_ucx_send_list_wait_all(&sends);
+    sends_waited = 1;
+    free(old_free);
+
+#ifdef CAPE_PROFILE
+    CAPE_PROFILE_ADD_NS(ucx_sendrecv_ns, start_ns);
+    CAPE_PROFILE_INC(ucx_sendrecv_calls);
+    CAPE_PROFILE_ADD(ucx_sendrecv_data_bytes, (uint64_t)sent_size);
+    CAPE_PROFILE_INC(ucx_sendrecv_data_calls);
+#endif
+
+done:
+    if (!sends_waited && sends.count != 0)
+        cape_ucx_send_list_wait_all(&sends);
+    free(remote_meta);
+    cape_ucx_send_list_cleanup(&sends);
+    return rc;
+}
 
 static const char *cape_ucx_bootstrap_id(void)
 {
@@ -3375,35 +3986,15 @@ int hypercube_allreduce(){
 	int i;
 	int nsteps = 0;
 	int partner;
-	size_t send_msg_size = 0, recv_msg_size = 0;
-
-	FILE *ckpt_stream;
 
 	nsteps = mylog2 (num_nodes);
 
 	for(i = 0; i < nsteps; i ++){
-		uint32_t token_data = TAG_ALLREDUCE_BASE + (i * 2) + 1;
 		CAPE_PROFILE_NS_VAR(step_start_ns);
 		CAPE_PROFILE_NS_START(step_start_ns);
 
 		partner = node ^ (1 << i);
-
-		send_msg_size = total_ckpt_size;
-		recv_msg_size = cape_ucx_sendrecv_probe(total_ckpt,
-							send_msg_size,
-							partner,
-							ucx_scratch_recv,
-							ucx_scratch_recv_cap,
-							partner,
-							token_data);
-
-		ckpt_stream = fmemopen(ucx_scratch_recv,
-				       recv_msg_size, "rb");
-		if (ckpt_stream == NULL)
-			return 1;
-		rc = merge_external_checkpoint(ckpt_stream, ucx_scratch_recv,
-					       recv_msg_size);
-		fclose(ckpt_stream);
+		rc = cape_ucx_stream_exchange_merge(partner, (unsigned int)i);
 		if (rc != 0)
 			return rc;
 
