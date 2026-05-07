@@ -3618,39 +3618,54 @@ int ucc_allgatherv_allreduce(void)
         goto out;
     }
 
-    /* Pre-stage our contribution into the local slot; we use IN_PLACE so
-     * UCC won't copy from a separate src buffer. Many UCC TLs assume the
-     * local contribution is already at recv_buf + displs[my_rank] and
-     * forward zeros from there if you pass a non-in-place src. */
-    if (total_ckpt_size > 0)
-        memcpy(recv_buf + (size_t)displs[node], total_ckpt,
-               (size_t)total_ckpt_size);
-
-    /* Step 3: allgatherv variable-size payloads (in-place). */
-    memset(&args, 0, sizeof(args));
-    args.mask                  = UCC_COLL_ARGS_FIELD_FLAGS;
-    args.flags                 = UCC_COLL_ARGS_FLAG_IN_PLACE;
-    args.coll_type             = UCC_COLL_TYPE_ALLGATHERV;
-    args.dst.info_v.buffer        = recv_buf;
-    args.dst.info_v.counts        = counts;
-    args.dst.info_v.displacements = displs;
-    args.dst.info_v.datatype      = UCC_DT_UINT8;
-    args.dst.info_v.mem_type      = UCC_MEMORY_TYPE_HOST;
-
-    if (cape_ucc_check(ucc_collective_init(&args, &req, cape_ucc_team),
-                       "ucc_collective_init(allgatherv)")) {
-        rc = 1;
-        goto out;
+    /* Pre-stage our contribution into the local slot. Each rank's chunk
+     * is then broadcast from its owner — this avoids UCC allgatherv,
+     * which on some TLs mishandles per-rank displacements and produces
+     * inconsistent buffers across ranks. */
+    if (total_ckpt_size > 0) {
+        size_t my_off = 0;
+        int    k;
+        for (k = 0; k < (int)node; ++k)
+            my_off += (size_t)sizes[k];
+        memcpy(recv_buf + my_off, total_ckpt, (size_t)total_ckpt_size);
     }
-    if (cape_ucc_check(ucc_collective_post(req),
-                       "ucc_collective_post(allgatherv)")) {
-        ucc_collective_finalize(req);
-        rc = 1;
-        goto out;
-    }
-    if (cape_ucc_wait(req, "ucc_collective_test(allgatherv)") != 0) {
-        rc = 1;
-        goto out;
+
+    /* Step 3: emulate allgatherv as N broadcasts, one per root. */
+    {
+        size_t off = 0;
+        int    r;
+        for (r = 0; r < num_nodes; ++r) {
+            size_t sz = (size_t)sizes[r];
+            if (sz == 0)
+                continue;
+
+            memset(&args, 0, sizeof(args));
+            args.mask              = 0;
+            args.coll_type         = UCC_COLL_TYPE_BCAST;
+            args.root              = (uint32_t)r;
+            args.src.info.buffer   = recv_buf + off;
+            args.src.info.count    = sz;
+            args.src.info.datatype = UCC_DT_UINT8;
+            args.src.info.mem_type = UCC_MEMORY_TYPE_HOST;
+
+            if (cape_ucc_check(ucc_collective_init(&args, &req, cape_ucc_team),
+                               "ucc_collective_init(bcast)")) {
+                rc = 1;
+                goto out;
+            }
+            if (cape_ucc_check(ucc_collective_post(req),
+                               "ucc_collective_post(bcast)")) {
+                ucc_collective_finalize(req);
+                rc = 1;
+                goto out;
+            }
+            if (cape_ucc_wait(req, "ucc_collective_test(bcast)") != 0) {
+                rc = 1;
+                goto out;
+            }
+
+            off += sz;
+        }
     }
 
     fprintf(stderr,
