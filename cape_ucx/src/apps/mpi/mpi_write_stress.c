@@ -17,6 +17,9 @@
 #define DEFAULT_PHASES  8
 #define MAX_PHASES      32
 #define WRITES_PER_CELL 4U
+#define TAG_SYNC_ARRIVE 900
+#define TAG_SYNC_RELEASE 901
+#define TAG_PROFILE_BASE 1000
 
 static int profile_enabled(void)
 {
@@ -111,6 +114,26 @@ static int verify(const unsigned int *rows, int n, int num_ranks,
 	return errors;
 }
 
+static void sync_start_p2p(int rank, int num_ranks)
+{
+	int token = 1;
+	int r;
+
+	if (rank == 0) {
+		for (r = 1; r < num_ranks; r++)
+			MPI_Recv(&token, 1, MPI_INT, r, TAG_SYNC_ARRIVE,
+				 MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+		for (r = 1; r < num_ranks; r++)
+			MPI_Send(&token, 1, MPI_INT, r, TAG_SYNC_RELEASE,
+				 MPI_COMM_WORLD);
+	} else {
+		MPI_Send(&token, 1, MPI_INT, 0, TAG_SYNC_ARRIVE,
+			 MPI_COMM_WORLD);
+		MPI_Recv(&token, 1, MPI_INT, 0, TAG_SYNC_RELEASE,
+			 MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+	}
+}
+
 static void exchange_rows_sendrecv(unsigned int *rows, int n,
 				   int rank, int num_ranks, int phase)
 {
@@ -132,6 +155,65 @@ static void exchange_rows_sendrecv(unsigned int *rows, int n,
 	}
 }
 
+static void aggregate_profile_metric(double local, double *out,
+				     int rank, int num_ranks, int tag)
+{
+	if (rank == 0) {
+		double min_v = local;
+		double sum_v = local;
+		double max_v = local;
+		int r;
+
+		for (r = 1; r < num_ranks; r++) {
+			double v;
+
+			MPI_Recv(&v, 1, MPI_DOUBLE, r, tag,
+				 MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+			if (v < min_v)
+				min_v = v;
+			sum_v += v;
+			if (v > max_v)
+				max_v = v;
+		}
+		if (out) {
+			out[0] = min_v;
+			out[1] = sum_v;
+			out[2] = max_v;
+		}
+	} else {
+		MPI_Send(&local, 1, MPI_DOUBLE, 0, tag, MPI_COMM_WORLD);
+	}
+}
+
+static void aggregate_profile_array(const double *local,
+				    double *mins, double *sums, double *maxs,
+				    int phases, int rank, int num_ranks, int tag)
+{
+	if (rank == 0) {
+		double incoming[MAX_PHASES];
+		int p, r;
+
+		for (p = 0; p < phases; p++) {
+			mins[p] = local[p];
+			sums[p] = local[p];
+			maxs[p] = local[p];
+		}
+		for (r = 1; r < num_ranks; r++) {
+			MPI_Recv(incoming, phases, MPI_DOUBLE, r, tag,
+				 MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+			for (p = 0; p < phases; p++) {
+				if (incoming[p] < mins[p])
+					mins[p] = incoming[p];
+				sums[p] += incoming[p];
+				if (incoming[p] > maxs[p])
+					maxs[p] = incoming[p];
+			}
+		}
+	} else {
+		MPI_Send(local, phases, MPI_DOUBLE, 0, tag, MPI_COMM_WORLD);
+	}
+}
+
 static double sum_phases(const double *values, int phases)
 {
 	double total = 0.0;
@@ -140,29 +222,6 @@ static double sum_phases(const double *values, int phases)
 	for (p = 0; p < phases; p++)
 		total += values[p];
 	return total;
-}
-
-static void reduce_profile_metric(double local, double *out, int rank)
-{
-	double reduced[3];
-
-	MPI_Reduce(&local, &reduced[0], 1, MPI_DOUBLE, MPI_MIN, 0, MPI_COMM_WORLD);
-	MPI_Reduce(&local, &reduced[1], 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
-	MPI_Reduce(&local, &reduced[2], 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
-	if (rank == 0 && out) {
-		out[0] = reduced[0];
-		out[1] = reduced[1];
-		out[2] = reduced[2];
-	}
-}
-
-static void reduce_profile_array(const double *local,
-				 double *mins, double *sums, double *maxs,
-				 int phases)
-{
-	MPI_Reduce(local, mins,  phases, MPI_DOUBLE, MPI_MIN, 0, MPI_COMM_WORLD);
-	MPI_Reduce(local, sums,  phases, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
-	MPI_Reduce(local, maxs,  phases, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
 }
 
 static void print_metric(const char *label, const double *m, int num_ranks)
@@ -194,18 +253,29 @@ static void profile_report(int rank, int num_ranks, int n, int phases, int rep,
 	size_t bytes_per_rank_total = bytes_per_phase * (size_t)phases;
 	int p;
 
-	reduce_profile_metric(barrier_s, barrier_m, rank);
-	reduce_profile_metric(total_s, total_m, rank);
-	reduce_profile_metric(zero_total, zero_m, rank);
-	reduce_profile_metric(work_total, work_m, rank);
-	reduce_profile_metric(sendrecv_total, sendrecv_m, rank);
-	reduce_profile_metric(phase_total, phase_total_m, rank);
-	reduce_profile_metric(verify_s, verify_m, rank);
+	aggregate_profile_metric(barrier_s, barrier_m, rank, num_ranks,
+				 TAG_PROFILE_BASE + 0);
+	aggregate_profile_metric(total_s, total_m, rank, num_ranks,
+				 TAG_PROFILE_BASE + 1);
+	aggregate_profile_metric(zero_total, zero_m, rank, num_ranks,
+				 TAG_PROFILE_BASE + 2);
+	aggregate_profile_metric(work_total, work_m, rank, num_ranks,
+				 TAG_PROFILE_BASE + 3);
+	aggregate_profile_metric(sendrecv_total, sendrecv_m, rank, num_ranks,
+				 TAG_PROFILE_BASE + 4);
+	aggregate_profile_metric(phase_total, phase_total_m, rank, num_ranks,
+				 TAG_PROFILE_BASE + 5);
+	aggregate_profile_metric(verify_s, verify_m, rank, num_ranks,
+				 TAG_PROFILE_BASE + 6);
 
-	reduce_profile_array(phase_zero_s, zero_min, zero_sum, zero_max, phases);
-	reduce_profile_array(phase_work_s, work_min, work_sum, work_max, phases);
-	reduce_profile_array(phase_sendrecv_s, comm_min, comm_sum, comm_max, phases);
-	reduce_profile_array(phase_total_s, phase_min, phase_sum, phase_max, phases);
+	aggregate_profile_array(phase_zero_s, zero_min, zero_sum, zero_max,
+				phases, rank, num_ranks, TAG_PROFILE_BASE + 7);
+	aggregate_profile_array(phase_work_s, work_min, work_sum, work_max,
+				phases, rank, num_ranks, TAG_PROFILE_BASE + 8);
+	aggregate_profile_array(phase_sendrecv_s, comm_min, comm_sum, comm_max,
+				phases, rank, num_ranks, TAG_PROFILE_BASE + 9);
+	aggregate_profile_array(phase_total_s, phase_min, phase_sum, phase_max,
+				phases, rank, num_ranks, TAG_PROFILE_BASE + 10);
 
 	if (rank != 0)
 		return;
@@ -314,7 +384,7 @@ int main(int argc, char *argv[])
 		int verify_errors;
 
 		barrier_start_s = MPI_Wtime();
-		MPI_Barrier(MPI_COMM_WORLD);
+		sync_start_p2p(rank, num_ranks);
 		barrier_s = MPI_Wtime() - barrier_start_s;
 		total_start_s = MPI_Wtime();
 
