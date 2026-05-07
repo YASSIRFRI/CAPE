@@ -1,0 +1,184 @@
+Data Structures
+struct  	ucc_coll_args
+ 	Structure representing arguments for the collective operations. More...
+ 
+union  	ucc_coll_args.src
+ 
+union  	ucc_coll_args.dst
+ 
+struct  	ucc_coll_args.active_set
+ 
+Typedefs
+typedef struct ucc_coll_args 	ucc_coll_args_t
+ 	Structure representing arguments for the collective operations. More...
+ 
+typedef struct ucc_mem_handle * 	ucc_mem_h
+ 	UCC memory handle. More...
+ 
+Functions
+ucc_status_t 	ucc_collective_init (ucc_coll_args_t *coll_args, ucc_coll_req_h *request, ucc_team_h team)
+ 	The routine to initialize a collective operation. More...
+ 
+ucc_status_t 	ucc_collective_post (ucc_coll_req_h request)
+ 	The routine to post a collective operation. More...
+ 
+ucc_status_t 	ucc_collective_init_and_post (ucc_coll_args_t *coll_args, ucc_coll_req_h *request, ucc_team_h team)
+ 	The routine to initialize and post a collective operation. More...
+ 
+static ucc_status_t 	ucc_collective_test (ucc_coll_req_h request)
+ 	The routine to query the status of the collective operation. More...
+ 
+ucc_status_t 	ucc_collective_finalize (ucc_coll_req_h request)
+ 	The routine to release the collective operation associated with the request object. More...
+ 
+Detailed Description
+Collective operations invocation and progress
+
+Data Structure Documentation
+◆ ucc_coll_args
+struct ucc_coll_args
+Description
+
+ucc_coll_args_t defines the parameters that can be used to customize the collective operation. The "mask" bit array fields are defined by ucc_coll_args_field. The bits in "mask" bit array is defined by ucc_coll_args_field, which correspond to fields in structure ucc_coll_args_t. The valid fields of the structure are specified by setting the corresponding bit to "1" in the bit-array "mask".
+
+The collective operation is selected by field "coll_type" which must be always set by user. If allreduce or * reduce operation is selected, the type of reduction is selected by the field * "predefined_reduction_op" or "custom_reduction_op". For unordered collective operations, the user-provided "tag" value orders the collective operation. For rooted collective operations such as reduce, scatter, gather, fan-in, and fan-out, the "root" field must be provided by user and specify the participant endpoint value. The user can request either "local" or "global" error information using the "error_type" field.
+
+
+
+Information about user buffers used for collective operation must be specified according to the "coll_type".
+
+Data Fields
+uint64_t	mask	
+ucc_coll_type_t	coll_type	
+Type of collective operation
+
+union ucc_coll_args	src	
+union ucc_coll_args	dst	
+ucc_reduction_op_t	op	
+Predefined reduction operation, if reduce, allreduce, reduce_scatter operation is selected. The field is only specified for collectives that use pre-defined datatypes
+
+uint64_t	flags	
+Provide flags and hints for the collective operations
+
+uint64_t	root	
+Root endpoint for rooted collectives
+
+ucc_error_type_t	error_type	
+Error type
+
+ucc_coll_id_t	tag	
+Used for ordering collectives
+
+void *	global_work_buffer	
+User allocated scratchpad buffer for one-sided collectives. The buffer provided should be at least the size returned by ucc_context_get_attr with the field mask - UCC_CONTEXT_ATTR_FIELD_WORK_BUFFER_SIZE set to 1. The buffer must be initialized to 0.
+
+ucc_coll_callback_t	cb	
+double	timeout	
+Timeout in seconds
+
+struct ucc_coll_args	active_set	
+◆ ucc_coll_args.src
+union ucc_coll_args.src
+Data Fields
+ucc_coll_buffer_info_t	info	
+Buffer info for the collective
+
+ucc_coll_buffer_info_v_t	info_v	
+Buffer info for the collective
+
+◆ ucc_coll_args.dst
+union ucc_coll_args.dst
+Data Fields
+ucc_coll_buffer_info_t	info	
+Buffer info for the collective
+
+ucc_coll_buffer_info_v_t	info_v	
+Buffer info for the collective
+
+◆ ucc_coll_args.active_set
+struct ucc_coll_args.active_set
+Data Fields
+uint64_t	start	
+int64_t	stride	
+uint64_t	size	
+Typedef Documentation
+◆ ucc_coll_args_t
+typedef struct ucc_coll_args ucc_coll_args_t
+Description
+
+ucc_coll_args_t defines the parameters that can be used to customize the collective operation. The "mask" bit array fields are defined by ucc_coll_args_field. The bits in "mask" bit array is defined by ucc_coll_args_field, which correspond to fields in structure ucc_coll_args_t. The valid fields of the structure are specified by setting the corresponding bit to "1" in the bit-array "mask".
+
+The collective operation is selected by field "coll_type" which must be always set by user. If allreduce or * reduce operation is selected, the type of reduction is selected by the field * "predefined_reduction_op" or "custom_reduction_op". For unordered collective operations, the user-provided "tag" value orders the collective operation. For rooted collective operations such as reduce, scatter, gather, fan-in, and fan-out, the "root" field must be provided by user and specify the participant endpoint value. The user can request either "local" or "global" error information using the "error_type" field.
+
+
+
+Information about user buffers used for collective operation must be specified according to the "coll_type".
+
+◆ ucc_mem_h
+typedef struct ucc_mem_handle* ucc_mem_h
+The UCC memory handle is an opaque handle created by the library representing the buffer and address.
+
+Function Documentation
+◆ ucc_collective_init()
+ucc_status_t ucc_collective_init	(	ucc_coll_args_t * 	coll_args,
+ucc_coll_req_h * 	request,
+ucc_team_h 	team 
+)		
+Parameters
+[in]	coll_args	Collective arguments descriptor
+[out]	request	Request handle representing the collective operation
+[in]	team	Team handle
+Description
+
+ucc_collective_init is a collective initialization operation, where all participants participate. The user provides all information required to start and complete the collective operation, which includes the input and output buffers, operation type, team handle, size, and any other hints for optimization. On success, the request handle is created and returned. On error, the request handle is not created and the appropriate error code is returned. On return, the ownership of buffers is transferred to the user. If modified, the results of collective operations posted on the request handle are undefined.
+
+Returns
+Error code as defined by ucc_status_t
+◆ ucc_collective_post()
+ucc_status_t ucc_collective_post	(	ucc_coll_req_h 	request	)	
+Parameters
+[in]	request	Request handle
+Description
+
+ucc_collective_post routine posts the collective operation. It does not require synchronization between the participants for the post operation. On error, request handle becomes invalid, user is responsible to call ucc_collective_finalize to free allocated resources.
+
+Returns
+Error code as defined by ucc_status_t
+◆ ucc_collective_init_and_post()
+ucc_status_t ucc_collective_init_and_post	(	ucc_coll_args_t * 	coll_args,
+ucc_coll_req_h * 	request,
+ucc_team_h 	team 
+)		
+Parameters
+[out]	request	Request handle representing the collective operation
+[in]	coll_args	Collective arguments descriptor
+[in]	team	Input Team
+Description
+
+ucc_collective_init_and_post initializes the collective operation and also posts the operation.
+
+Note
+: The ucc_collective_init_and_post can be implemented as a combination of ucc_collective_init and ucc_collective_post routines.
+Returns
+Error code as defined by ucc_status_t
+◆ ucc_collective_test()
+static ucc_status_t ucc_collective_test	(	ucc_coll_req_h 	request	)	
+inlinestatic
+Parameters
+[in]	request	Request handle
+Description
+
+ucc_collective_test tests and returns the status of collective operation. On error, request handle becomes invalid, user is responsible to call ucc_collective_finalize to free allocated resources.
+
+Returns
+Error code as defined by ucc_status_t
+◆ ucc_collective_finalize()
+ucc_status_t ucc_collective_finalize	(	ucc_coll_req_h 	request	)	
+Parameters
+[in]	request	- Request handle
+Description
+
+ucc_collective_finalize operation releases all resources associated with the collective operation represented by the request handle. In UCC_THREAD_MULTIPLE mode, the user is responsible for ensuring that ucc_collective_finalize is called after the status is UCC_OK and after completing the execution of any callback registered with ucc_coll_args_t.
+
+Returns
+Error code as defined by ucc_status_t

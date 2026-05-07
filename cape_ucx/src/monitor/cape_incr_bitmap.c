@@ -43,6 +43,7 @@
 #include <stdint.h>
 #include <time.h>
 #include <limits.h>
+#include <ctype.h>
 
 #include "../include/cape_monitor.h"
 #include "../include/cape_dickpt_uffd.h"
@@ -655,6 +656,218 @@ static inline void cape_profile_report(void) {}
 static FILE *open_binary_memstream(unsigned char **bufloc, size_t *sizeloc)
 {
 	return open_memstream((char **)bufloc, sizeloc);
+}
+
+static int cape_cpuset_count(const cpu_set_t *set)
+{
+	int cpu, count = 0;
+
+	for (cpu = 0; cpu < CPU_SETSIZE; ++cpu) {
+		if (CPU_ISSET(cpu, set))
+			count++;
+	}
+	return count;
+}
+
+static int cape_cpuset_first(const cpu_set_t *set)
+{
+	int cpu;
+
+	for (cpu = 0; cpu < CPU_SETSIZE; ++cpu) {
+		if (CPU_ISSET(cpu, set))
+			return cpu;
+	}
+	return -1;
+}
+
+static int cape_cpuset_nth(const cpu_set_t *set, int n)
+{
+	int cpu;
+
+	for (cpu = 0; cpu < CPU_SETSIZE; ++cpu) {
+		if (CPU_ISSET(cpu, set)) {
+			if (n == 0)
+				return cpu;
+			n--;
+		}
+	}
+	return -1;
+}
+
+static int cape_env_int(const char *name, int fallback)
+{
+	const char *v = getenv(name);
+	char *end = NULL;
+	long n;
+
+	if (v == NULL || v[0] == '\0')
+		return fallback;
+	errno = 0;
+	n = strtol(v, &end, 10);
+	if (errno != 0 || end == v || n < INT_MIN || n > INT_MAX)
+		return fallback;
+	return (int)n;
+}
+
+static int cape_parse_cpu_list(const char *text, const cpu_set_t *allowed,
+			       cpu_set_t *out)
+{
+	const char *p = text;
+	int selected = 0;
+
+	CPU_ZERO(out);
+	while (p != NULL && *p != '\0') {
+		char *end;
+		long first, last;
+
+		while (isspace((unsigned char)*p) || *p == ',')
+			p++;
+		if (*p == '\0')
+			break;
+
+		errno = 0;
+		first = strtol(p, &end, 10);
+		if (errno != 0 || end == p || first < 0 || first >= CPU_SETSIZE)
+			return 1;
+		last = first;
+		p = end;
+
+		if (*p == '-') {
+			p++;
+			errno = 0;
+			last = strtol(p, &end, 10);
+			if (errno != 0 || end == p || last < first ||
+			    last >= CPU_SETSIZE)
+				return 1;
+			p = end;
+		}
+
+		for (long cpu = first; cpu <= last; ++cpu) {
+			if (CPU_ISSET((int)cpu, allowed)) {
+				CPU_SET((int)cpu, out);
+				selected++;
+			}
+		}
+
+		while (isspace((unsigned char)*p))
+			p++;
+		if (*p != '\0' && *p != ',')
+			return 1;
+	}
+
+	return selected == 0;
+}
+
+static void cape_default_rank_cpuset(const cpu_set_t *allowed, cpu_set_t *out)
+{
+	int local_rank = cape_env_int("SLURM_LOCALID", -1);
+	int local_size = -1;
+	int cpus_per_rank = cape_env_int("CAPE_CPUS_PER_RANK", -1);
+	int allowed_count = cape_cpuset_count(allowed);
+
+	if (local_rank < 0)
+		local_rank = cape_env_int("OMPI_COMM_WORLD_LOCAL_RANK", -1);
+	if (local_rank < 0)
+		local_rank = cape_env_int("PMI_LOCAL_RANK", -1);
+	if (local_rank < 0)
+		local_rank = cape_env_int("MV2_COMM_WORLD_LOCAL_RANK", -1);
+	if (cpus_per_rank <= 0)
+		cpus_per_rank = cape_env_int("SLURM_CPUS_PER_TASK", -1);
+	if (cpus_per_rank <= 0)
+		local_size = cape_env_int("SLURM_NTASKS_PER_NODE", -1);
+	if (cpus_per_rank <= 0 && local_size < 0)
+		local_size = cape_env_int("SLURM_TASKS_PER_NODE", -1);
+	if (cpus_per_rank <= 0 && local_size < 0)
+		local_size = cape_env_int("OMPI_COMM_WORLD_LOCAL_SIZE", -1);
+	if (cpus_per_rank <= 0 && local_size < 0)
+		local_size = cape_env_int("PMI_LOCAL_SIZE", -1);
+	if (cpus_per_rank <= 0 && local_size < 0)
+		local_size = cape_env_int("PMIX_LOCAL_SIZE", -1);
+	if (cpus_per_rank <= 0 && local_size < 0)
+		local_size = cape_env_int("MV2_COMM_WORLD_LOCAL_SIZE", -1);
+	if (cpus_per_rank <= 0 && local_size > 0)
+		cpus_per_rank = allowed_count / local_size;
+
+	CPU_ZERO(out);
+	if (local_rank >= 0 && cpus_per_rank > 0 &&
+	    allowed_count >= (local_rank + 1) * cpus_per_rank) {
+		int i;
+		for (i = 0; i < cpus_per_rank; ++i) {
+			int cpu = cape_cpuset_nth(allowed,
+						  local_rank * cpus_per_rank + i);
+			if (cpu >= 0)
+				CPU_SET(cpu, out);
+		}
+	}
+
+	if (cape_cpuset_count(out) == 0)
+		*out = *allowed;
+}
+
+static int cape_apply_affinity(int monitor_process)
+{
+	cpu_set_t allowed, rank_set, target, parsed;
+	const char *role = monitor_process ? "monitor" : "child";
+	const char *monitor_env;
+	const char *child_env;
+	int monitor_cpu;
+
+	if (sched_getaffinity(0, sizeof(allowed), &allowed) != 0) {
+		perror("sched_getaffinity");
+		return 1;
+	}
+
+	cape_default_rank_cpuset(&allowed, &rank_set);
+
+	monitor_env = getenv("CAPE_MONITOR_CORE");
+	if (monitor_env == NULL || monitor_env[0] == '\0')
+		monitor_env = getenv("CAPE_MANAGEMENT_CORE");
+	if (monitor_env != NULL && monitor_env[0] != '\0') {
+		if (cape_parse_cpu_list(monitor_env,
+					&allowed, &parsed) != 0) {
+			fprintf(stderr,
+				"CAPE affinity: invalid/unsupported monitor CPU list: %s\n",
+				monitor_env);
+			return 1;
+		}
+		monitor_cpu = cape_cpuset_first(&parsed);
+	} else {
+		monitor_cpu = cape_cpuset_first(&rank_set);
+	}
+	if (monitor_cpu < 0)
+		return 1;
+
+	CPU_ZERO(&target);
+	if (monitor_process) {
+		CPU_SET(monitor_cpu, &target);
+	} else {
+		child_env = getenv("CAPE_CHILD_CORES");
+		if (child_env == NULL || child_env[0] == '\0')
+			child_env = getenv("CAPE_COMPUTE_CORES");
+		if (child_env == NULL || child_env[0] == '\0')
+			child_env = getenv("CAPE_APP_CORES");
+		if (child_env != NULL && child_env[0] != '\0') {
+			if (cape_parse_cpu_list(child_env, &allowed, &target) != 0) {
+				fprintf(stderr,
+					"CAPE affinity: invalid/unsupported child CPU list: %s\n",
+					child_env);
+				return 1;
+			}
+		} else {
+			target = rank_set;
+			CPU_CLR(monitor_cpu, &target);
+			if (cape_cpuset_count(&target) == 0)
+				target = rank_set;
+		}
+	}
+
+	if (sched_setaffinity(0, sizeof(target), &target) != 0) {
+		fprintf(stderr, "CAPE affinity: failed to pin %s: %s\n",
+			role, strerror(errno));
+		return 1;
+	}
+
+	return 0;
 }
 
 static int read_remote_memory(pid_t pid, unsigned long remote_addr, void *local_buf,
@@ -1340,16 +1553,6 @@ static unsigned long long cape_ucx_wait(void *req, size_t expect_len,
     while (!r->completed) {
         unsigned events = ucp_worker_progress(ucp_worker);
         CAPE_PROFILE_INC(ucx_progress_calls);
-        if (events == 0) {
-            CAPE_PROFILE_INC(ucx_progress_idle_calls);
-            if (++idle_iters >= 1000000) {
-                sched_yield();
-                idle_iters = 0;
-            }
-        } else {
-            CAPE_PROFILE_INC(ucx_progress_active_calls);
-            idle_iters = 0;
-        }
     }
 #ifdef CAPE_PROFILE
     unsigned long long wait_ns = cape_profile_elapsed_ns(wait_start_ns);
@@ -1938,26 +2141,6 @@ static void cape_ucx_init(void)
 #endif
 
     ucp_worker_release_address(ucp_worker, local_addr);
-
-    /* Diagnostic: dump the transport actually selected so we can tell at
-     * a glance whether RDMA was picked or UCX silently fell back to TCP.
-     * Print on EVERY rank with a prefix — SLURM may write each rank's
-     * stderr to a different file (--error=...%t.err), and rank 0's file
-     * is easy to miss. Suppress with CAPE_UCX_QUIET=1. */
-    if (getenv("CAPE_UCX_QUIET") == NULL && num_nodes > 1) {
-        int peer = (node == 0) ? 1 : 0;
-        fprintf(stdout, "[CAPE-UCX-DIAG rank=%lu] init reached diagnostic; peer=%d follows\n",
-                node, peer);
-        fflush(stdout);
-        ucp_worker_print_info(ucp_worker, stdout);
-        ucp_ep_print_info(ucp_endpoints[peer], stdout);
-        fprintf(stdout, "[CAPE-UCX-DIAG rank=%lu] end of dump\n", node);
-        fflush(stdout);
-    } else {
-        fprintf(stdout, "[CAPE-UCX-DIAG rank=%lu] init complete (diag suppressed: quiet=%s nodes=%d)\n",
-                node, getenv("CAPE_UCX_QUIET") ? "1" : "0", num_nodes);
-        fflush(stdout);
-    }
 }
 
 /* Finalize UCX (close endpoints, destroy worker, cleanup context) */
@@ -2056,37 +2239,31 @@ int main(int argc, char * argv[]){
 	}
 
 
-	//fork a process to run CAPE program
 	switch ( child_id = fork ( ) ) {
-		case -1 :	/* Error */
+		case -1 :
 			perror ( "fork" ) ;
 			return 1 ;
-		case 0 :	/* Child */
+		case 0 :	
 			close(control_pair[0]);
 			snprintf(control_fd_text, sizeof(control_fd_text), "%d", control_pair[1]);
 			setenv(CAPE_DICKPT_ENV_SOCK_FD, control_fd_text, 1);
-			/* Disable ASLR before exec so the app's globals (bss/data/heap/
-			 * mmap) land at identical VAs on every rank. The personality
-			 * flag persists across execve, so the app sees a non-randomized
-			 * address space without needing to re-exec itself. */
+			if (cape_apply_affinity(0) != 0)
+				return 2;
 			{
+				//aslr disable
 				int _p = personality(0xffffffff);
 				if (_p >= 0 && !(_p & ADDR_NO_RANDOMIZE))
 					personality((unsigned long)_p | ADDR_NO_RANDOMIZE);
 			}
-			ptrace ( PTRACE_TRACEME, NULL, NULL, NULL ) ; //This process will be traced
+			ptrace ( PTRACE_TRACEME, NULL, NULL, NULL );
 			execv ( exec_file , &argv[1] );
 			perror (exec_file) ;
 			return 2 ;
-		default :	/* Parent */
+		default :
 			control_fd = control_pair[0];
 			close(control_pair[1]);
-			/* Initialise UCX in the parent AFTER the fork. Doing it before
-			 * the fork left UCX's memory-registration cache pointing at
-			 * pre-fork physical pages that get broken by COW the first
-			 * time we write to a checkpoint buffer, forcing UCX onto a
-			 * slow per-send memcpy fallback (~20× slowdown vs cape.c).
-			 * Only the parent talks UCX; the child execs the app. */
+			if (cape_apply_affinity(1) != 0)
+				return 1;
 			cape_ucx_init();
 			break;
 	}
