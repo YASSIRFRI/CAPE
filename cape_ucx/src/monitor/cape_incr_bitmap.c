@@ -3554,10 +3554,10 @@ int ucc_allgatherv_allreduce(void)
     ucc_coll_req_h  req;
     uint64_t        my_size_u64;
     uint64_t       *sizes      = NULL;
-    uint64_t       *counts     = NULL;
-    uint64_t       *displs     = NULL;
+    ucc_count_t    *counts     = NULL;
+    ucc_aint_t     *displs     = NULL;
     unsigned char  *recv_buf   = NULL;
-    uint64_t        total_recv = 0;
+    size_t          total_recv = 0;
     int             rc         = 0;
     int             i;
 
@@ -3604,9 +3604,9 @@ int ucc_allgatherv_allreduce(void)
 
     /* Step 2: build displacements + total recv length. */
     for (i = 0; i < num_nodes; ++i) {
-        counts[i] = sizes[i];
-        displs[i] = total_recv;
-        total_recv += sizes[i];
+        counts[i] = (ucc_count_t)sizes[i];
+        displs[i] = (ucc_aint_t)total_recv;
+        total_recv += (size_t)sizes[i];
     }
 
     if (total_recv == 0)
@@ -3627,8 +3627,8 @@ int ucc_allgatherv_allreduce(void)
     args.src.info.datatype     = UCC_DT_UINT8;
     args.src.info.mem_type     = UCC_MEMORY_TYPE_HOST;
     args.dst.info_v.buffer        = recv_buf;
-    args.dst.info_v.counts        = (ucc_count_t *)counts;
-    args.dst.info_v.displacements = (ucc_aint_t  *)displs;
+    args.dst.info_v.counts        = counts;
+    args.dst.info_v.displacements = displs;
     args.dst.info_v.datatype      = UCC_DT_UINT8;
     args.dst.info_v.mem_type      = UCC_MEMORY_TYPE_HOST;
 
@@ -3650,10 +3650,13 @@ int ucc_allgatherv_allreduce(void)
 
     /* Step 4: merge every peer's chunk into our total_ckpt_stream. Our
      * own contribution is already in total_ckpt_stream — skip it. */
+    {
+    size_t off = 0;
     for (i = 0; i < num_nodes; ++i) {
         size_t         sz  = (size_t)sizes[i];
-        unsigned char *ptr = recv_buf + (size_t)displs[i];
+        unsigned char *ptr = recv_buf + off;
         FILE          *st;
+        off += sz;
 
         if (i == (int)node || sz == 0)
             continue;
@@ -3674,6 +3677,7 @@ int ucc_allgatherv_allreduce(void)
 
         if (rc != 0)
             goto out;
+    }
     }
 
 out:
