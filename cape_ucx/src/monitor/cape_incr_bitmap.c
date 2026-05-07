@@ -3655,9 +3655,9 @@ int ucc_allgatherv_allreduce(void)
         goto out;
     }
 
-    fprintf(stderr,
-            "[CAPE-AGV node=%lu] my_size=%zu total_recv=%zu",
-            node, (size_t)total_ckpt_size, total_recv);
+    //fprintf(stderr,
+            //"[CAPE-AGV node=%lu] my_size=%zu total_recv=%zu",
+            //node, (size_t)total_ckpt_size, total_recv);
     for (i = 0; i < num_nodes; ++i)
         fprintf(stderr, " s[%d]=%llu", i, (unsigned long long)sizes[i]);
     fprintf(stderr, "\n");
@@ -3681,11 +3681,11 @@ int ucc_allgatherv_allreduce(void)
 
         {
             uint32_t fp = 0; size_t k;
-            for (k = 0; k < sz && k < 64; ++k) fp = fp * 31u + ptr[k];
-            fprintf(stderr,
-                    "[CAPE-AGV node=%lu] merging i=%d sz=%zu fp64=%08x\n",
-                    node, i, sz, fp);
-            fflush(stderr);
+            //for (k = 0; k < sz && k < 64; ++k) fp = fp * 31u + ptr[k];
+            //fprintf(stderr,
+                    //"[CAPE-AGV node=%lu] merging i=%d sz=%zu fp64=%08x\n",
+                    //node, i, sz, fp);
+            //fflush(stderr);
         }
         st = fmemopen(ptr, sz, "rb");
         if (st == NULL) {
@@ -3694,10 +3694,10 @@ int ucc_allgatherv_allreduce(void)
         }
         rc = merge_external_checkpoint(st, ptr, sz);
         fclose(st);
-        fprintf(stderr,
-                "[CAPE-AGV node=%lu] post-merge i=%d total_ckpt_size=%zu rc=%d\n",
-                node, i, total_ckpt_size, rc);
-        fflush(stderr);
+        //fprintf(stderr,
+                //"[CAPE-AGV node=%lu] post-merge i=%d total_ckpt_size=%zu rc=%d\n",
+                //node, i, total_ckpt_size, rc);
+        //fflush(stderr);
 
         CAPE_PROFILE_ADD_NS(allreduce_total_ns, step_start_ns);
         CAPE_PROFILE_INC(allreduce_steps);
