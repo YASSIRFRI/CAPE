@@ -182,7 +182,7 @@ dickpt_monitor:
 
 dickpt_bitmap_monitor:
 	@mkdir -p $(EXE_FOLDER)
-	$(CC) -w $(CFLAGS) $(DICKPT_LD_PREFIX) $(C_FOLDER)/monitor/cape_incr_bitmap.c -o $(EXE_FOLDER)/cape_dickpt_bitmap_monitor $(LDFLAGS)
+	$(CC) -w $(CFLAGS) $(UCC_FLAGS) $(DICKPT_LD_PREFIX) $(C_FOLDER)/monitor/cape_incr_bitmap.c -o $(EXE_FOLDER)/cape_dickpt_bitmap_monitor $(LDFLAGS) $(UCC_LINK)
 
 dickpt_bitmap_master_slave_monitor:
 	@mkdir -p $(EXE_FOLDER)

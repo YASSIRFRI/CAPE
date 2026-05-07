@@ -182,3 +182,398 @@ ucc_collective_finalize operation releases all resources associated with the col
 
 Returns
 Error code as defined by ucc_status_t
+
+
+
+Data Structures
+struct  	ucc_reduce_cb_params
+ 	Descriptor of user-defined reduction callback. More...
+ 
+struct  	ucc_generic_dt_ops
+ 	UCC generic data type descriptor. More...
+ 
+struct  	ucc_generic_dt_ops.reduce
+ 	User-defined reduction callback. More...
+ 
+Typedefs
+typedef uint64_t 	ucc_datatype_t
+ 	Enumeration representing the UCC library's datatype. More...
+ 
+typedef struct ucc_reduce_cb_params 	ucc_reduce_cb_params_t
+ 	Descriptor of user-defined reduction callback. More...
+ 
+typedef struct ucc_generic_dt_ops 	ucc_generic_dt_ops_t
+ 	UCC generic data type descriptor. More...
+ 
+Enumerations
+enum  	ucc_generic_dt_ops_field { UCC_GENERIC_DT_OPS_FIELD_FLAGS = UCC_BIT(0) }
+ 
+enum  	ucc_generic_dt_ops_flags_t {
+  UCC_GENERIC_DT_OPS_FLAG_CONTIG = UCC_BIT(0) ,
+  UCC_GENERIC_DT_OPS_FLAG_REDUCE = UCC_BIT(1)
+}
+ 	Flags that can be specified for generic datatype. More...
+ 
+enum  	ucc_dt_type_t {
+  UCC_DATATYPE_PREDEFINED = 0 ,
+  UCC_DATATYPE_GENERIC = UCC_BIT(0) ,
+  UCC_DATATYPE_SHIFT = 3 ,
+  UCC_DATATYPE_CLASS_MASK = UCC_MASK(UCC_DATATYPE_SHIFT)
+}
+ 	Helper enum for generic/predefined datatype representation. More...
+ 
+Functions
+ucc_status_t 	ucc_dt_create_generic (const ucc_generic_dt_ops_t *ops, void *context, ucc_datatype_t *datatype_p)
+ 	Create a generic datatype. More...
+ 
+void 	ucc_dt_destroy (ucc_datatype_t datatype)
+ 	Destroy generic datatype. More...
+ 
+Variables
+void *(* 	ucc_generic_dt_ops::start_pack )(void *context, const void *buffer, size_t count)
+ 	Start a packing request. More...
+ 
+void *(* 	ucc_generic_dt_ops::start_unpack )(void *context, void *buffer, size_t count)
+ 	Start an unpacking request. More...
+ 
+size_t(* 	ucc_generic_dt_ops::packed_size )(void *state)
+ 	Get the total size of packed data. More...
+ 
+size_t(* 	ucc_generic_dt_ops::pack )(void *state, size_t offset, void *dest, size_t max_length)
+ 	Pack data. More...
+ 
+ucc_status_t(* 	ucc_generic_dt_ops::unpack )(void *state, size_t offset, const void *src, size_t length)
+ 	Unpack data. More...
+ 
+void(* 	ucc_generic_dt_ops::finish )(void *state)
+ 	Finish packing/unpacking. More...
+ 
+struct {
+ucc_status_t(* 	cb )(const ucc_reduce_cb_params_t *params)
+ 
+void * 	cb_ctx
+ 
+} 	ucc_generic_dt_ops::reduce
+ 	User-defined reduction callback. More...
+ 
+Detailed Description
+Datatypes data-structures and functions
+
+Data Structure Documentation
+◆ ucc_reduce_cb_params
+struct ucc_reduce_cb_params
+This structure is the argument to the reduce.cb callback. It must implement the reduction of n_vectors + 1 data vectors each containing "count" elements. First vector is "src1", other n_vectors have start address v_j = src2 + count * dt_extent * stride * j. The result is stored in dst, so that dst[i] = src1[i] + v0[i] + v1[i] + ... +v_nvectors[i], for i in [0:count), where "+" represents user-defined reduction of 2 elements
+
+Data Fields
+uint64_t	mask	
+void *	src1	
+void *	src2	
+void *	dst	
+size_t	n_vectors	
+size_t	count	
+size_t	stride	
+ucc_dt_generic_t *	dt	
+void *	cb_ctx	
+Typedef Documentation
+◆ ucc_datatype_t
+typedef uint64_t ucc_datatype_t
+Description
+
+ucc_datatype_t represents the datatypes supported by the UCC library’s collective and reduction operations. The predefined operations are signed and unsigned integers of various sizes, float 16, 32, and 64, and user-defined datatypes. User-defined datatypes are created using ucc_dt_create_generic interface and can support user-defined reduction operations. Predefined reduction operations can be used only with predefined datatypes.
+
+◆ ucc_reduce_cb_params_t
+typedef struct ucc_reduce_cb_params ucc_reduce_cb_params_t
+This structure is the argument to the reduce.cb callback. It must implement the reduction of n_vectors + 1 data vectors each containing "count" elements. First vector is "src1", other n_vectors have start address v_j = src2 + count * dt_extent * stride * j. The result is stored in dst, so that dst[i] = src1[i] + v0[i] + v1[i] + ... +v_nvectors[i], for i in [0:count), where "+" represents user-defined reduction of 2 elements
+
+◆ ucc_generic_dt_ops_t
+typedef struct ucc_generic_dt_ops ucc_generic_dt_ops_t
+This structure provides a generic datatype descriptor that is used to create user-defined datatypes.
+
+Enumeration Type Documentation
+◆ ucc_generic_dt_ops_field
+enum ucc_generic_dt_ops_field
+Enumerator
+UCC_GENERIC_DT_OPS_FIELD_FLAGS 	
+◆ ucc_generic_dt_ops_flags_t
+enum ucc_generic_dt_ops_flags_t
+Enumerator
+UCC_GENERIC_DT_OPS_FLAG_CONTIG 	
+If set, the created datatype represents a contiguous memory region with the size specified in ucc_generic_dt_ops::contig_size field of ucc_generic_dt_ops
+
+UCC_GENERIC_DT_OPS_FLAG_REDUCE 	
+If set, the created datatype has user-defined reduction operation associated with it. reduce.cb and reduce.ctx fields of ucc_generic_dt_ops must be initialized. Collective operations that involve reduction (allreduce, reduce, reduce_scatter/v) can use user-defined data-types only when this flag is set.
+
+◆ ucc_dt_type_t
+enum ucc_dt_type_t
+Enumerator
+UCC_DATATYPE_PREDEFINED 	
+UCC_DATATYPE_GENERIC 	
+UCC_DATATYPE_SHIFT 	
+UCC_DATATYPE_CLASS_MASK 	
+Function Documentation
+◆ ucc_dt_create_generic()
+ucc_status_t ucc_dt_create_generic	(	const ucc_generic_dt_ops_t * 	ops,
+void * 	context,
+ucc_datatype_t * 	datatype_p 
+)		
+This routine creates a generic datatype object. The generic datatype is described by the ops object which provides a table of routines defining the operations for generic datatype manipulation. Typically, generic datatypes are used for integration with datatype engines provided with MPI implementations (MPICH, Open MPI, etc). The application is responsible for releasing the datatype_p object using ucc_dt_destroy() routine.
+
+Parameters
+[in]	ops	Generic datatype function table as defined by ucc_generic_dt_ops_t .
+[in]	context	Application defined context passed to this routine. The context is passed as a parameter to the routines in the ops table.
+[out]	datatype_p	A pointer to datatype object.
+Returns
+Error code as defined by ucc_status_t
+◆ ucc_dt_destroy()
+void ucc_dt_destroy	(	ucc_datatype_t 	datatype	)	
+Variable Documentation
+◆ start_pack
+void*(* ucc_generic_dt_ops::start_pack) (void *context, const void *buffer, size_t count)
+The pointer refers to application defined start-to-pack routine.
+
+Parameters
+[in]	context	User-defined context.
+[in]	buffer	Buffer to pack.
+[in]	count	Number of elements to pack into the buffer.
+Returns
+A custom state that is passed to the subsequent pack() routine.
+◆ start_unpack
+void*(* ucc_generic_dt_ops::start_unpack) (void *context, void *buffer, size_t count)
+The pointer refers to application defined start-to-unpack routine.
+
+Parameters
+[in]	context	User-defined context.
+[in]	buffer	Buffer to unpack to.
+[in]	count	Number of elements to unpack in the buffer.
+Returns
+A custom state that is passed later to the subsequent unpack() routine.
+◆ packed_size
+size_t(* ucc_generic_dt_ops::packed_size) (void *state)
+The pointer refers to user defined routine that returns the size of data in a packed format.
+
+Parameters
+[in]	state	State as returned by start_pack() routine.
+Returns
+The size of the data in a packed form.
+◆ pack
+size_t(* ucc_generic_dt_ops::pack) (void *state, size_t offset, void *dest, size_t max_length)
+The pointer refers to application defined pack routine.
+
+Parameters
+[in]	state	State as returned by start_pack() routine.
+[in]	offset	Virtual offset in the output stream.
+[in]	dest	Destination buffer to pack the data.
+[in]	max_length	Maximum length to pack.
+Returns
+The size of the data that was written to the destination buffer. Must be less than or equal to max_length.
+◆ unpack
+ucc_status_t(* ucc_generic_dt_ops::unpack) (void *state, size_t offset, const void *src, size_t length)
+The pointer refers to application defined unpack routine.
+
+Parameters
+[in]	state	State as returned by start_unpack() routine.
+[in]	offset	Virtual offset in the input stream.
+[in]	src	Source to unpack the data from.
+[in]	length	Length to unpack.
+Returns
+UCC_OK or an error if unpacking failed.
+◆ finish
+void(* ucc_generic_dt_ops::finish) (void *state)
+The pointer refers to application defined finish routine.
+
+Parameters
+[in]	state	State as returned by start_pack() and start_unpack() routines.
+◆ 
+struct { ... } ucc_generic_dt_ops::reduce
+The pointer refers to user-defined reduction routine.
+
+Parameters
+[in]	params	reduction descriptor
+◆ 
+ucc_status_t(* { ... } ::cb) (const ucc_reduce_cb_params_t *params)
+◆ 
+void* { ... } ::cb_ctx
+
+Functions
+ucc_status_t 	ucc_ee_create (ucc_team_h team, const ucc_ee_params_t *params, ucc_ee_h *ee)
+ 	The routine creates the execution context for collective operations. More...
+ 
+ucc_status_t 	ucc_ee_destroy (ucc_ee_h ee)
+ 	The routine destroys the execution context created for collective operations. More...
+ 
+ucc_status_t 	ucc_ee_get_event (ucc_ee_h ee, ucc_ev_t **ev)
+ 	The routine gets the event from the event queue. More...
+ 
+ucc_status_t 	ucc_ee_ack_event (ucc_ee_h ee, ucc_ev_t *ev)
+ 	The routine acks the events from the event queue. More...
+ 
+ucc_status_t 	ucc_ee_set_event (ucc_ee_h ee, ucc_ev_t *ev)
+ 	The routine to set the event to the tail of the queue. More...
+ 
+ucc_status_t 	ucc_ee_wait (ucc_ee_h ee, ucc_ev_t *ev)
+ 	The routine blocks the calling thread until there is an event on the queue. More...
+ 
+ucc_status_t 	ucc_collective_triggered_post (ucc_ee_h ee, ucc_ev_t *ee_event)
+ 	The routine posts the collective operation on the execution engine, which is launched on the event. More...
+ 
+Detailed Description
+Event-driven Collective Execution
+
+Function Documentation
+◆ ucc_ee_create()
+ucc_status_t ucc_ee_create	(	ucc_team_h 	team,
+const ucc_ee_params_t * 	params,
+ucc_ee_h * 	ee 
+)		
+Parameters
+[in]	team	Team handle
+[in]	params	User provided params to customize the execution engine
+[out]	ee	Execution engine handle
+Description
+
+ucc_ee_create creates the execution engine. It enables event-driven collective execution. ucc_ee_params_t allows the execution engine to be configured to abstract either GPU and CPU threads. The execution engine is created and coupled with the team. There can be many execution engines coupled to the team. However, attaching the same execution engine to multiple teams is not allowed. The execution engine is created after the team is created and destroyed before the team is destroyed. It is the user's responsibility to destroy the execution engines before the team. If the team is destroyed before the execution engine is destroyed, the result is undefined.
+
+Returns
+Error code as defined by ucc_status_t
+◆ ucc_ee_destroy()
+ucc_status_t ucc_ee_destroy	(	ucc_ee_h 	ee	)	
+Parameters
+[in]	ee	Execution engine handle
+Description
+
+ucc_ee_destroy releases the resources attached with the execution engine and destroys the execution engine. All events and triggered operations related to this ee are invalid after the destroy operation. To avoid race between the creation and destroying the execution engine, for a given ee, the ucc_ee_create and ucc_ee_destroy must be invoked from the same thread.
+
+Returns
+Error code as defined by ucc_status_t
+◆ ucc_ee_get_event()
+ucc_status_t ucc_ee_get_event	(	ucc_ee_h 	ee,
+ucc_ev_t ** 	ev 
+)		
+Parameters
+[in]	ee	Execution engine handle
+[out]	ev	Event structure fetched from the event queue
+Description
+
+ucc_ee_get_event fetches the events from the execution engine. If there are no events posted on the ee, it returns immediately without waiting for events. All events must be acknowledged using the ucc_ee_ack_event interface. The event acknowledged is destroyed by the library. An event fetched with ucc_ee_get_event but not acknowledged might consume resources in the library.
+
+Returns
+Error code as defined by ucc_status_t
+◆ ucc_ee_ack_event()
+ucc_status_t ucc_ee_ack_event	(	ucc_ee_h 	ee,
+ucc_ev_t * 	ev 
+)		
+Parameters
+[in]	ee	Execution engine handle
+[in]	ev	Event to be acked
+Description
+
+An event acknowledged by the user using ucc_ee_ack_event is destroyed by the library. Any triggered operations on the event should be completed before calling this interface. The behavior is undefined if the user acknowledges the event while waiting on the event or triggering operations on the event.
+
+Returns
+Error code as defined by ucc_status_t
+◆ ucc_ee_set_event()
+ucc_status_t ucc_ee_set_event	(	ucc_ee_h 	ee,
+ucc_ev_t * 	ev 
+)		
+Parameters
+[in]	ee	Execution engine handle
+[in]	ev	Event structure fetched from the event queue
+Description
+
+ucc_ee_set_event sets the event on the execution engine. If the operations are waiting on the event when the user sets the event, the operations are launched. The events created by the user need to be destroyed by the user.
+
+Returns
+Error code as defined by ucc_status_t
+◆ ucc_ee_wait()
+ucc_status_t ucc_ee_wait	(	ucc_ee_h 	ee,
+ucc_ev_t * 	ev 
+)		
+Parameters
+[in]	ee	Execution engine handle
+[out]	ev	Event structure fetched from the event queue
+Description
+
+The user thread invoking the ucc_ee_wait interface is blocked until an event is posted to the execution engine.
+
+Returns
+Error code as defined by ucc_status_t
+◆ ucc_collective_triggered_post()
+ucc_status_t ucc_collective_triggered_post	(	ucc_ee_h 	ee,
+ucc_ev_t * 	ee_event 
+)		
+Parameters
+[in]	ee	Execution engine handle
+[in]	ee_event	Event triggering the post operation
+Description
+
+ucc_collective_triggered_post allow the users to schedule a collective operation that executes in the future when an event occurs on the execution engine. On error, request handle associated with event becomes invalid, user is responsible to call ucc_collective_finalize to free allocated resources.
+
+Returns
+Error code as defined by ucc_status_t
+ucc_team_create_post()
+ucc_status_t ucc_team_create_post	(	ucc_context_h * 	contexts,
+uint32_t 	num_contexts,
+const ucc_team_params_t * 	team_params,
+ucc_team_h * 	new_team 
+)		
+Parameters
+[in]	contexts	Communication contexts abstracting the resources
+[in]	num_contexts	Number of contexts passed for the create operation
+[in]	team_params	User defined configurations for the team
+[out]	new_team	Team handle
+Description
+
+ucc_team_create_post is a nonblocking collective operation to create the team handle. Overlapping of multiple ucc_team_create_post operations are invalid. The post takes in parameters ucc_context_h and ucc_team_params_t. The ucc_team_params_t provides user configuration to customize the team and, ucc_context_h provides the resources for the team and collectives. The routine returns immediately after posting the operation with the new team handle. However, the team handle is not ready for posting the collective operation. ucc_team_create_test operation is used to learn the status of the new team handle. On error, the team handle will not be created and corresponding error code as defined by ucc_status_t is returned.
+
+Returns
+Error code as defined by ucc_status_t
+◆ ucc_team_create_test()
+ucc_status_t ucc_team_create_test	(	ucc_team_h 	team	)	
+Parameters
+[in]	team	Team handle to test
+Description
+
+ucc_team_create_test routines tests the status of team handle. If required it can progress the communication but cannot block on the communications. On error, the team handle becomes invalid, user is responsible to call ucc_team_destroy to destroy team and free allocated resources.
+
+Returns
+Error code as defined by ucc_status_t
+◆ ucc_team_destroy()
+ucc_status_t ucc_team_destroy	(	ucc_team_h 	team	)	
+Parameters
+[in]	team	Destroy previously created team and release all resources associated with it.
+Description
+
+ucc_team_destroy is a nonblocking collective operation to release all resources associated with the team handle, and destroy the team handle. It is invalid to post a collective operation after the ucc_team_destroy operation. It is invalid to call ucc_team_destroy operation while ucc_team_create_post is in progress. It is the user's responsibility to ensure there is one outstanding ucc_team_create_post or ucc_team_destroy operation is in progress.
+
+Returns
+Error code as defined by ucc_status_t
+◆ ucc_team_get_attr()
+ucc_status_t ucc_team_get_attr	(	ucc_team_h 	team,
+ucc_team_attr_t * 	team_attr 
+)		
+Parameters
+[in]	team	Team handle
+[out]	team_attr	Attributes of the team
+Description
+
+ucc_team_get_attr routine queries the team handle attributes. The attributes of the team handle are described by the team attributes ucc_team_attr_t
+
+Returns
+Error code as defined by ucc_status_t
+◆ ucc_team_create_from_parent()
+ucc_status_t ucc_team_create_from_parent	(	uint64_t 	my_ep,
+uint32_t 	included,
+ucc_team_h 	parent_team,
+ucc_team_h * 	new_team 
+)		
+Parameters
+[in]	my_ep	Endpoint of the process/thread calling the split operation
+[in]	parent_team	Parent team handle from which a new team handle is created
+[in]	included	Variable indicating whether a process/thread participates in the newly created team; value 1 indicates the participation and value 0 indicates otherwise
+[out]	new_team	Pointer to the new team handle
+Description
+
+ucc_team_create_from_parent is a nonblocking collective operation, which creates a new team from the parent team. If a participant intends to participate in the new team, it passes a TRUE value for the "included" parameter. Otherwise, it passes FALSE. The routine returns immediately after the post-operation. To learn the completion of the team create operation, the ucc_team_create_test operation is used.
+
+Returns
+Error code as defined by ucc_status_t

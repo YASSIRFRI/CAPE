@@ -50,6 +50,7 @@
 #include "../include/cape_signal.h"
 
 #include <ucp/api/ucp.h>
+#include <ucc/api/ucc.h>
 #ifdef USE_PMIX
 #include <pmix.h>
 #endif
@@ -1804,6 +1805,7 @@ static void cape_ucx_recv(void *buf, size_t len, int src, uint32_t token)
 #define TAG_SCATTER_SIZE  0x05
 #define TAG_SCATTER_DATA  0x06
 #define TAG_ALLREDUCE_BASE 0x100
+#define TAG_UCC_OOB_BASE   0x200
 
 static const char *cape_ucx_bootstrap_id(void)
 {
@@ -2265,6 +2267,7 @@ int main(int argc, char * argv[]){
 			if (cape_apply_affinity(1) != 0)
 				return 1;
 			cape_ucx_init();
+			cape_ucc_init();
 			break;
 	}
 	
@@ -2461,6 +2464,7 @@ int main(int argc, char * argv[]){
 	if (control_fd >= 0)
 		close(control_fd);
 	free(tracked_ranges);
+	cape_ucc_finalize();
 	cape_ucx_finalize();
 	cape_profile_report();
 	return 0;
@@ -3370,6 +3374,314 @@ int ring_allreduce(){
 }
 
 
+/* =========================================================================
+ * UCC state + OOB allgather over UCX tags
+ * ========================================================================= */
+static ucc_lib_h     cape_ucc_lib;
+static ucc_context_h cape_ucc_context;
+static ucc_team_h    cape_ucc_team;
+static int           cape_ucc_ready;
+static uint32_t      cape_ucc_oob_seq;
+
+static ucc_status_t cape_ucc_oob_allgather(void *sbuf, void *rbuf,
+                                           size_t msglen, void *coll_info,
+                                           void **req)
+{
+    unsigned char *dst = (unsigned char *)rbuf;
+    uint32_t       seq;
+    int            i;
+
+    (void)coll_info;
+
+    seq = __sync_fetch_and_add(&cape_ucc_oob_seq, 1u);
+
+    if (msglen > 0)
+        memcpy(dst + (size_t)node * msglen, sbuf, msglen);
+
+    for (i = 1; i < num_nodes && msglen > 0; ++i) {
+        int      dest = (int)((node + (unsigned long)i) % (unsigned long)num_nodes);
+        int      src  = (int)((node + (unsigned long)num_nodes - (unsigned long)i)
+                              % (unsigned long)num_nodes);
+        uint32_t tok  = TAG_UCC_OOB_BASE
+                      | ((seq & 0x7ffu) << 8)
+                      | ((uint32_t)i & 0xffu);
+
+        cape_ucx_sendrecv_probe(sbuf,                       msglen, dest,
+                                dst + (size_t)src * msglen, msglen, src,
+                                tok);
+    }
+
+    *req = (void *)0x1;
+    return UCC_OK;
+}
+
+static ucc_status_t cape_ucc_oob_allgather_test(void *req)
+{
+    (void)req;
+    return UCC_OK;
+}
+
+static ucc_status_t cape_ucc_oob_allgather_free(void *req)
+{
+    (void)req;
+    return UCC_OK;
+}
+
+static void cape_ucc_fill_oob(ucc_oob_coll_t *oob)
+{
+    memset(oob, 0, sizeof(*oob));
+    oob->allgather = cape_ucc_oob_allgather;
+    oob->req_test  = cape_ucc_oob_allgather_test;
+    oob->req_free  = cape_ucc_oob_allgather_free;
+    oob->coll_info = NULL;
+    oob->n_oob_eps = num_nodes;
+    oob->oob_ep    = node;
+}
+
+static int cape_ucc_check(ucc_status_t status, const char *what)
+{
+    if (status == UCC_OK)
+        return 0;
+    fprintf(stderr, "CAPE UCC: %s failed: %s\n",
+            what, ucc_status_string(status));
+    return 1;
+}
+
+void cape_ucc_init(void)
+{
+    ucc_lib_config_h     lib_config;
+    ucc_context_config_h ctx_config;
+    ucc_lib_params_t     lib_params;
+    ucc_context_params_t ctx_params;
+    ucc_team_params_t    team_params;
+    ucc_status_t         status;
+
+    if (cape_ucc_ready)
+        return;
+
+    memset(&lib_params, 0, sizeof(lib_params));
+    lib_params.mask        = UCC_LIB_PARAM_FIELD_THREAD_MODE;
+    lib_params.thread_mode = UCC_THREAD_SINGLE;
+
+    if (cape_ucc_check(ucc_lib_config_read(NULL, NULL, &lib_config),
+                       "ucc_lib_config_read"))
+        exit(1);
+    if (cape_ucc_check(ucc_init(&lib_params, lib_config, &cape_ucc_lib),
+                       "ucc_init")) {
+        ucc_lib_config_release(lib_config);
+        exit(1);
+    }
+    ucc_lib_config_release(lib_config);
+
+    memset(&ctx_params, 0, sizeof(ctx_params));
+    ctx_params.mask = UCC_CONTEXT_PARAM_FIELD_OOB;
+    cape_ucc_fill_oob(&ctx_params.oob);
+
+    if (cape_ucc_check(ucc_context_config_read(cape_ucc_lib, NULL, &ctx_config),
+                       "ucc_context_config_read"))
+        exit(1);
+    if (cape_ucc_check(ucc_context_create(cape_ucc_lib, &ctx_params,
+                                          ctx_config, &cape_ucc_context),
+                       "ucc_context_create")) {
+        ucc_context_config_release(ctx_config);
+        exit(1);
+    }
+    ucc_context_config_release(ctx_config);
+
+    memset(&team_params, 0, sizeof(team_params));
+    team_params.mask = UCC_TEAM_PARAM_FIELD_OOB;
+    cape_ucc_fill_oob(&team_params.oob);
+
+    if (cape_ucc_check(ucc_team_create_post(&cape_ucc_context, 1,
+                                            &team_params, &cape_ucc_team),
+                       "ucc_team_create_post"))
+        exit(1);
+    while ((status = ucc_team_create_test(cape_ucc_team)) == UCC_INPROGRESS) {
+        if (cape_ucc_check(ucc_context_progress(cape_ucc_context),
+                           "ucc_context_progress(team_create)"))
+            exit(1);
+    }
+    if (cape_ucc_check(status, "ucc_team_create_test"))
+        exit(1);
+
+    cape_ucc_ready = 1;
+}
+
+void cape_ucc_finalize(void)
+{
+    if (!cape_ucc_ready)
+        return;
+    cape_ucc_check(ucc_team_destroy(cape_ucc_team), "ucc_team_destroy");
+    cape_ucc_check(ucc_context_destroy(cape_ucc_context), "ucc_context_destroy");
+    cape_ucc_check(ucc_finalize(cape_ucc_lib), "ucc_finalize");
+    cape_ucc_team    = NULL;
+    cape_ucc_context = NULL;
+    cape_ucc_lib     = NULL;
+    cape_ucc_ready   = 0;
+}
+
+static int cape_ucc_wait(ucc_coll_req_h req, const char *what)
+{
+    ucc_status_t status;
+    int          rc = 0;
+
+    while ((status = ucc_collective_test(req)) == UCC_INPROGRESS) {
+        if (cape_ucc_check(ucc_context_progress(cape_ucc_context), what)) {
+            rc = 1;
+            break;
+        }
+    }
+    if (rc == 0)
+        rc = cape_ucc_check(status, what);
+    ucc_collective_finalize(req);
+    return rc;
+}
+
+/*----------------------------------------------------------------------
+ * ucc_allgatherv_allreduce(): each rank ships its variable-size
+ * total_ckpt to every other rank via UCC allgatherv, then merges the
+ * received chunks into total_ckpt_stream locally. Replaces hand-rolled
+ * hypercube/ring exchange so UCC can pick the best transport / HW
+ * collective offload.
+ * ---------------------------------------------------------------------
+ */
+int ucc_allgatherv_allreduce(void)
+{
+    ucc_coll_args_t args;
+    ucc_coll_req_h  req;
+    uint64_t        my_size_u64;
+    uint64_t       *sizes      = NULL;
+    uint64_t       *counts     = NULL;
+    uint64_t       *displs     = NULL;
+    unsigned char  *recv_buf   = NULL;
+    uint64_t        total_recv = 0;
+    int             rc         = 0;
+    int             i;
+
+    if (!cape_ucc_ready)
+        cape_ucc_init();
+
+    sizes  = malloc((size_t)num_nodes * sizeof(*sizes));
+    counts = malloc((size_t)num_nodes * sizeof(*counts));
+    displs = malloc((size_t)num_nodes * sizeof(*displs));
+    if (sizes == NULL || counts == NULL || displs == NULL) {
+        rc = 1;
+        goto out;
+    }
+
+    /* Step 1: allgather per-rank sizes. */
+    my_size_u64 = (uint64_t)total_ckpt_size;
+    memset(&args, 0, sizeof(args));
+    args.mask              = 0;
+    args.coll_type         = UCC_COLL_TYPE_ALLGATHER;
+    args.src.info.buffer   = &my_size_u64;
+    args.src.info.count    = 1;
+    args.src.info.datatype = UCC_DT_UINT64;
+    args.src.info.mem_type = UCC_MEMORY_TYPE_HOST;
+    args.dst.info.buffer   = sizes;
+    args.dst.info.count    = (size_t)num_nodes;
+    args.dst.info.datatype = UCC_DT_UINT64;
+    args.dst.info.mem_type = UCC_MEMORY_TYPE_HOST;
+
+    if (cape_ucc_check(ucc_collective_init(&args, &req, cape_ucc_team),
+                       "ucc_collective_init(sizes)")) {
+        rc = 1;
+        goto out;
+    }
+    if (cape_ucc_check(ucc_collective_post(req),
+                       "ucc_collective_post(sizes)")) {
+        ucc_collective_finalize(req);
+        rc = 1;
+        goto out;
+    }
+    if (cape_ucc_wait(req, "ucc_collective_test(sizes)") != 0) {
+        rc = 1;
+        goto out;
+    }
+
+    /* Step 2: build displacements + total recv length. */
+    for (i = 0; i < num_nodes; ++i) {
+        counts[i] = sizes[i];
+        displs[i] = total_recv;
+        total_recv += sizes[i];
+    }
+
+    if (total_recv == 0)
+        goto out;
+
+    recv_buf = malloc((size_t)total_recv);
+    if (recv_buf == NULL) {
+        rc = 1;
+        goto out;
+    }
+
+    /* Step 3: allgatherv variable-size payloads. */
+    memset(&args, 0, sizeof(args));
+    args.mask                  = 0;
+    args.coll_type             = UCC_COLL_TYPE_ALLGATHERV;
+    args.src.info.buffer       = total_ckpt;
+    args.src.info.count        = (size_t)total_ckpt_size;
+    args.src.info.datatype     = UCC_DT_UINT8;
+    args.src.info.mem_type     = UCC_MEMORY_TYPE_HOST;
+    args.dst.info_v.buffer        = recv_buf;
+    args.dst.info_v.counts        = (ucc_count_t *)counts;
+    args.dst.info_v.displacements = (ucc_aint_t  *)displs;
+    args.dst.info_v.datatype      = UCC_DT_UINT8;
+    args.dst.info_v.mem_type      = UCC_MEMORY_TYPE_HOST;
+
+    if (cape_ucc_check(ucc_collective_init(&args, &req, cape_ucc_team),
+                       "ucc_collective_init(allgatherv)")) {
+        rc = 1;
+        goto out;
+    }
+    if (cape_ucc_check(ucc_collective_post(req),
+                       "ucc_collective_post(allgatherv)")) {
+        ucc_collective_finalize(req);
+        rc = 1;
+        goto out;
+    }
+    if (cape_ucc_wait(req, "ucc_collective_test(allgatherv)") != 0) {
+        rc = 1;
+        goto out;
+    }
+
+    /* Step 4: merge every peer's chunk into our total_ckpt_stream. Our
+     * own contribution is already in total_ckpt_stream — skip it. */
+    for (i = 0; i < num_nodes; ++i) {
+        size_t         sz  = (size_t)sizes[i];
+        unsigned char *ptr = recv_buf + (size_t)displs[i];
+        FILE          *st;
+
+        if (i == (int)node || sz == 0)
+            continue;
+
+        CAPE_PROFILE_NS_VAR(step_start_ns);
+        CAPE_PROFILE_NS_START(step_start_ns);
+
+        st = fmemopen(ptr, sz, "rb");
+        if (st == NULL) {
+            rc = 1;
+            goto out;
+        }
+        rc = merge_external_checkpoint(st, ptr, sz);
+        fclose(st);
+
+        CAPE_PROFILE_ADD_NS(allreduce_total_ns, step_start_ns);
+        CAPE_PROFILE_INC(allreduce_steps);
+
+        if (rc != 0)
+            goto out;
+    }
+
+out:
+    free(sizes);
+    free(counts);
+    free(displs);
+    free(recv_buf);
+    return rc;
+}
+
+
 int hypercube_allreduce(){
 	int rc = 0;
 	int i;
@@ -3429,10 +3741,7 @@ int require_allreduce_checkpoint(){
 		return rc;
 	}
 		
-	if (is_power_of_two(num_nodes))
-		rc = hypercube_allreduce();
-	else
-		rc = ring_allreduce();
+	rc = ucc_allgatherv_allreduce();
 	if (rc != 0) {
 		cape_total_release();
 		return rc;
