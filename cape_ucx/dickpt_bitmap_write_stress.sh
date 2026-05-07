@@ -30,7 +30,7 @@ N_LIST=(${N_LIST:-1048576})
 PHASES_LIST=(${PHASES_LIST:-8})
 NODES_LIST=(${NODES_LIST:-4 8 16 32})
 REPS="${REPS:-5}"
-PROFILE="${PROFILE:-1}"
+PROFILE="${PROFILE:-0}"
 
 module purge
 module load GCCcore/14.2.0
