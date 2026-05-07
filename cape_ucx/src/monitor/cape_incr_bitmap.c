@@ -2146,6 +2146,9 @@ static void cape_ucx_init(void)
 }
 
 /* Finalize UCX (close endpoints, destroy worker, cleanup context) */
+void cape_ucc_init(void);
+void cape_ucc_finalize(void);
+
 static void cape_ucx_finalize(void)
 {
     ucp_request_param_t close_param;
