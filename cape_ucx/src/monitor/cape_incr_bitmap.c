@@ -3618,14 +3618,19 @@ int ucc_allgatherv_allreduce(void)
         goto out;
     }
 
-    /* Step 3: allgatherv variable-size payloads. */
+    /* Pre-stage our contribution into the local slot; we use IN_PLACE so
+     * UCC won't copy from a separate src buffer. Many UCC TLs assume the
+     * local contribution is already at recv_buf + displs[my_rank] and
+     * forward zeros from there if you pass a non-in-place src. */
+    if (total_ckpt_size > 0)
+        memcpy(recv_buf + (size_t)displs[node], total_ckpt,
+               (size_t)total_ckpt_size);
+
+    /* Step 3: allgatherv variable-size payloads (in-place). */
     memset(&args, 0, sizeof(args));
-    args.mask                  = 0;
+    args.mask                  = UCC_COLL_ARGS_FIELD_FLAGS;
+    args.flags                 = UCC_COLL_ARGS_FLAG_IN_PLACE;
     args.coll_type             = UCC_COLL_TYPE_ALLGATHERV;
-    args.src.info.buffer       = total_ckpt;
-    args.src.info.count        = (size_t)total_ckpt_size;
-    args.src.info.datatype     = UCC_DT_UINT8;
-    args.src.info.mem_type     = UCC_MEMORY_TYPE_HOST;
     args.dst.info_v.buffer        = recv_buf;
     args.dst.info_v.counts        = counts;
     args.dst.info_v.displacements = displs;
