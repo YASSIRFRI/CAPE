@@ -161,6 +161,22 @@ static void apply_local_updates(unsigned long *grid, size_t grid_cells,
 	}
 }
 
+static void ensure_local_pages_resident(unsigned long *grid, size_t grid_cells,
+					unsigned int rank, unsigned long updates,
+					int rep, int phase)
+{
+	uint64_t rng = seed_for(rank, rep, phase);
+	unsigned long u;
+
+	for (u = 0; u < updates; u++) {
+		uint64_t idx = next_rand64(&rng) % (uint64_t)grid_cells;
+		volatile unsigned long *cell = &grid[idx];
+
+		(void)update_value(&rng);
+		*cell = *cell;
+	}
+}
+
 static int verify_phase(const unsigned long *grid, uint64_t *indices,
 			unsigned long num_nodes, unsigned long node,
 			unsigned long updates, size_t grid_cells,
@@ -290,6 +306,9 @@ int main(int argc, char *argv[])
 				have_dirty = 0;
 			}
 
+			ensure_local_pages_resident(grid, grid_cells,
+						    (unsigned int)node,
+						    updates, rep, p);
 			dickpt_start_ckpt();
 			apply_local_updates(grid, grid_cells, (unsigned int)node,
 					    updates, rep, p);
