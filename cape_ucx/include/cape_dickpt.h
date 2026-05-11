@@ -115,6 +115,21 @@ static inline void dickpt_declare_reduction(void *addr, int datatype, int op)
     __asm__ volatile ("int $3" : "+r"(_val), "+r"(_code) : : "memory");
 }
 
+static inline void dickpt_declare_reduction_region(void *addr, size_t len,
+                                                   int datatype, int op)
+{
+    register unsigned long _addr asm("rax") = (unsigned long)addr;
+    register unsigned long _len asm("rsi") = (unsigned long)len;
+    register unsigned long _code asm("rdx") =
+        (unsigned long)S_DECLARE_REDUCTION_REGION
+        | ((unsigned long)(unsigned char)datatype << 32)
+        | ((unsigned long)(unsigned char)op       << 40);
+    __asm__ volatile ("int $3"
+                      : "+r"(_addr), "+r"(_len), "+r"(_code)
+                      :
+                      : "memory");
+}
+
 /* Send values to monitor */
 static inline void dickpt_send_data_start(unsigned long addr) { __cape_signal_val(95, addr); }
 static inline void dickpt_send_num_jobs(unsigned long n)      { __cape_signal_val(S_APP_SEND_NUMBER_OF_JOBS, n); }

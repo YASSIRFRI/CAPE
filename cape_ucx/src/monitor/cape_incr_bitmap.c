@@ -243,11 +243,30 @@ static unsigned reduction_size(unsigned char dt)
 	}
 }
 
+static int reduction_matches_addr(const struct shared_data *p, unsigned long addr)
+{
+	unsigned int elem_size = reduction_size(p->datatype);
+	unsigned long start = p->addr;
+	unsigned long len = p->len;
+	unsigned long end;
+
+	if (elem_size == 0)
+		return 0;
+	if (len <= elem_size)
+		return p->addr == addr;
+	if (addr < start)
+		return 0;
+	end = start + len;
+	if (end < start || addr + elem_size > end)
+		return 0;
+	return ((addr - start) % elem_size) == 0;
+}
+
 static struct shared_data *lookup_reduction(unsigned long addr)
 {
 	struct shared_data *p;
 	for (p = data_list_head; p != NULL; p = p->next) {
-		if (p->addr != addr)
+		if (!reduction_matches_addr(p, addr))
 			continue;
 		if (p->properties >= D_REDUCTION_SUM &&
 		    p->properties <= D_REDUCTION_XOR)
@@ -2371,12 +2390,42 @@ int main(int argc, char * argv[]){
 						unsigned char dt = (unsigned char)((regs.rdx >> 32) & 0xFFu);
 						unsigned char op = (unsigned char)((regs.rdx >> 40) & 0xFFu);
 						struct shared_data *sd = malloc(sizeof(*sd));
+						if (len_v > UINT_MAX) {
+							fprintf(stderr,
+								"Monitor %ld: reduction range too large: %lu bytes\n",
+								node, len_v);
+							exit(1);
+						}
 						if (sd == NULL) { perror("malloc(shared_data)"); exit(1); }
 						memset(sd, 0, sizeof(*sd));
 						sd->addr = addr_v;
 						sd->datatype = dt;
 						sd->properties = op;
 						sd->len = (unsigned int)reduction_size(dt);
+						sd->level = 0;
+						sd->prev = data_list_tail;
+						sd->next = NULL;
+						if (data_list_tail != NULL)
+							data_list_tail->next = sd;
+						else
+							data_list_head = sd;
+						data_list_tail = sd;
+						break;
+					}
+
+					case S_DECLARE_REDUCTION_REGION: {
+						/* rax = addr; rsi = byte length; rdx high bytes = datatype, op */
+						unsigned long addr_v = regs.rax;
+						unsigned long len_v = regs.rsi;
+						unsigned char dt = (unsigned char)((regs.rdx >> 32) & 0xFFu);
+						unsigned char op = (unsigned char)((regs.rdx >> 40) & 0xFFu);
+						struct shared_data *sd = malloc(sizeof(*sd));
+						if (sd == NULL) { perror("malloc(shared_data)"); exit(1); }
+						memset(sd, 0, sizeof(*sd));
+						sd->addr = addr_v;
+						sd->datatype = dt;
+						sd->properties = op;
+						sd->len = (unsigned int)len_v;
 						sd->level = 0;
 						sd->prev = data_list_tail;
 						sd->next = NULL;
@@ -2836,7 +2885,7 @@ int require_send_checkpoint(){
 	if (node==0){
 		current_job++;
 		ckpt_flag = 1;	
-		
+
 		rc= send_checkpoint(current_node);	
 				
 		if ((current_job % jobs_per_node == 0) || ((unsigned long)current_job >= number_of_jobs))
@@ -3460,4 +3509,3 @@ int require_allreduce_checkpoint(){
 
 	return rc;
 }
-		

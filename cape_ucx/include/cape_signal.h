@@ -60,6 +60,14 @@
  * op when both checkpoints dirty the same word. */
 #define S_DECLARE_REDUCTION 220
 
+/* Declare an entire reduction range to the bitmap DICKPT monitor.
+ * App packs:
+ *   rax = start address
+ *   rsi = range length in bytes
+ *   rdx = S_DECLARE_REDUCTION_REGION | (datatype << 32) | (op << 40)
+ */
+#define S_DECLARE_REDUCTION_REGION 221
+
 //Define datatypes of CAPE
 #define CAPE_CHAR 1 			//  This is the traditional ASCII character that is numbered by integers between 0 and 127.
 #define CAPE_BYTE 3				//  This is an 8-bit positive integer betwee 0 and 255, i.e., a byte.
@@ -97,4 +105,3 @@ struct shared_data{
 	struct shared_data * prev;	
 	struct shared_data * next;
 };
-
