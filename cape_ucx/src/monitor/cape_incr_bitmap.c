@@ -2390,12 +2390,6 @@ int main(int argc, char * argv[]){
 						unsigned char dt = (unsigned char)((regs.rdx >> 32) & 0xFFu);
 						unsigned char op = (unsigned char)((regs.rdx >> 40) & 0xFFu);
 						struct shared_data *sd = malloc(sizeof(*sd));
-						if (len_v > UINT_MAX) {
-							fprintf(stderr,
-								"Monitor %ld: reduction range too large: %lu bytes\n",
-								node, len_v);
-							exit(1);
-						}
 						if (sd == NULL) { perror("malloc(shared_data)"); exit(1); }
 						memset(sd, 0, sizeof(*sd));
 						sd->addr = addr_v;
@@ -2420,6 +2414,12 @@ int main(int argc, char * argv[]){
 						unsigned char dt = (unsigned char)((regs.rdx >> 32) & 0xFFu);
 						unsigned char op = (unsigned char)((regs.rdx >> 40) & 0xFFu);
 						struct shared_data *sd = malloc(sizeof(*sd));
+						if (len_v > UINT_MAX) {
+							fprintf(stderr,
+								"Monitor %ld: reduction range too large: %lu bytes\n",
+								node, len_v);
+							exit(1);
+						}
 						if (sd == NULL) { perror("malloc(shared_data)"); exit(1); }
 						memset(sd, 0, sizeof(*sd));
 						sd->addr = addr_v;
