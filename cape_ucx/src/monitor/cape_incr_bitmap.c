@@ -2300,14 +2300,6 @@ int require_waitfor_checkpoint();
 int require_broadcast_checkpoint();
 int read_shared_data();
 void end_shared_data();
-
-/* V5: unused */
-// int init_generate_workshare_checkpoint(unsigned int ntask);
-// int require_generate_workshare_checkpoint();
-// int require_generate_total_checkpoint();
-// int require_scatter_checkpoint();
-// int require_inject_workshare_checkpoint();
-
 int require_allreduce_checkpoint();
 int cape_receive_userfaultfd_setup(void);
 int cape_wait_for_child_event(pid_t pid, int *status);
@@ -2955,7 +2947,46 @@ int send_checkpoint(int destination){
 	return 0;
 }
 
+/* ------------------------------------------------------------------------
+ * require_send_checkpoint(): version 3.0 => NOT USED in version 4.0
+ * 	Require send checkpoint from to slave, and from slave to master
+ * if (Master)
+ * 	Send checkpoint and flag_ckpt to slave
+ * 	flag_ckpt = 0 if this is the lastest checkpoint, orthewhise flag_ckpt = 1
+ * 
+ * TODO: implement the scheduling to distribute checkpoint to slave  *  
+ * -------------------------------------------------------------------------
+ */
+int require_send_checkpoint(){
 
+	int rc = 0;	
+	printf("Called %d\n",node)	;
+	if (node==0){
+		current_job++;
+		ckpt_flag = 1;	
+
+		rc= send_checkpoint(current_node);	
+				
+		if ((current_job % jobs_per_node == 0) || ((unsigned long)current_job >= number_of_jobs))
+		{					
+			ckpt_flag = 0;
+		}		
+		cape_ucx_send(&ckpt_flag, sizeof(int), current_node, TAG_CKPT_FLAG);
+		dprintf("Monitor %ld: send checkpoint and ckpt_flag =%d to %d \n",
+				node, ckpt_flag, current_node);				
+		if (current_job % jobs_per_node == 0) {
+			current_node++;			
+		}
+		
+	}
+	else
+	{
+		rc = send_checkpoint(0); // send to master node
+	}
+	
+	if (rc!=0) printf("Monitor %ld: Error on sending checkpoint \n", node);
+	return 0;	
+}
 
 /* ----------------------------------------
  * receive_checkpoint(): receive final checkpoint and save into a memory stream file 
