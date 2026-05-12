@@ -51,11 +51,12 @@ function replaceDefaultSharedClause
 		_
 end function
 
+% Bitmap monitor does not handle D_DEFAULT_NONE; drop it.
 function replaceDefaultNoneClause
 	replace [clauses]
 		default(none)
 	by
-		__cape_signal(D_DEFAULT_NONE);
+		_
 end function
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -73,13 +74,13 @@ function replaceSharedClause
 		DickptClauseList
 end function
 
+% Bitmap monitor doesn't consume D_SHARED. In DICKPT, "shared" is the
+% default for any variable visible at the call site, so we emit nothing.
 function addSharedClause Variable [reference_id]
-	construct DickptClause [clauses]
-		__cape_signal_val(D_SHARED, (unsigned 'long)& Variable);
 	replace [repeat clauses]
 		DickptClauseList [repeat clauses]
 	by
-		DickptClauseList [. DickptClause]
+		DickptClauseList
 end function
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -97,13 +98,14 @@ function replacePrivateClause
 		DickptClauseList
 end function
 
+% Bitmap monitor doesn't consume D_PRIVATE. Private semantics are
+% implicit in DICKPT: each node has its own stack/process image, so
+% loop locals are already per-node. Emit nothing.
 function addPrivateClause Variable [reference_id]
-	construct DickptClause [clauses]
-		__cape_signal_val(D_PRIVATE, (unsigned 'long)& Variable);
 	replace [repeat clauses]
 		DickptClauseList [repeat clauses]
 	by
-		DickptClauseList [. DickptClause]
+		DickptClauseList
 end function
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -123,13 +125,14 @@ function replaceFirstPrivateClause
 		DickptClauseList
 end function
 
+% firstprivate: bitmap monitor doesn't consume D_FIRST_PRIVATE.
+% Since each node starts from a fork of the same image, the variable's
+% initial value is naturally replicated. Emit nothing.
 function addFirstPrivateClause Variable [reference_id]
-	construct DickptClause [clauses]
-		__cape_signal_val(D_FIRST_PRIVATE, (unsigned 'long)& Variable);
 	replace [repeat clauses]
 		DickptClauseList [repeat clauses]
 	by
-		DickptClauseList [. DickptClause]
+		DickptClauseList
 end function
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -147,13 +150,14 @@ function replaceLastPrivateClause
 		DickptClauseList
 end function
 
+% lastprivate: bitmap monitor doesn't consume D_LAST_PRIVATE.
+% The last-iteration value ends up on the node owning the final slice
+% and is merged via the normal page diff. Emit nothing.
 function addLastPrivateClause Variable [reference_id]
-	construct DickptClause [clauses]
-		__cape_signal_val(D_LAST_PRIVATE, (unsigned 'long)& Variable);
 	replace [repeat clauses]
 		DickptClauseList [repeat clauses]
 	by
-		DickptClauseList [. DickptClause]
+		DickptClauseList
 end function
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -171,15 +175,17 @@ function replaceReductionClause
 		DickptClauseList
 end function
 
+% Reduction: register the variable with the monitor using
+% S_DECLARE_REDUCTION (via dickpt_declare_reduction). Datatype defaults
+% to CAPE_INT here; richer typing would require tracking declarator
+% types up to this point. The op is mapped from the OpenMP operator.
 function addReductionClause Operator [omp_operator] Variable [reference_id]
-	construct NewOperator [operators]
-		Operator
 	construct DickptOp [dickpt_reduction_op]
 		D_REDUCTION_SUM
 	construct FinalOp [dickpt_reduction_op]
 		DickptOp [mapSumOp Operator] [mapMulOp Operator] [mapMaxOp Operator] [mapMinOp Operator]
 	construct DickptClause [clauses]
-		__cape_signal_val(FinalOp, (unsigned 'long)&Variable);
+		'dickpt_declare_reduction(& Variable, CAPE_INT, FinalOp);
 	replace [repeat clauses]
 		DickptClauseList [repeat clauses]
 	by
@@ -237,13 +243,12 @@ function replaceCopyinClause
 		DickptClauseList
 end function
 
+% copyin: bitmap monitor doesn't consume D_COPY_IN. Emit nothing.
 function addCopyinClause Variable [reference_id]
-	construct DickptClause [clauses]
-		__cape_signal_val(D_COPY_IN, (unsigned 'long)& Variable);
 	replace [repeat clauses]
 		DickptClauseList [repeat clauses]
 	by
-		DickptClauseList [. DickptClause]
+		DickptClauseList
 end function
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -263,13 +268,12 @@ function replaceCopyPrivateClause
 		DickptClauseList
 end function
 
+% copyprivate: no monitor support; emit nothing.
 function addCopyPrivateClause Variable [reference_id]
-	construct DickptClause [clauses]
-		__cape_signal_val(D_PRIVATE, (unsigned 'long)& Variable);
 	replace [repeat clauses]
 		DickptClauseList [repeat clauses]
 	by
-		DickptClauseList [. DickptClause]
+		DickptClauseList
 end function
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%

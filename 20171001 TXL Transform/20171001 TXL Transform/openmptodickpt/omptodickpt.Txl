@@ -171,9 +171,12 @@ function treatFunction
     where
     	InnerStatement [checkDirective]
 
+	% DICKPT: keep variable declarations intact. Stack-local variables
+	% must NOT be replaced by dickpt_register_region (the runtime explicitly
+	% does not track the stack), and globals are still tracked as real
+	% C declarations. So we skip [replaceDeclaration] here.
 	construct NewCompilationUnit [function_definition]
 		Function [addGlobalVarsToMain]
-				 [replaceDeclaration]
 				 [replaceConstruct]
 				 [replaceEnvRoutine]
 				 [replaceEnvRoutSetNumStatement]

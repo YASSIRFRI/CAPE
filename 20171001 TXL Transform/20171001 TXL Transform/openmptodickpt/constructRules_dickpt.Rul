@@ -67,15 +67,14 @@ function replaceThreadPrivate
 		NewThreadPrivateStatement
 end function
 
+% threadprivate: bitmap monitor doesn't consume D_THEAD_PRIVATE.
+% Each node already runs its own process with its own globals, so
+% "threadprivate" is implicitly satisfied. Emit nothing.
 function addVarThreadPrivate Variable [decl_specifiers]
-
-	construct NewDickptThreadPrivate [dickpt_threadprivate_variables]
-		__cape_signal_val(D_THEAD_PRIVATE, (unsigned 'long)& Variable);
-
 	replace [repeat dickpt_threadprivate_variables]
 		DickptStatementList [repeat dickpt_threadprivate_variables]
 	by
-		DickptStatementList [. NewDickptThreadPrivate]
+		DickptStatementList
 end function
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -543,11 +542,14 @@ function replaceCritical
 		'dickpt_waitfor_ckpt();
 
 	construct NewDickptCritical [dickpt_automic_critical]
-		for (__i__ = 0 '; __i__ < 'dickpt_read_num_nodes'(') '; __i__ ++)
 		{
-			if (__i__ == 'dickpt_read_node'('))
-				CompoundStatement
-			DickptBarrier
+			'unsigned 'long __i__;
+			for (__i__ = 0 '; __i__ < 'dickpt_read_num_nodes'(') '; __i__ ++)
+			{
+				if (__i__ == 'dickpt_read_node'('))
+					CompoundStatement
+				DickptBarrier
+			}
 		}
 	by
 		NewDickptCritical
@@ -577,11 +579,14 @@ function replaceAutomic
 		'dickpt_waitfor_ckpt();
 
 	construct NewDickptAutomic [dickpt_automic_critical]
-		for (__i__ = 0 '; __i__ < 'dickpt_read_num_nodes'(') '; __i__ ++)
 		{
-			if (__i__ == 'dickpt_read_node'('))
-				CompoundStatement
-			DickptBarrier
+			'unsigned 'long __i__;
+			for (__i__ = 0 '; __i__ < 'dickpt_read_num_nodes'(') '; __i__ ++)
+			{
+				if (__i__ == 'dickpt_read_node'('))
+					CompoundStatement
+				DickptBarrier
+			}
 		}
 	by
 		NewDickptAutomic

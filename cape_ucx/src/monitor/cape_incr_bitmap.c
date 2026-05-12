@@ -584,6 +584,16 @@ typedef struct {
 	unsigned long generate_ckpt_calls;
 	unsigned long merge_ext_calls;
 	unsigned long allreduce_steps;
+	unsigned long tracked_range_count;
+	unsigned long generated_ckpt_samples;
+	unsigned long merged_ckpt_samples;
+	unsigned long long tracked_region_bytes;
+	unsigned long long generated_ckpt_last_bytes;
+	unsigned long long generated_ckpt_max_bytes;
+	unsigned long long generated_ckpt_total_bytes;
+	unsigned long long merged_ckpt_last_bytes;
+	unsigned long long merged_ckpt_max_bytes;
+	unsigned long long merged_ckpt_total_bytes;
 	/* ns timers */
 	unsigned long long process_vm_read_ns, process_vm_write_ns;
 	unsigned long long writeprotect_ns;
@@ -610,10 +620,15 @@ static cape_profile_t cape_profile;
 #define CAPE_PROFILE_NS_START(name) clock_gettime(CLOCK_MONOTONIC, &(name))
 #define CAPE_PROFILE_INC(field) ((void)(cape_profile.field++))
 #define CAPE_PROFILE_ADD(field, value) ((void)(cape_profile.field += (value)))
+#define CAPE_PROFILE_SET(field, value) ((void)(cape_profile.field = (value)))
+#define CAPE_PROFILE_MAX(field, value) do { \
+	unsigned long long _cape_v = (unsigned long long)(value); \
+	if (_cape_v > cape_profile.field) cape_profile.field = _cape_v; \
+} while (0)
 #define CAPE_PROFILE_ADD_NS(field, start) do { \
-	struct timespec _now_ts; \
-	clock_gettime(CLOCK_MONOTONIC, &_now_ts); \
-	cape_profile.field += (unsigned long long)( \
+		struct timespec _now_ts; \
+		clock_gettime(CLOCK_MONOTONIC, &_now_ts); \
+		cape_profile.field += (unsigned long long)( \
 		(_now_ts.tv_sec - (start).tv_sec) * 1000000000ULL \
 		+ (_now_ts.tv_nsec - (start).tv_nsec)); \
 } while (0)
@@ -626,11 +641,47 @@ static unsigned long long cape_profile_elapsed_ns(struct timespec start)
 				    + (now.tv_nsec - start.tv_nsec));
 }
 
+static void cape_profile_record_generated_ckpt(size_t bytes)
+{
+	CAPE_PROFILE_SET(generated_ckpt_last_bytes, (unsigned long long)bytes);
+	CAPE_PROFILE_MAX(generated_ckpt_max_bytes, bytes);
+	CAPE_PROFILE_ADD(generated_ckpt_total_bytes, (unsigned long long)bytes);
+	CAPE_PROFILE_INC(generated_ckpt_samples);
+}
+
+static void cape_profile_record_merged_ckpt(size_t bytes)
+{
+	CAPE_PROFILE_SET(merged_ckpt_last_bytes, (unsigned long long)bytes);
+	CAPE_PROFILE_MAX(merged_ckpt_max_bytes, bytes);
+	CAPE_PROFILE_ADD(merged_ckpt_total_bytes, (unsigned long long)bytes);
+	CAPE_PROFILE_INC(merged_ckpt_samples);
+}
+
+static double cape_profile_pct_of_tracked(unsigned long long bytes)
+{
+	if (cape_profile.tracked_region_bytes == 0)
+		return 0.0;
+	return 100.0 * (double)bytes /
+	       (double)cape_profile.tracked_region_bytes;
+}
+
 static void cape_profile_report(void)
 {
+	unsigned long long generated_avg = 0;
+	unsigned long long merged_avg = 0;
+
+	if (cape_profile.generated_ckpt_samples != 0)
+		generated_avg = cape_profile.generated_ckpt_total_bytes /
+				cape_profile.generated_ckpt_samples;
+	if (cape_profile.merged_ckpt_samples != 0)
+		merged_avg = cape_profile.merged_ckpt_total_bytes /
+			     cape_profile.merged_ckpt_samples;
+
 	fprintf(stderr, "\n[DICKPT PROFILE] Node %ld  (ms = ns/1e6)\n", node);
 #define P_NS(name) fprintf(stderr, "  %-30s : %10.3f ms\n", #name, cape_profile.name / 1e6)
 #define P_CNT(name) fprintf(stderr, "  %-30s : %lu\n", #name, cape_profile.name)
+#define P_BYTES(name) fprintf(stderr, "  %-30s : %llu bytes\n", #name, \
+		(unsigned long long)cape_profile.name)
 	P_NS(wait_for_child_ns); P_NS(wait_blocking_ns); P_NS(wait_tracked_ns);
 	P_NS(waitpid_ns); P_CNT(waitpid_calls); P_CNT(wait_loops);
 	P_NS(poll_ns); P_CNT(poll_calls); P_CNT(poll_timeouts);
@@ -654,21 +705,47 @@ static void cape_profile_report(void)
 	P_NS(allreduce_total_ns); P_CNT(allreduce_steps);
 	P_NS(ucx_bootstrap_wait_ns); P_CNT(ucx_bootstrap_wait_iters);
 	P_CNT(sigtrap_count);
+	P_CNT(tracked_range_count); P_BYTES(tracked_region_bytes);
+	P_CNT(generated_ckpt_samples);
+	P_BYTES(generated_ckpt_last_bytes);
+	P_BYTES(generated_ckpt_max_bytes);
+	fprintf(stderr, "  %-30s : %llu bytes (%.6f%% of tracked)\n",
+		"generated_ckpt_avg_bytes",
+		(unsigned long long)generated_avg,
+		cape_profile_pct_of_tracked(generated_avg));
+	P_CNT(merged_ckpt_samples);
+	P_BYTES(merged_ckpt_last_bytes);
+	P_BYTES(merged_ckpt_max_bytes);
+	fprintf(stderr, "  %-30s : %llu bytes (%.6f%% of tracked)\n",
+		"merged_ckpt_avg_bytes",
+		(unsigned long long)merged_avg,
+		cape_profile_pct_of_tracked(merged_avg));
+	fprintf(stderr, "  %-30s : %.6f%%\n",
+		"generated_last/tracked",
+		cape_profile_pct_of_tracked(cape_profile.generated_ckpt_last_bytes));
+	fprintf(stderr, "  %-30s : %.6f%%\n",
+		"merged_last/tracked",
+		cape_profile_pct_of_tracked(cape_profile.merged_ckpt_last_bytes));
 	fflush(stderr);
 #undef P_NS
 #undef P_CNT
+#undef P_BYTES
 }
 #else
 #define CAPE_PROFILE_NS_VAR(name)
 #define CAPE_PROFILE_NS_START(name) do { } while (0)
 #define CAPE_PROFILE_INC(field) do { } while (0)
 #define CAPE_PROFILE_ADD(field, value) do { } while (0)
+#define CAPE_PROFILE_SET(field, value) do { } while (0)
+#define CAPE_PROFILE_MAX(field, value) do { } while (0)
 #define CAPE_PROFILE_ADD_NS(field, start) do { } while (0)
 static unsigned long long cape_profile_elapsed_ns(struct timespec start)
 {
 	(void)start;
 	return 0;
 }
+static void cape_profile_record_generated_ckpt(size_t bytes) { (void)bytes; }
+static void cape_profile_record_merged_ckpt(size_t bytes) { (void)bytes; }
 static inline void cape_profile_report(void) {}
 #endif
 
@@ -1224,8 +1301,13 @@ int cape_receive_userfaultfd_setup(void)
 	free(tracked_ranges);
 	tracked_ranges = NULL;
 	tracked_range_count = 0;
+	CAPE_PROFILE_SET(tracked_range_count, 0);
+	CAPE_PROFILE_SET(tracked_region_bytes, 0);
 
 	if (header->count > 0) {
+		unsigned long long tracked_bytes = 0;
+		size_t i;
+
 		tracked_ranges = malloc(header->count * sizeof(*tracked_ranges));
 		if (tracked_ranges == NULL)
 			return 1;
@@ -1233,6 +1315,10 @@ int cape_receive_userfaultfd_setup(void)
 		ranges = (struct cape_dickpt_range *)(payload + sizeof(*header));
 		memcpy(tracked_ranges, ranges, header->count * sizeof(*tracked_ranges));
 		tracked_range_count = header->count;
+		for (i = 0; i < tracked_range_count; i++)
+			tracked_bytes += tracked_ranges[i].len;
+		CAPE_PROFILE_SET(tracked_range_count, (unsigned long)tracked_range_count);
+		CAPE_PROFILE_SET(tracked_region_bytes, tracked_bytes);
 	}
 
 	for (cmsg = CMSG_FIRSTHDR(&msg); cmsg != NULL; cmsg = CMSG_NXTHDR(&msg, cmsg)) {
@@ -2807,6 +2893,7 @@ void end_shared_data(){
 		}
 		*ckpt_size = (size_t)pos;
 	}
+	cape_profile_record_generated_ckpt(*ckpt_size);
 	CAPE_PROFILE_ADD_NS(generate_ckpt_ns, profile_start_ns);
 	CAPE_PROFILE_INC(generate_ckpt_calls);
 	return stream;
@@ -2868,46 +2955,7 @@ int send_checkpoint(int destination){
 	return 0;
 }
 
-/* ------------------------------------------------------------------------
- * require_send_checkpoint(): version 3.0 => NOT USED in version 4.0
- * 	Require send checkpoint from to slave, and from slave to master
- * if (Master)
- * 	Send checkpoint and flag_ckpt to slave
- * 	flag_ckpt = 0 if this is the lastest checkpoint, orthewhise flag_ckpt = 1
- * 
- * TODO: implement the scheduling to distribute checkpoint to slave  *  
- * -------------------------------------------------------------------------
- */
-int require_send_checkpoint(){
-	
-	int rc = 0;	
-	
-	if (node==0){
-		current_job++;
-		ckpt_flag = 1;	
 
-		rc= send_checkpoint(current_node);	
-				
-		if ((current_job % jobs_per_node == 0) || ((unsigned long)current_job >= number_of_jobs))
-		{					
-			ckpt_flag = 0;
-		}		
-		cape_ucx_send(&ckpt_flag, sizeof(int), current_node, TAG_CKPT_FLAG);
-		dprintf("Monitor %ld: send checkpoint and ckpt_flag =%d to %d \n",
-				node, ckpt_flag, current_node);				
-		if (current_job % jobs_per_node == 0) {
-			current_node++;			
-		}
-		
-	}
-	else
-	{
-		rc = send_checkpoint(0); // send to master node
-	}
-	
-	if (rc!=0) printf("Monitor %ld: Error on sending checkpoint \n", node);
-	return 0;	
-}
 
 /* ----------------------------------------
  * receive_checkpoint(): receive final checkpoint and save into a memory stream file 
@@ -3491,6 +3539,7 @@ int require_allreduce_checkpoint(){
 		cape_total_release();
 		return 1;
 	}
+	cape_profile_record_merged_ckpt(total_ckpt_size);
 
 	if (total_ckpt_stream != NULL) {
 		fclose(total_ckpt_stream);

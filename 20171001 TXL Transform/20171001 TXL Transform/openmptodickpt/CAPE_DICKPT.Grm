@@ -181,12 +181,15 @@ end define
 % ── Synchronization (inside parallel) ────────────────
 
 define dickpt_automic_critical
-	for (__i__ = 0 '; __i__ < [dickpt_read_num_nodes] '; __i__ ++)
 	{											[IN] [NL]
-		if (__i__ == [dickpt_read_node])
-			[statement]
-		[dickpt_barrier] 						[EX]
-	}											[NL]
+		'unsigned 'long __i__;					[NL]
+		for (__i__ = 0 '; __i__ < [dickpt_read_num_nodes] '; __i__ ++)
+		{										[IN] [NL]
+			if (__i__ == [dickpt_read_node])
+				[statement]
+			[dickpt_barrier]					[EX]
+		}										[NL]
+	}											[EX] [NL]
 end define
 
 define dickpt_barrier
@@ -238,6 +241,7 @@ define dickpt_clause
 	|	__cape_signal_val(D_LAST_PRIVATE, (unsigned 'long)&[reference_id]);	[NL]
 	|	__cape_signal_val([dickpt_reduction_op], (unsigned 'long)&[reference_id]);	[NL]
 	|	__cape_signal_val(D_COPY_IN, (unsigned 'long)&[reference_id]);		[NL]
+	|	'dickpt_declare_reduction(&[reference_id], [id], [dickpt_reduction_op]);	[NL]
 end define
 
 define dickpt_reduction_op
