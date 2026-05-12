@@ -1,11 +1,11 @@
 #!/bin/bash
-#SBATCH --job-name=dickpt_full_bench
-#SBATCH --nodes=16
-#SBATCH --ntasks=16
+#SBATCH --job-name=dickpt_bitmap_full_bench
+#SBATCH --nodes=32
+#SBATCH --ntasks=32
 #SBATCH --ntasks-per-node=1
 #SBATCH --time=04:00:00
-#SBATCH --output=dickpt_full_bench_%j.out
-#SBATCH --error=dickpt_full_bench_%j.err
+#SBATCH --output=dickpt_bitmap_full_bench_%j.out
+#SBATCH --error=dickpt_bitmap_full_bench_%j.err
 #SBATCH --partition=compute
 
 set -euo pipefail
@@ -16,25 +16,26 @@ PROJECT_DIR="${PROJECT_DIR:-${SLURM_SUBMIT_DIR:-${SCRIPT_DIR}}}"
 cd "${PROJECT_DIR}"
 JOB_TAG="${SLURM_JOB_ID:-local_$$}"
 
-RESULTS_DIR="${RESULTS_DIR:-${SLURM_SUBMIT_DIR:-${PROJECT_DIR}}/results/dickpt_${JOB_TAG}}"
-mkdir -p "${RESULTS_DIR}" 2>/dev/null || { RESULTS_DIR="/tmp/${USER}/dickpt_results_${JOB_TAG}"; mkdir -p "${RESULTS_DIR}"; }
-BUILD_DIR="${BUILD_DIR:-${SLURM_SUBMIT_DIR:-/tmp/${USER}}/cape_build_dickpt_${JOB_TAG}}"
+RESULTS_DIR="${RESULTS_DIR:-${SLURM_SUBMIT_DIR:-${PROJECT_DIR}}/results/dickpt_bitmap_${JOB_TAG}}"
+mkdir -p "${RESULTS_DIR}" 2>/dev/null || { RESULTS_DIR="/tmp/${USER}/dickpt_bitmap_results_${JOB_TAG}"; mkdir -p "${RESULTS_DIR}"; }
+BUILD_DIR="${BUILD_DIR:-${SLURM_SUBMIT_DIR:-/tmp/${USER}}/cape_build_dickpt_bitmap_${JOB_TAG}}"
 mkdir -p "${BUILD_DIR}/bin" "${BUILD_DIR}/obj" "${BUILD_DIR}/lib" 2>/dev/null || \
-  { BUILD_DIR="/tmp/${USER}/cape_build_dickpt_${JOB_TAG}"; mkdir -p "${BUILD_DIR}/bin" "${BUILD_DIR}/obj" "${BUILD_DIR}/lib"; }
+  { BUILD_DIR="/tmp/${USER}/cape_build_dickpt_bitmap_${JOB_TAG}"; mkdir -p "${BUILD_DIR}/bin" "${BUILD_DIR}/obj" "${BUILD_DIR}/lib"; }
 BOOTSTRAP_ROOT="${BOOTSTRAP_ROOT:-${BUILD_DIR}/ucx_bootstrap}"
 mkdir -p "${BOOTSTRAP_ROOT}"
 
-N_MAMULT=(${N_MAMULT:-3000 6400})
-N_MATVEC=(${N_MATVEC:-2048 4096})
+N_MAMULT=(${N_MAMULT:-3000 })
+N_MATVEC=(${N_MATVEC:-4096})
 GRADIENT_PAIRS=(${GRADIENT_PAIRS:-"4096:256" "8192:512"})
 N_MEMWRITE=(${N_MEMWRITE:-1048576})
-NODES_LIST=(${NODES_LIST:-4 8 16})
+NODES_LIST=(${NODES_LIST:-4 8 16 32})
 REPS="${REPS:-5}"
 PROFILE="${PROFILE:-0}"
 
 module purge
 module load GCCcore/14.2.0
 module load UCX/1.18.0-GCCcore-14.2.0
+module load UCC/1.3.0-GCCcore-14.2.0 2>/dev/null || module load UCC 2>/dev/null || true
 # PMIx is required for the fast in-memory bootstrap. Without it dickpt
 # falls back to the shared-FS bootstrap (~30 s stall at 32 nodes).
 module load PMIx/5.0.6-GCCcore-14.2.0 2>/dev/null || module load PMIx 2>/dev/null || true
@@ -68,24 +69,31 @@ MAKE_ARGS=(
     "PMIX_FLAGS=${PMIX_FLAGS}" "PMIX_LINK=${PMIX_LINK}" CC=gcc
 )
 
+if [ -n "${EBROOTUCC:-}" ]; then
+    MAKE_ARGS+=(UCC_SRC="${EBROOTUCC}/include" UCC_LIB="${EBROOTUCC}/lib")
+fi
+
 make -C "${PROJECT_DIR}" cleanall \
     EXE_FOLDER="${BUILD_DIR}/bin" O_FOLDER="${BUILD_DIR}/obj" L_FOLDER="${BUILD_DIR}/lib" 2>/dev/null || true
-make -C "${PROJECT_DIR}" dickpt PROFILE="${PROFILE}" "${MAKE_ARGS[@]}"
+make -C "${PROJECT_DIR}" dickpt_bitmap_monitor \
+    dickpt_mul_manual dickpt_matvec_manual dickpt_gradient_manual dickpt_memwrite_manual \
+    PROFILE="${PROFILE}" "${MAKE_ARGS[@]}"
 
-MONITOR="${BUILD_DIR}/bin/cape_dickpt_monitor"
+MONITOR="${BUILD_DIR}/bin/cape_dickpt_bitmap_monitor"
 
-CSV="${RESULTS_DIR}/dickpt_summary_${JOB_TAG}.csv"
+CSV="${RESULTS_DIR}/dickpt_bitmap_summary_${JOB_TAG}.csv"
 echo "impl,app,n,d,nodes,rep,app_ms,job_id" > "${CSV}"
 
-echo "Benchmarking DICKPT"
+echo "Benchmarking DICKPT(bitmap)"
+echo "Monitor: src/monitor/cape_incr_bitmap.c -> ${MONITOR}"
 echo "Nodes: ${NODES_LIST[*]}  Reps/cell: ${REPS}  MPI mode: ${SRUN_MPI_MODE}"
 echo "Results dir: ${RESULTS_DIR}"
 
-TOTAL_NODES="${SLURM_JOB_NUM_NODES:-16}"
+TOTAL_NODES="${SLURM_JOB_NUM_NODES:-32}"
 
 run_one() {
     local app="$1" bin="$2" n="$3" d="$4" nn="$5" rep="$6"
-    local tag="dickpt_${app}_n${n}${d:+_d${d}}_nodes${nn}_rep${rep}"
+    local tag="dickpt_bitmap_${app}_n${n}${d:+_d${d}}_nodes${nn}_rep${rep}"
     local log="${RESULTS_DIR}/${tag}.log"
     : > "${log}"
     local bid="${JOB_TAG}_${tag}"
@@ -106,7 +114,7 @@ run_one() {
     if [ "${rc}" -ne 0 ]; then
         echo "[fail] ${tag} rc=${rc}" >&2; return
     fi
-    awk -v impl="dickpt" -v app="${app}" -v nn="${nn}" -v rep="${rep}" \
+    awk -v impl="dickpt_bitmap" -v app="${app}" -v nn="${nn}" -v rep="${rep}" \
         -v job="${SLURM_JOB_ID:-local}" '
         /^RESULT / {
             n=""; dd=""; ms="";
@@ -148,5 +156,5 @@ for nn in "${NODES_LIST[@]}"; do
 done
 
 echo ""
-echo "Done. DICKPT summary CSV: ${CSV}"
+echo "Done. DICKPT bitmap summary CSV: ${CSV}"
 echo "Per-experiment logs in: ${RESULTS_DIR}"
