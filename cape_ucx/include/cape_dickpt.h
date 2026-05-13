@@ -97,6 +97,36 @@ static inline void dickpt_allreduce_ckpt(void) { __cape_signal(S_ALL_REDUCE); }
 static inline void dickpt_start_share_data(void) { __cape_signal(S_START_SHARE_DATA); }
 static inline void dickpt_end_share_data(void)   { __cape_signal(S_END_SHARE_DATA); }
 
+/* Register a shared region with the monitor's whitelist.
+ *   addr/len  - byte range that is OpenMP-"shared" (or a reduction range)
+ *   level     - lexical OMP scope depth (0=global/file, 1=parallel, 2=for/task, ...).
+ *               dickpt_unregister_level() drops every entry with this exact level,
+ *               matching the way OpenMP scopes nest and unwind.
+ * Words outside any registered range are masked out of checkpoints, so a
+ * private variable that happens to share a 4 KiB page with a shared one
+ * is never shipped to an idle worker. */
+static inline void dickpt_register_shared(void *addr, size_t len, unsigned char level)
+{
+    register unsigned long _addr  asm("rax") = (unsigned long)addr;
+    register unsigned long _len   asm("rsi") = (unsigned long)len;
+    register unsigned long _level asm("rcx") = (unsigned long)level;
+    register unsigned long _code  asm("rdx") = (unsigned long)S_START_SHARE_DATA;
+    __asm__ volatile ("int $3"
+                      : "+r"(_addr), "+r"(_len), "+r"(_level), "+r"(_code)
+                      :
+                      : "memory");
+}
+
+static inline void dickpt_unregister_level(unsigned char level)
+{
+    register unsigned long _level asm("rax") = (unsigned long)level;
+    register unsigned long _code  asm("rdx") = (unsigned long)S_END_SHARE_DATA;
+    __asm__ volatile ("int $3"
+                      : "+r"(_level), "+r"(_code)
+                      :
+                      : "memory");
+}
+
 /* Query monitor for rank/size info */
 static inline unsigned long dickpt_read_node(void)      { return __cape_signal_read(98); }
 static inline unsigned long dickpt_read_num_nodes(void)  { return __cape_signal_read(97); }

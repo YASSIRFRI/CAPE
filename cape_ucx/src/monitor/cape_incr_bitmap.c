@@ -61,6 +61,32 @@ struct page_node * list_head = NULL, * list_end = NULL;
 struct shared_data * data_list_head = NULL;
 struct shared_data * data_list_tail = NULL;
 
+/* Private-memory masking during checkpoint generation.
+ *
+ * generate_checkpoint() consults the shared_data whitelist for every word in
+ * every dirty page and forces the word_bmp bit to 0 unless the word's
+ * address falls inside a registered shared region. This prevents private
+ * variables that happen to share a 4 KiB page with shared ones from being
+ * shipped to idle workers — a correctness bug when a task body executes on
+ * only one worker, since the idle worker's private slots would be clobbered
+ * by the executing worker's stack/heap values.
+ *
+ * Regions are populated by the transpiler via S_START_SHARE_DATA /
+ * S_DECLARE_REDUCTION[_REGION], and torn down by S_END_SHARE_DATA at the
+ * end of each OpenMP scope (level). If the whitelist is empty, NO words
+ * are shipped — this is intentional: an unregistered scope is a transpiler
+ * bug we want to surface, not paper over. */
+static inline int is_address_shared(unsigned long addr) {
+	const struct shared_data *p;
+	for (p = data_list_head; p != NULL; p = p->next) {
+		unsigned long start = p->addr;
+		unsigned long end   = p->addr + (unsigned long)p->len;
+		if (addr >= start && addr < end)
+			return 1;
+	}
+	return 0;
+}
+
 int process_state = 0; //to follow the state of process
 int child_id;
 int control_fd = -1;
@@ -2651,19 +2677,12 @@ int init_jobs_per_node(){
 	return rc;	
 	
  }
-/* -----------------------------------------------------
- * ioctl_read_data(): Read data from memory of the process
- * -----------------------------------------------------
- */
+
 int ioctl_read_data(unsigned int pid, unsigned long src, void *dst, int len){
 	return read_remote_memory(pid, src, dst, (size_t)len) == 0 ? 1 : 0;
 }
 
-/* ---------------------------------------------------------------
- * ioctl_set_write_protect(): Version 3.0
- * 	Set write protect to a page that contain dst address
- * ---------------------------------------------------------------
- */
+
  int ioctl_set_write_protect(unsigned int pid, unsigned long dst){
 	return cape_userfault_writeprotect(dst & ~(PAGE_SIZE - 1), PAGE_SIZE, 1);
 }
@@ -2715,8 +2734,30 @@ int unlock_process_memory(unsigned int pid){
  * -------------------------------------------------------------
  */
 int read_shared_data(){
-	dprintf("Monitor %ld: shared-data metadata stream is not implemented in the userfaultfd backend\n",
-		node);
+	/* App-side protocol for S_START_SHARE_DATA:
+	 *   rax = start address of the shared region
+	 *   rsi = length in bytes
+	 *   rcx = level (0 = global, >0 = scope-local; matched by S_END_SHARE_DATA)
+	 * Append a node to data_list_head/data_list_tail. Used by
+	 * is_address_shared() to mask private words during checkpoint generation. */
+	struct user_regs_struct regs;
+	struct shared_data *sd;
+
+	ptrace(PTRACE_GETREGS, child_id, NULL, &regs);
+
+	sd = malloc(sizeof(*sd));
+	if (sd == NULL) { perror("malloc(shared_data)"); exit(1); }
+	memset(sd, 0, sizeof(*sd));
+	sd->addr = (unsigned long)regs.rax;
+	sd->len  = (unsigned int)regs.rsi;
+	sd->level = (unsigned char)(regs.rcx & 0xFFu);
+	sd->prev = data_list_tail;
+	sd->next = NULL;
+	if (data_list_tail != NULL)
+		data_list_tail->next = sd;
+	else
+		data_list_head = sd;
+	data_list_tail = sd;
 	return 0;
 }
 /* ---------------------------------------------------------------------
@@ -2725,25 +2766,30 @@ int read_shared_data(){
  * ---------------------------------------------------------------------
  */
 void end_shared_data(){
+	/* App-side protocol for S_END_SHARE_DATA:
+	 *   rax = level to drop (every shared_data node with this level is freed).
+	 * Walks the list and unlinks/free's matching nodes. Safe to call with no
+	 * matching entries (no-op). */
+	struct user_regs_struct regs;
+	struct shared_data *p, *next;
 	unsigned char level;
-	struct shared_data *pp;
-	
-	if (data_list_tail !=NULL)
-		level = data_list_tail ->level;
-	
-	while((data_list_tail->prev !=NULL) && (data_list_tail->level == level)){
-		pp = data_list_tail;
-		data_list_tail = data_list_tail ->prev;
-		data_list_tail->next = NULL;
-		free(pp);
-		pp= NULL;		
+
+	if (data_list_head == NULL)
+		return;
+
+	ptrace(PTRACE_GETREGS, child_id, NULL, &regs);
+	level = (unsigned char)(regs.rax & 0xFFu);
+
+	p = data_list_head;
+	while (p != NULL) {
+		next = p->next;
+		if (p->level == level) {
+			if (p->prev) p->prev->next = p->next; else data_list_head = p->next;
+			if (p->next) p->next->prev = p->prev; else data_list_tail = p->prev;
+			free(p);
+		}
+		p = next;
 	}
-	if (data_list_tail->level == level){
-		free(data_list_tail);
-		data_list_head = NULL;
-		data_list_tail = NULL;
-	}
-	
 }
  
 /*-------------------------------------------------------------------------
@@ -2832,6 +2878,9 @@ void end_shared_data(){
 
 		memset(pp[n].bmp, 0, BMP_WORD_BMP_BYTES);
 		for (w = 0; w < BMP_WORDS_PER_PAGE; ++w) {
+			unsigned long waddr = old_node->addr + (unsigned long)w * 4u;
+			if (!is_address_shared(waddr))
+				continue;
 			if (pre[w] != post[w]) {
 				wbmp_set(pp[n].bmp, w);
 				tmp_changed[nc++] = post[w];
