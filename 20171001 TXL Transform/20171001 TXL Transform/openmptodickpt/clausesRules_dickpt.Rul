@@ -74,13 +74,25 @@ function replaceSharedClause
 		DickptClauseList
 end function
 
-% Bitmap monitor doesn't consume D_SHARED. In DICKPT, "shared" is the
-% default for any variable visible at the call site, so we emit nothing.
+% Each variable listed in `shared(...)` is registered with the bitmap
+% monitor in two ways:
+%   1. dickpt_register_region(&V, sizeof V)  — adds V's page range to
+%      the userfaultfd-tracked set, so writes to V get diff-captured.
+%   2. dickpt_register_shared(&V, sizeof V, 1) — adds V to the per-scope
+%      whitelist (level=1 = enclosing parallel/for/sections). Words
+%      outside any whitelisted range are masked out of the checkpoint,
+%      preventing per-rank private state from being shipped over.
+% Unregistration of level 1 is emitted by the construct rule after
+% dickpt_stop_ckpt().
 function addSharedClause Variable [reference_id]
+	construct RegisterRange [clauses]
+		'dickpt_register_region(& Variable, 'sizeof( Variable));
+	construct RegisterShared [clauses]
+		'dickpt_register_shared(& Variable, 'sizeof( Variable), 1);
 	replace [repeat clauses]
 		DickptClauseList [repeat clauses]
 	by
-		DickptClauseList
+		DickptClauseList [. RegisterRange] [. RegisterShared]
 end function
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%

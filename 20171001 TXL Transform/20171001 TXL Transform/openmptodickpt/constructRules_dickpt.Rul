@@ -164,6 +164,9 @@ function replaceParallelFor
 	construct DickptAllreduce [dickpt_allreduce]
 		'dickpt_allreduce_ckpt();
 
+	construct DickptUnregister [clauses]
+		'dickpt_unregister_level(1);
+
 	construct NewDickptParallelFor [dickpt_parallel_for]
 	{
 		unsigned 'long __dickpt_node__ = 'dickpt_read_node();
@@ -174,13 +177,14 @@ function replaceParallelFor
 		'long 'long __dickpt_left__ = __dickpt_first__ + (__dickpt_count__ * __dickpt_node__) / __dickpt_num_nodes__;
 		'long 'long __dickpt_right__ = __dickpt_first__ + (__dickpt_count__ * (__dickpt_node__ + 1)) / __dickpt_num_nodes__;
 		'dickpt_send_num_jobs(__dickpt_count__);
-		DickptStartCkpt
 		NewClauseList
+		DickptStartCkpt
 		for (BinExp1 = __dickpt_left__ '; BinExp1 BinOp2 __dickpt_right__ '; Exp3)
 			Statement
 		DickptGenerateCkpt
 		DickptAllreduce
 		DickptStopCkpt
+		DickptUnregister
 	}
 	by
 		NewDickptParallelFor

@@ -116,12 +116,13 @@ define dickpt_parallel_for
 		'long 'long __dickpt_left__ = __dickpt_first__ + (__dickpt_count__ * __dickpt_node__) / __dickpt_num_nodes__; [NL]
 		'long 'long __dickpt_right__ = __dickpt_first__ + (__dickpt_count__ * (__dickpt_node__ + 1)) / __dickpt_num_nodes__; [NL]
 		'dickpt_send_num_jobs(__dickpt_count__); [NL]
-		[dickpt_start_ckpt]
 		[clauses]
+		[dickpt_start_ckpt]
 		[for_statement]
 		[dickpt_generate_ckpt]
 		[dickpt_allreduce]
-		[dickpt_stop_ckpt]								[EX]
+		[dickpt_stop_ckpt]
+		[clauses]										[EX]
 	}														[NL]
 end define
 
@@ -242,6 +243,9 @@ define dickpt_clause
 	|	__cape_signal_val([dickpt_reduction_op], (unsigned 'long)&[reference_id]);	[NL]
 	|	__cape_signal_val(D_COPY_IN, (unsigned 'long)&[reference_id]);		[NL]
 	|	'dickpt_declare_reduction(&[reference_id], [id], [dickpt_reduction_op]);	[NL]
+	|	'dickpt_register_region(&[reference_id], 'sizeof([reference_id]));	[NL]
+	|	'dickpt_register_shared(&[reference_id], 'sizeof([reference_id]), [number]);	[NL]
+	|	'dickpt_unregister_level([number]);	[NL]
 end define
 
 define dickpt_reduction_op
