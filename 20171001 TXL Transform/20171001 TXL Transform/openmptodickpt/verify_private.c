@@ -12,6 +12,12 @@ int main(int argc, char **argv) {
     int i;
     int local;
 
+    /* Pre-touch data so its page is physically resident before
+     * dickpt_start_ckpt write-protects it; userfaultfd-wp only fires on
+     * present pages, so BSS that's never been touched bypasses tracking. */
+    for (i = 0; i < N; i++)
+        data[i] = 0;
+
     local = rank;
 
     #pragma omp parallel for shared(data) private(local)

@@ -13,6 +13,7 @@ int main (int argc, char * * argv) {
     int errors = 0;
     int i;
     int local;
+    for (i = 0; i < N; i ++) data [i] = 0;
     local = rank;
     {
         unsigned long __dickpt_node__ = dickpt_read_node ();
