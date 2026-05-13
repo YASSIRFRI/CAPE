@@ -2758,6 +2758,9 @@ int read_shared_data(){
 	else
 		data_list_head = sd;
 	data_list_tail = sd;
+	fprintf(stderr,
+		"[DEBUG monitor %ld] read_shared_data: addr=0x%lx len=%u level=%u\n",
+		node, sd->addr, sd->len, sd->level);
 	return 0;
 }
 /* ---------------------------------------------------------------------
@@ -2876,16 +2879,23 @@ void end_shared_data(){
 			continue;
 		}
 
+		unsigned dbg_masked = 0, dbg_diffs = 0;
 		memset(pp[n].bmp, 0, BMP_WORD_BMP_BYTES);
 		for (w = 0; w < BMP_WORDS_PER_PAGE; ++w) {
 			unsigned long waddr = old_node->addr + (unsigned long)w * 4u;
-			if (!is_address_shared(waddr))
+			if (!is_address_shared(waddr)) {
+				dbg_masked++;
 				continue;
+			}
 			if (pre[w] != post[w]) {
+				dbg_diffs++;
 				wbmp_set(pp[n].bmp, w);
 				tmp_changed[nc++] = post[w];
 			}
 		}
+		fprintf(stderr,
+			"[DEBUG monitor %ld] generate: page 0x%lx  masked_words=%u  diffs=%u\n",
+			node, old_node->addr, dbg_masked, dbg_diffs);
 		if (nc == 0)
 			continue;
 
