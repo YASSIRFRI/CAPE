@@ -3163,5 +3163,18 @@ void cape_begin(unsigned char directive, long first, long second)
 void cape_end(unsigned char directive, unsigned char ops_flag)
 {
 	(void)directive; (void)ops_flag;
+	__time_stamp__ = __pc__++;
+	if (require_generate_checkpoint() != 0) {
+		fprintf(stderr, "cape_end: generate_checkpoint failed on node %ld\n", node);
+		exit(1);
+	}
 	cape_stop_ckpt();
+	if (require_allreduce_checkpoint() != 0) {
+		fprintf(stderr, "cape_end: allreduce_checkpoint failed on node %ld\n", node);
+		exit(1);
+	}
+	if (require_inject_checkpoint() != 0) {
+		fprintf(stderr, "cape_end: inject_checkpoint failed on node %ld\n", node);
+		exit(1);
+	}
 }
