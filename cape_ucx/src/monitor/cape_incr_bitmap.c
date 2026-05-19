@@ -2328,22 +2328,10 @@ static void cape_ucx_init(void)
                 PMIx_Error_string(pst));
         exit(1);
     }
-    pmix_proc_t *fence_procs;
     pmix_info_t fence_info;
     PMIX_INFO_CONSTRUCT(&fence_info);
     PMIX_INFO_LOAD(&fence_info, PMIX_COLLECT_DATA, NULL, PMIX_BOOL);
-    fence_procs = calloc((size_t)num_nodes, sizeof(*fence_procs));
-    if (fence_procs == NULL) {
-        perror("calloc(PMIx fence procs)");
-        exit(1);
-    }
-    for (int i = 0; i < num_nodes; i++) {
-        PMIX_PROC_CONSTRUCT(&fence_procs[i]);
-        PMIX_LOAD_NSPACE(fence_procs[i].nspace, pmix_myproc.nspace);
-        fence_procs[i].rank = (pmix_rank_t)i;
-    }
-    pst = PMIx_Fence(fence_procs, (size_t)num_nodes, &fence_info, 1);
-    free(fence_procs);
+    pst = PMIx_Fence(NULL, 0, &fence_info, 1);
     PMIX_INFO_DESTRUCT(&fence_info);
     if (pst != PMIX_SUCCESS) {
         fprintf(stderr, "CAPE UCX: PMIx_Fence failed: %s\n",
