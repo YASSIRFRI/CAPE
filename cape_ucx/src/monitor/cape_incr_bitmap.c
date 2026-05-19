@@ -33,6 +33,7 @@
 #include <linux/userfaultfd.h>
 #include <dirent.h>
 #include <sys/personality.h>
+#include <sys/prctl.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -2537,6 +2538,17 @@ int main(int argc, char * argv[]){
 				int _p = personality(0xffffffff);
 				if (_p >= 0 && !(_p & ADDR_NO_RANDOMIZE))
 					personality((unsigned long)_p | ADDR_NO_RANDOMIZE);
+			}
+			/* PMIx/SLURM marks the launched process non-dumpable to
+			 * keep credentials out of core dumps; the child inherits
+			 * that across fork() and the kernel then refuses
+			 * PTRACE_TRACEME with EPERM. Re-mark ourselves dumpable
+			 * before asking to be traced. */
+			if (prctl(PR_SET_DUMPABLE, 1, 0, 0, 0) != 0) {
+				fprintf(stderr,
+					"CAPE_DBG child pid=%d: PR_SET_DUMPABLE failed: %s\n",
+					getpid(), strerror(errno));
+				fflush(stderr);
 			}
 			if (ptrace(PTRACE_TRACEME, 0, 0, 0) != 0) {
 				fprintf(stderr,
