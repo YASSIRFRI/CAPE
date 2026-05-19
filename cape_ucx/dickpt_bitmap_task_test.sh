@@ -34,6 +34,10 @@ mkdir -p "${BOOTSTRAP_ROOT}"
 NODES_LIST=(${NODES_LIST:-2 3 4})
 REPS="${REPS:-1}"
 PROFILE="${PROFILE:-1}"
+USE_PMIX="${USE_PMIX:-1}"
+SRUN_RESOURCE_MODE="${SRUN_RESOURCE_MODE:-shared}"  # shared|exclusive|overlap
+SRUN_STEP_TIMEOUT="${SRUN_STEP_TIMEOUT:-180}"
+SRUN_LABEL="${SRUN_LABEL:-1}"
 
 module purge
 module load GCCcore/14.2.0
@@ -55,18 +59,20 @@ fi
 PMIX_FLAGS=""
 PMIX_LINK=""
 SRUN_MPI_MODE="${SRUN_MPI_MODE:-none}"
-for _pfx in "${EBROOTPMIX:-__none__}" \
-            "$(pmix_info --path prefix 2>/dev/null | awk '{print $NF}')" \
-            "$(pkg-config --variable=prefix pmix 2>/dev/null)"; do
-    [ "${_pfx}" = "__none__" ] && continue
-    [ -z "${_pfx}" ] && continue
-    if [ -f "${_pfx}/include/pmix.h" ] && [ -f "${_pfx}/lib/libpmix.so" ]; then
-        PMIX_FLAGS="-DUSE_PMIX -I${_pfx}/include"
-        PMIX_LINK="-L${_pfx}/lib -lpmix -Wl,-rpath,${_pfx}/lib"
-        SRUN_MPI_MODE="pmix"
-        break
-    fi
-done
+if [ "${USE_PMIX}" != "0" ]; then
+    for _pfx in "${EBROOTPMIX:-__none__}" \
+                "$(pmix_info --path prefix 2>/dev/null | awk '{print $NF}')" \
+                "$(pkg-config --variable=prefix pmix 2>/dev/null)"; do
+        [ "${_pfx}" = "__none__" ] && continue
+        [ -z "${_pfx}" ] && continue
+        if [ -f "${_pfx}/include/pmix.h" ] && [ -f "${_pfx}/lib/libpmix.so" ]; then
+            PMIX_FLAGS="-DUSE_PMIX -I${_pfx}/include"
+            PMIX_LINK="-L${_pfx}/lib -lpmix -Wl,-rpath,${_pfx}/lib"
+            SRUN_MPI_MODE="pmix"
+            break
+        fi
+    done
+fi
 
 
 MAKE_ARGS=(
@@ -87,6 +93,7 @@ echo "Testing DICKPT bitmap OpenMP task scheduling"
 echo "DICKPT:  src/apps/cape_task_example_dickpt.c -> ${BIN}"
 echo "Monitor: src/monitor/cape_incr_bitmap.c -> ${MONITOR}"
 echo "Nodes: ${NODES_LIST[*]}  Reps: ${REPS}  MPI mode: ${SRUN_MPI_MODE}"
+echo "Launch: resource=${SRUN_RESOURCE_MODE} timeout=${SRUN_STEP_TIMEOUT}s"
 echo "Results dir: ${RESULTS_DIR}"
 
 run_one() {
@@ -96,6 +103,8 @@ run_one() {
     local bid="${JOB_TAG}_${tag}"
     local bdir="${BOOTSTRAP_ROOT}/${bid}"
     local rc=0
+    local srun_args=()
+    local timeout_cmd=()
 
     if [ "${nn}" -gt "${TOTAL_NODES}" ]; then
         echo "[skip] ${tag}: requested ${nn} nodes but allocation has ${TOTAL_NODES}"
@@ -107,13 +116,43 @@ run_one() {
     : > "${log}"
 
     echo "[launch] ${tag}"
+    srun_args=(--mpi="${SRUN_MPI_MODE}" --nodes="${nn}" --ntasks="${nn}" --ntasks-per-node=1 --kill-on-bad-exit=1)
+    if [ "${SRUN_LABEL}" != "0" ]; then
+        srun_args+=(--label)
+    fi
+    case "${SRUN_RESOURCE_MODE}" in
+        shared|"")
+            ;;
+        exclusive)
+            srun_args=(--exclusive "${srun_args[@]}")
+            ;;
+        overlap)
+            srun_args=(--overlap "${srun_args[@]}")
+            ;;
+        *)
+            echo "[fail] invalid SRUN_RESOURCE_MODE=${SRUN_RESOURCE_MODE}; use shared, exclusive, or overlap" >&2
+            return 1
+            ;;
+    esac
+    if command -v timeout >/dev/null 2>&1 && [ "${SRUN_STEP_TIMEOUT}" -gt 0 ]; then
+        timeout_cmd=(timeout --foreground --kill-after=15s "${SRUN_STEP_TIMEOUT}s")
+    fi
+    {
+        echo "[start] $(date -Is)"
+        echo "[cmd] CAPE_UCX_BOOTSTRAP_ID=${bid} CAPE_UCX_BOOTSTRAP_DIR=${bdir} ${timeout_cmd[*]} srun ${srun_args[*]} ${MONITOR} ${BIN} ${REPS}"
+    } >>"${log}"
     CAPE_UCX_BOOTSTRAP_ID="${bid}" CAPE_UCX_BOOTSTRAP_DIR="${bdir}" \
-    srun --exclusive --mpi="${SRUN_MPI_MODE}" --nodes="${nn}" --ntasks="${nn}" --ntasks-per-node=1 \
+    "${timeout_cmd[@]}" srun "${srun_args[@]}" \
          "${MONITOR}" "${BIN}" "${REPS}" >>"${log}" 2>&1 || rc=$?
     rm -rf "${bdir}"
 
     if [ "${rc}" -ne 0 ]; then
-        echo "[fail] ${tag} rc=${rc} log=${log}" >&2
+        if [ "${rc}" -eq 124 ]; then
+            echo "[fail] ${tag} timed out after ${SRUN_STEP_TIMEOUT}s log=${log}" >&2
+        else
+            echo "[fail] ${tag} rc=${rc} log=${log}" >&2
+        fi
+        tail -n 40 "${log}" >&2 || true
         return "${rc}"
     fi
     if ! grep -q "TASK_RESULT" "${log}"; then

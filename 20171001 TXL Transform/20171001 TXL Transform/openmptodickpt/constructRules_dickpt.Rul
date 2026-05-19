@@ -118,8 +118,8 @@ function replaceParallel
 		'dickpt_allreduce_ckpt();
 
 	construct NewDickptParallel [dickpt_parallel]
-		DickptStartCkpt
 		NewClauseList
+		DickptStartCkpt
 		InnerStatement
 		DickptGenerateCkpt
 		DickptAllreduce
@@ -231,8 +231,8 @@ function replaceParallelSections
 		'dickpt_allreduce_ckpt();
 
 	construct NewDickptSections [dickpt_parallel_sections]
-		DickptStartCkpt
 		NewClausesList
+		DickptStartCkpt
 		SectionList
 		DickptGenerateCkpt
 		DickptAllreduce

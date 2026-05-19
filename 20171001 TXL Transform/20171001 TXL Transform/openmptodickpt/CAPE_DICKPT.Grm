@@ -98,8 +98,8 @@ end define
 % dickpt_stop_ckpt releases tracking.
 
 define dickpt_parallel
+	[clauses]
 	[dickpt_start_ckpt]						[IN]
-	[clauses]								[EX]
 	[repeat compound_statement_body]
 	[dickpt_generate_ckpt]
 	[dickpt_allreduce]
@@ -127,8 +127,8 @@ define dickpt_parallel_for
 end define
 
 define dickpt_parallel_sections
-	[dickpt_start_ckpt]
 	[clauses]
+	[dickpt_start_ckpt]
 	[repeat dickpt_section_statement+]
 	[dickpt_generate_ckpt]
 	[dickpt_allreduce]

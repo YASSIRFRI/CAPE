@@ -2228,6 +2228,24 @@ static void cape_ucx_init(void)
     }
     num_nodes = (int)val->data.uint32;
     PMIX_VALUE_RELEASE(val);
+
+    {
+        int step_tasks = cape_env_int("SLURM_STEP_NUM_TASKS", -1);
+        if (step_tasks <= 0)
+            step_tasks = cape_env_int("PMI_SIZE", -1);
+        if (step_tasks <= 0)
+            step_tasks = cape_env_int("PMIX_SIZE", -1);
+        if (step_tasks <= 0)
+            step_tasks = cape_env_int("SLURM_NTASKS", -1);
+        if (step_tasks > 0)
+            num_nodes = step_tasks;
+    }
+    if ((int)node < 0 || (int)node >= num_nodes) {
+        fprintf(stderr,
+                "CAPE UCX: PMIx rank %ld is outside step size %d\n",
+                node, num_nodes);
+        exit(1);
+    }
 #else
     const char *rank_str = getenv("SLURM_PROCID");
     const char *size_str = getenv("SLURM_NTASKS");
