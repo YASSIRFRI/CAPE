@@ -2538,10 +2538,18 @@ int main(int argc, char * argv[]){
 				if (_p >= 0 && !(_p & ADDR_NO_RANDOMIZE))
 					personality((unsigned long)_p | ADDR_NO_RANDOMIZE);
 			}
-			ptrace ( PTRACE_TRACEME, NULL, NULL, NULL );
+			if (ptrace(PTRACE_TRACEME, 0, 0, 0) != 0) {
+				fprintf(stderr,
+					"CAPE_DBG child pid=%d: PTRACE_TRACEME FAILED: %s "
+					"(check /proc/sys/kernel/yama/ptrace_scope; "
+					"set to 0, or run with CAP_SYS_PTRACE)\n",
+					getpid(), strerror(errno));
+				fflush(stderr);
+				_exit(3);
+			}
 			execv ( exec_file , &argv[1] );
 			perror (exec_file) ;
-			return 2 ;
+			_exit(2);
 		default :
 			control_fd = control_pair[0];
 			close(control_pair[1]);
