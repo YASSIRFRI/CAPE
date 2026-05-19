@@ -72,6 +72,9 @@ cape_write_stress:
 cape_bitmap_write_stress:
 	$(COMPILE_BITMAP) $(C_FOLDER)/apps/cape_write_stress.c -o $(EXE_FOLDER)/cape_bitmap_write_stress $(LDFLAGS)
 
+cape_bitmap_write_sparce:
+	$(COMPILE_BITMAP) $(C_FOLDER)/apps/cape_write_sparce.c -o $(EXE_FOLDER)/cape_bitmap_write_sparce $(LDFLAGS)
+
 cape_mamult2d:
 	$(COMPILE) $(C_FOLDER)/apps/cape_mamult2d.c -o $(EXE_FOLDER)/cape_mamult2d $(LDFLAGS)
 
