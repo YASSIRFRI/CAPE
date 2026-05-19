@@ -3169,12 +3169,11 @@ void cape_end(unsigned char directive, unsigned char ops_flag)
 		exit(1);
 	}
 	cape_stop_ckpt();
+	/* require_allreduce_checkpoint merges peer checkpoints AND injects
+	 * the merged result into local memory — do not call require_inject
+	 * separately or we'd fread from the already-closed total_ckpt_stream. */
 	if (require_allreduce_checkpoint() != 0) {
 		fprintf(stderr, "cape_end: allreduce_checkpoint failed on node %ld\n", node);
-		exit(1);
-	}
-	if (require_inject_checkpoint() != 0) {
-		fprintf(stderr, "cape_end: inject_checkpoint failed on node %ld\n", node);
 		exit(1);
 	}
 }
