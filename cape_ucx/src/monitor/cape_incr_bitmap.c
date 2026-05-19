@@ -1432,6 +1432,12 @@ static size_t ucx_scratch_total_in_cap;
 static size_t ucx_scratch_initial_cap;
 static int total_ckpt_uses_scratch;
 
+#define CAPE_DBG(fmt, args...) do { \
+	fprintf(stderr, "CAPE_DBG rank=%ld pid=%d: " fmt "\n", \
+		node, getpid(), ## args); \
+	fflush(stderr); \
+} while (0)
+
 /* Per-request state allocated by UCX in the request headroom */
 typedef struct {
     volatile int completed;
@@ -1698,10 +1704,20 @@ static unsigned long long cape_ucx_wait(void *req, size_t expect_len,
     }
     cape_ucx_req_t *r = (cape_ucx_req_t *)req;
     unsigned idle_iters = 0;
+    CAPE_DBG("ucx_wait begin expect_len=%zu check_len=%d", expect_len, check_len);
     while (!r->completed) {
         unsigned events = ucp_worker_progress(ucp_worker);
         CAPE_PROFILE_INC(ucx_progress_calls);
+        if (events == 0 && ++idle_iters >= 10000000) {
+            CAPE_DBG("ucx_wait still waiting expect_len=%zu check_len=%d", expect_len, check_len);
+            idle_iters = 0;
+        } else if (events != 0) {
+            idle_iters = 0;
+        }
     }
+    CAPE_DBG("ucx_wait done status=%s recv_len=%zu sender_tag=0x%lx",
+             ucs_status_string(r->status), r->recv_len,
+             (unsigned long)r->sender_tag);
 #ifdef CAPE_PROFILE
     unsigned long long wait_ns = cape_profile_elapsed_ns(wait_start_ns);
     CAPE_PROFILE_ADD(ucx_wait_ns, wait_ns);
@@ -1767,6 +1783,9 @@ static ucp_tag_message_h cape_ucx_probe_msg(ucp_tag_t recv_tag,
             if (events == 0) {
                 CAPE_PROFILE_INC(ucx_progress_idle_calls);
                 if (++idle_iters >= 1000000) {
+                    CAPE_DBG("ucx_probe waiting tag=0x%lx mask=0x%lx",
+                             (unsigned long)recv_tag,
+                             (unsigned long)recv_mask);
                     sched_yield();
                     idle_iters = 0;
                 }
@@ -1898,7 +1917,10 @@ static unsigned char *cape_ucx_recv_probe_alloc(size_t *recvlen, int src,
         .cb.recv      = cape_recv_cb
     };
 
+	CAPE_DBG("recv_probe begin src=%d token=0x%x", src, token);
 	msg = cape_ucx_probe_msg_exact(recv_tag, &info, &probe_wait_ns);
+	CAPE_DBG("recv_probe matched src=%d token=0x%x len=%zu sender_tag=0x%lx",
+		 src, token, info.length, (unsigned long)info.sender_tag);
     buf = malloc(info.length == 0 ? 1 : info.length);
     if (buf == NULL) {
         perror("malloc(probed UCX recv)");
@@ -1915,6 +1937,7 @@ static unsigned char *cape_ucx_recv_probe_alloc(size_t *recvlen, int src,
     CAPE_PROFILE_INC(ucx_wait_recv_calls);
 #endif
 	*recvlen = info.length;
+	CAPE_DBG("recv_probe done src=%d token=0x%x len=%zu", src, token, *recvlen);
 	return buf;
 }
 
@@ -1936,7 +1959,11 @@ static unsigned char *cape_ucx_recv_probe_alloc_any(size_t *recvlen,
 	    .cb.recv      = cape_recv_cb
 	};
 
+	CAPE_DBG("recv_probe_any begin token=0x%x", token);
 	msg = cape_ucx_probe_msg_any(token, &info, &probe_wait_ns);
+	CAPE_DBG("recv_probe_any matched token=0x%x len=%zu sender=%d sender_tag=0x%lx",
+		 token, info.length, cape_ucx_sender_from_tag(info.sender_tag),
+		 (unsigned long)info.sender_tag);
 	buf = malloc(info.length == 0 ? 1 : info.length);
 	if (buf == NULL) {
 		perror("malloc(probed wildcard UCX recv)");
@@ -1955,6 +1982,8 @@ static unsigned char *cape_ucx_recv_probe_alloc_any(size_t *recvlen,
 	*recvlen = info.length;
 	if (sender != NULL)
 		*sender = cape_ucx_sender_from_tag(info.sender_tag);
+	CAPE_DBG("recv_probe_any done token=0x%x len=%zu sender=%d",
+		 token, *recvlen, sender ? *sender : -1);
 	return buf;
 }
 
@@ -1973,8 +2002,10 @@ static void cape_ucx_send(const void *buf, size_t len, int dest, uint32_t token)
         sp.op_attr_mask |= UCP_OP_ATTR_FIELD_MEMH;
         sp.memh = memh;
     }
+    CAPE_DBG("send begin dest=%d token=0x%x len=%zu", dest, token, len);
     void *req = ucp_tag_send_nbx(ucp_endpoints[dest], buf, len, tag, &sp);
     unsigned long long send_wait_ns = cape_ucx_wait(req, 0, 0, NULL);
+    CAPE_DBG("send done dest=%d token=0x%x len=%zu", dest, token, len);
     CAPE_PROFILE_ADD_NS(ucx_send_ns, start_ns);
     CAPE_PROFILE_INC(ucx_send_calls);
     CAPE_PROFILE_ADD(ucx_send_bytes, (uint64_t)len);
@@ -1999,8 +2030,10 @@ static void cape_ucx_recv(void *buf, size_t len, int src, uint32_t token)
         rp.op_attr_mask |= UCP_OP_ATTR_FIELD_MEMH;
         rp.memh = memh;
     }
+    CAPE_DBG("recv begin src=%d token=0x%x len=%zu", src, token, len);
     void *req = ucp_tag_recv_nbx(ucp_worker, buf, len, tag, CAPE_UCX_TAG_MASK, &rp);
     unsigned long long recv_wait_ns = cape_ucx_wait(req, len, 1, NULL);
+    CAPE_DBG("recv done src=%d token=0x%x len=%zu", src, token, len);
     CAPE_PROFILE_ADD_NS(ucx_recv_ns, start_ns);
     CAPE_PROFILE_INC(ucx_recv_calls);
     CAPE_PROFILE_ADD(ucx_recv_bytes, (uint64_t)len);
@@ -2203,8 +2236,10 @@ static void ucx_exchange_addresses_via_fs(const char *dir, const char *jobid,
 /* Initialize UCX context, worker, and endpoints */
 static void cape_ucx_init(void)
 {
+    CAPE_DBG("cape_ucx_init enter");
     /* 1. Get rank and size */
 #ifdef USE_PMIX
+    CAPE_DBG("PMIx_Init begin");
     PMIX_PROC_CONSTRUCT(&pmix_myproc);
     pmix_status_t pst = PMIx_Init(&pmix_myproc, NULL, 0);
     if (pst != PMIX_SUCCESS) {
@@ -2213,6 +2248,7 @@ static void cape_ucx_init(void)
         exit(1);
     }
     node = (unsigned long)pmix_myproc.rank;
+    CAPE_DBG("PMIx_Init done nspace=%s rank=%ld", pmix_myproc.nspace, node);
 
     {
         int step_tasks = cape_env_int("SLURM_STEP_NUM_TASKS", -1);
@@ -2242,6 +2278,12 @@ static void cape_ucx_init(void)
             PMIX_VALUE_RELEASE(val);
         }
     }
+    CAPE_DBG("rank/size resolved num_nodes=%d env SLURM_STEP_NUM_TASKS=%s SLURM_NTASKS=%s PMI_SIZE=%s PMIX_SIZE=%s",
+             num_nodes,
+             getenv("SLURM_STEP_NUM_TASKS") ? getenv("SLURM_STEP_NUM_TASKS") : "",
+             getenv("SLURM_NTASKS") ? getenv("SLURM_NTASKS") : "",
+             getenv("PMI_SIZE") ? getenv("PMI_SIZE") : "",
+             getenv("PMIX_SIZE") ? getenv("PMIX_SIZE") : "");
     if ((int)node < 0 || (int)node >= num_nodes) {
         fprintf(stderr,
                 "CAPE UCX: PMIx rank %ld is outside step size %d\n",
@@ -2261,9 +2303,11 @@ static void cape_ucx_init(void)
     }
     node      = (unsigned long)atoi(rank_str);
     num_nodes = atoi(size_str);
+    CAPE_DBG("rank/size resolved via env num_nodes=%d", num_nodes);
 #endif
 
     /* 2. Initialise UCX context */
+    CAPE_DBG("ucp_init begin");
     ucp_params_t ucp_params;
     memset(&ucp_params, 0, sizeof(ucp_params));
     ucp_params.field_mask   = UCP_PARAM_FIELD_FEATURES
@@ -2286,8 +2330,10 @@ static void cape_ucx_init(void)
                 ucs_status_string(st));
         exit(1);
     }
+    CAPE_DBG("ucp_init done");
 
     /* 3. Create a single-threaded UCX worker */
+    CAPE_DBG("ucp_worker_create begin");
     ucp_worker_params_t wp;
     memset(&wp, 0, sizeof(wp));
     wp.field_mask  = UCP_WORKER_PARAM_FIELD_THREAD_MODE;
@@ -2298,13 +2344,17 @@ static void cape_ucx_init(void)
                 ucs_status_string(st));
         exit(1);
     }
+    CAPE_DBG("ucp_worker_create done");
     if (cape_ucx_scratch_init() != 0)
         exit(1);
+    CAPE_DBG("scratch init done cap=%zu", ucx_scratch_initial_cap);
 
     /* 4. Exchange worker addresses and build endpoints */
+    CAPE_DBG("ucp_worker_get_address begin");
     ucp_address_t *local_addr;
     size_t         local_addr_len;
     ucp_worker_get_address(ucp_worker, &local_addr, &local_addr_len);
+    CAPE_DBG("ucp_worker_get_address done len=%zu", local_addr_len);
 
 #ifdef USE_PMIX
     char pmix_key[64];
@@ -2316,28 +2366,22 @@ static void cape_ucx_init(void)
     kval.data.bo.bytes = (char *)local_addr;
     kval.data.bo.size  = local_addr_len;
 
+    CAPE_DBG("PMIx_Put begin key=%s len=%zu", pmix_key, local_addr_len);
     pst = PMIx_Put(PMIX_GLOBAL, pmix_key, &kval);
     if (pst != PMIX_SUCCESS) {
         fprintf(stderr, "CAPE UCX: PMIx_Put failed: %s\n",
                 PMIx_Error_string(pst));
         exit(1);
     }
+    CAPE_DBG("PMIx_Put done");
+    CAPE_DBG("PMIx_Commit begin");
     pst = PMIx_Commit();
     if (pst != PMIX_SUCCESS) {
         fprintf(stderr, "CAPE UCX: PMIx_Commit failed: %s\n",
                 PMIx_Error_string(pst));
         exit(1);
     }
-    pmix_info_t fence_info;
-    PMIX_INFO_CONSTRUCT(&fence_info);
-    PMIX_INFO_LOAD(&fence_info, PMIX_COLLECT_DATA, NULL, PMIX_BOOL);
-    pst = PMIx_Fence(NULL, 0, &fence_info, 1);
-    PMIX_INFO_DESTRUCT(&fence_info);
-    if (pst != PMIX_SUCCESS) {
-        fprintf(stderr, "CAPE UCX: PMIx_Fence failed: %s\n",
-                PMIx_Error_string(pst));
-        exit(1);
-    }
+    CAPE_DBG("PMIx_Commit done; peer PMIx_Get begins");
 
     ucp_endpoints = malloc(num_nodes * sizeof(ucp_ep_h));
     for (int i = 0; i < num_nodes; i++) {
@@ -2348,16 +2392,19 @@ static void cape_ucx_init(void)
 
         snprintf(pmix_key, sizeof(pmix_key), "cape_ucx_addr_%d", i);
         pmix_value_t *peer_val;
+        CAPE_DBG("PMIx_Get begin peer=%d key=%s", i, pmix_key);
         pst = PMIx_Get(&peer, pmix_key, NULL, 0, &peer_val);
         if (pst != PMIX_SUCCESS) {
             fprintf(stderr, "CAPE UCX: PMIx_Get(addr, rank=%d) failed: %s\n",
                     i, PMIx_Error_string(pst));
             exit(1);
         }
+        CAPE_DBG("PMIx_Get done peer=%d len=%zu", i, peer_val->data.bo.size);
         ucp_ep_params_t ep_params;
         memset(&ep_params, 0, sizeof(ep_params));
         ep_params.field_mask = UCP_EP_PARAM_FIELD_REMOTE_ADDRESS;
         ep_params.address    = (ucp_address_t *)peer_val->data.bo.bytes;
+        CAPE_DBG("ucp_ep_create begin peer=%d", i);
         st = ucp_ep_create(ucp_worker, &ep_params, &ucp_endpoints[i]);
         PMIX_VALUE_RELEASE(peer_val);
         if (st != UCS_OK) {
@@ -2365,14 +2412,18 @@ static void cape_ucx_init(void)
                     i, ucs_status_string(st));
             exit(1);
         }
+        CAPE_DBG("ucp_ep_create done peer=%d", i);
     }
 #else
     const char *jobid    = cape_ucx_bootstrap_id();
     const char *sharedir = cape_ucx_bootstrap_dir();
+    CAPE_DBG("fs bootstrap begin dir=%s id=%s", sharedir, jobid);
     ucx_exchange_addresses_via_fs(sharedir, jobid, local_addr, local_addr_len);
+    CAPE_DBG("fs bootstrap done");
 #endif
 
     ucp_worker_release_address(ucp_worker, local_addr);
+    CAPE_DBG("cape_ucx_init done");
 }
 
 /* Finalize UCX (close endpoints, destroy worker, cleanup context) */
@@ -2461,6 +2512,7 @@ int main(int argc, char * argv[]){
 	}
 
 	exec_file = argv[1];
+	CAPE_DBG("monitor main start app=%s argc=%d", exec_file, argc);
 
 	if (socketpair(AF_UNIX, SOCK_SEQPACKET, 0, control_pair) == -1) {
 		perror("socketpair");
@@ -2474,6 +2526,8 @@ int main(int argc, char * argv[]){
 			return 1 ;
 		case 0 :	
 			close(control_pair[0]);
+			fprintf(stderr, "CAPE_DBG child pid=%d: before exec app=%s\n", getpid(), exec_file);
+			fflush(stderr);
 			snprintf(control_fd_text, sizeof(control_fd_text), "%d", control_pair[1]);
 			setenv(CAPE_DICKPT_ENV_SOCK_FD, control_fd_text, 1);
 			if (cape_apply_affinity(0) != 0)
@@ -2491,17 +2545,23 @@ int main(int argc, char * argv[]){
 		default :
 			control_fd = control_pair[0];
 			close(control_pair[1]);
+			CAPE_DBG("parent after fork child_pid=%d", child_id);
 			if (cape_apply_affinity(1) != 0)
 				return 1;
+			CAPE_DBG("parent before cape_ucx_init");
 			cape_ucx_init();
+			CAPE_DBG("parent after cape_ucx_init");
 			break;
 	}
 	
 	
 
 	//wait for cape program finish startup	
+	CAPE_DBG("waiting for child exec startup");
 	for ( process_state = 0 ; process_state != 2 ; ) {
 		tracer_wait ( child_id, & status, 0, & u ) ;
+		CAPE_DBG("startup wait state=%d status=0x%x orig_rax=%lld",
+			 process_state, status, (long long)u.regs.orig_rax);
 		switch ( process_state ) {
 		case 0 :	//Wait for ``execve'' to start
 			if ( u . regs . orig_rax == SYS_execve )
@@ -2518,6 +2578,7 @@ int main(int argc, char * argv[]){
 		}//end switch
 	}//end for
 
+	CAPE_DBG("continuing child after startup");
 	ptrace(PTRACE_CONT, child_id, NULL, NULL ) ;
 
 	//Monitor CAPE program
@@ -2527,15 +2588,19 @@ int main(int argc, char * argv[]){
 			break;
 		}
 		if(WIFEXITED(status)) {
+			CAPE_DBG("child exited status=%d", WEXITSTATUS(status));
 			break;
 		}
 		if(WIFSIGNALED(status)) {
+			CAPE_DBG("child signaled sig=%d", WTERMSIG(status));
 			break;
 		}
 		if(WIFSTOPPED(status) && WSTOPSIG(status) == SIGTRAP) {
 				int dx = 0;
 				ptrace(PTRACE_GETREGS, child_id, NULL, &regs);
 				dx = (int)(regs.rdx & 0xFFFFFFFFu);
+				CAPE_DBG("SIGTRAP dx=%d rip=0x%llx", dx,
+					 (unsigned long long)regs.rip);
 				CAPE_PROFILE_INC(sigtrap_count);
 				switch(dx){
 					case S_LOCK_PROCESS_MEMORY:  //Lock process 		
@@ -3069,6 +3134,7 @@ void end_shared_data(){
 int require_generate_checkpoint(){
 	int rc=0;
 
+	CAPE_DBG("require_generate_checkpoint enter");
 	rc = cape_drain_userfaultfd();
 	if (rc != 0)
 		return rc;
@@ -3089,6 +3155,8 @@ int require_generate_checkpoint(){
 
 	
 	if(rc!=0) printf("Monitor %ld: Error on requiring generate checkpoint\n", node);	
+	CAPE_DBG("require_generate_checkpoint exit rc=%d final_size=%zu",
+		 rc, final_ckpt_size);
 	return rc;
 }
 
@@ -3117,6 +3185,8 @@ static void release_final_checkpoint(void)
 }
 
 int send_checkpoint(int destination){
+	CAPE_DBG("send_checkpoint destination=%d size=%zu",
+		 destination, final_ckpt_size);
 	cape_ucx_send(final_ckpt, final_ckpt_size, destination, TAG_CKPT_DATA);
 	release_final_checkpoint();
 	return 0;
@@ -3125,6 +3195,7 @@ int send_checkpoint(int destination){
 static int cape_task_pool_reset(void)
 {
 	int i;
+	CAPE_DBG("task_pool_reset enter num_nodes=%d", num_nodes);
 
 	free(task_idle_workers);
 	free(task_worker_busy);
@@ -3154,6 +3225,7 @@ static int cape_task_pool_reset(void)
 	for (i = 1; i < num_nodes; ++i)
 		task_idle_workers[task_idle_count++] = i;
 	task_pool_ready = 1;
+	CAPE_DBG("task_pool_reset done idle_count=%d", task_idle_count);
 	return 0;
 }
 
@@ -3162,6 +3234,8 @@ static int cape_task_record_completion(int worker, unsigned char *payload,
 {
 	FILE *stream;
 	int rc;
+	CAPE_DBG("task completion from worker=%d payload_size=%zu",
+		 worker, payload_size);
 
 	if (worker <= 0 || worker >= num_nodes) {
 		fprintf(stderr,
@@ -3200,6 +3274,8 @@ static int cape_task_record_completion(int worker, unsigned char *payload,
 	task_idle_workers[task_idle_count++] = worker;
 	task_active_workers--;
 	task_completed_jobs++;
+	CAPE_DBG("task completion merged worker=%d completed=%lu active=%d idle=%d",
+		 worker, task_completed_jobs, task_active_workers, task_idle_count);
 	return 0;
 }
 
@@ -3211,6 +3287,8 @@ static int cape_task_wait_for_completion(void)
 
 	payload = cape_ucx_recv_probe_alloc_any(&payload_size, &worker,
 						TAG_CKPT_DATA);
+	CAPE_DBG("task wait completion received worker=%d size=%zu",
+		 worker, payload_size);
 	return cape_task_record_completion(worker, payload, payload_size);
 }
 
@@ -3219,12 +3297,16 @@ static int cape_task_get_idle_worker(int *worker)
 	int rc;
 
 	if (!task_pool_ready) {
+		CAPE_DBG("task pool not ready, resetting");
 		rc = cape_task_pool_reset();
 		if (rc != 0)
 			return rc;
 	}
 
 	while (task_idle_count == 0) {
+		CAPE_DBG("no idle worker active=%d completed=%lu dispatched=%lu",
+			 task_active_workers, task_completed_jobs,
+			 task_dispatched_jobs);
 		if (task_active_workers <= 0)
 			return 1;
 		rc = cape_task_wait_for_completion();
@@ -3233,6 +3315,7 @@ static int cape_task_get_idle_worker(int *worker)
 	}
 
 	*worker = task_idle_workers[--task_idle_count];
+	CAPE_DBG("selected idle worker=%d idle_left=%d", *worker, task_idle_count);
 	return 0;
 }
 
@@ -3247,6 +3330,8 @@ static int cape_task_dispatch_checkpoint(int worker)
 
 	current_job++;
 	task_dispatched_jobs++;
+	CAPE_DBG("dispatch checkpoint to worker=%d job=%d/%lu size=%zu",
+		 worker, current_job, number_of_jobs, final_ckpt_size);
 
 	/* The checkpoint is the task payload. The legacy flag still tells the
 	 * worker whether the global task stream has more checkpoints after this
@@ -3302,6 +3387,8 @@ static int cape_task_dispatch_directive(int worker)
 			cape_ucx_send(&skip_msg, sizeof(skip_msg), i,
 				      TAG_CKPT_DATA);
 	}
+	CAPE_DBG("task directive messages sent worker=%d run_size=%zu num_nodes=%d",
+		 worker, run_size, num_nodes);
 	free(run_msg);
 	release_final_checkpoint();
 
@@ -3316,6 +3403,7 @@ int require_dispatch_task_checkpoint()
 {
 	int rc = 0;
 	int worker = -1;
+	CAPE_DBG("require_dispatch_task_checkpoint enter");
 
 	if (node != 0)
 		return 0;
@@ -3332,6 +3420,7 @@ int require_dispatch_task_checkpoint()
 		rc = cape_task_dispatch_directive(worker);
 	if (rc != 0)
 		printf("Monitor %ld: Error on task checkpoint dispatch\n", node);
+	CAPE_DBG("require_dispatch_task_checkpoint exit rc=%d", rc);
 	return rc;
 }
 
@@ -3377,11 +3466,14 @@ int require_receive_task_checkpoint()
 	size_t packet_size = 0;
 	unsigned long assigned = 0;
 	int rc = 0;
+	CAPE_DBG("require_receive_task_checkpoint enter");
 
 	if (node == 0)
 		return send_int_value_to_child(0);
 
 	packet = cape_ucx_recv_probe_alloc(&packet_size, 0, TAG_CKPT_DATA);
+	CAPE_DBG("require_receive_task_checkpoint got packet size=%zu opcode=%u",
+		 packet_size, packet_size >= 1 ? (unsigned)packet[0] : 999u);
 	if (packet_size < 1) {
 		free(packet);
 		return 1;
@@ -3428,6 +3520,8 @@ int require_receive_task_checkpoint()
 	free(packet);
 	if (rc == 0)
 		rc = send_int_value_to_child((int)assigned);
+	CAPE_DBG("require_receive_task_checkpoint exit assigned=%lu rc=%d",
+		 assigned, rc);
 	return rc;
 }
 
@@ -3637,6 +3731,8 @@ int require_inject_checkpoint()
 	FILE *inject_stream = NULL;
 	size_t inject_size = 0;
 	int rc = 0;
+	CAPE_DBG("require_inject_checkpoint enter final_size=%zu total_size=%zu after_size=%zu",
+		 final_ckpt_size, total_ckpt_size, after_ckpt_size);
 
 	if (node != 0) {
 		if (after_ckpt_stream != NULL) {
@@ -3655,6 +3751,7 @@ int require_inject_checkpoint()
 		free(after_ckpt);
 		after_ckpt = NULL;
 		after_ckpt_size = 0;
+		CAPE_DBG("require_inject_checkpoint worker exit rc=%d", rc);
 		return rc;
 	}
 
@@ -3673,6 +3770,7 @@ int require_inject_checkpoint()
 		rc = inject_checkpoint_with_write_access(inject_stream, &inject_size,
 							 &save_regs);
 		cape_total_release();
+		CAPE_DBG("require_inject_checkpoint master total exit rc=%d", rc);
 		return rc;
 	}
 
@@ -3690,6 +3788,7 @@ int require_inject_checkpoint()
 	rc = inject_checkpoint_with_write_access(inject_stream, &inject_size,
 						 &save_regs);
 	release_final_checkpoint();
+	CAPE_DBG("require_inject_checkpoint master final exit rc=%d", rc);
 	return rc;
 }
 
@@ -3835,15 +3934,21 @@ done:
 
  int require_waitfor_checkpoint() {
  	int rc = 0, i;
+	CAPE_DBG("require_waitfor_checkpoint enter task_pool_ready=%d active=%d",
+		 task_pool_ready, task_active_workers);
 
 	if (node == 0 && task_pool_ready) {
 		while (task_active_workers > 0) {
+			CAPE_DBG("waitfor waiting active=%d completed=%lu dispatched=%lu",
+				 task_active_workers, task_completed_jobs,
+				 task_dispatched_jobs);
 			rc = cape_task_wait_for_completion();
 			if (rc != 0)
 				break;
 		}
 	} else if (node == 0) {
 		for (i = 1; i < num_nodes; i++) {
+			CAPE_DBG("waitfor receiving checkpoint from rank=%d", i);
 			after_ckpt_stream = receive_checkpoint(i, &after_ckpt, &after_ckpt_size);
 			rc = merge_external_checkpoint(after_ckpt_stream, after_ckpt,
 						       after_ckpt_size);
@@ -3861,6 +3966,8 @@ done:
 
 	if (rc != 0)
 		printf("Monitor %ld: Error on require_waitfor_checkpoint\n", node);
+	CAPE_DBG("require_waitfor_checkpoint exit rc=%d active=%d completed=%lu",
+		 rc, task_active_workers, task_completed_jobs);
 	return rc;
  }
  /* -----------------------------------------------------------------
@@ -3873,6 +3980,7 @@ int require_broadcast_checkpoint(){
 	int i;
 	unsigned char *src_ckpt = NULL;
 	size_t src_ckpt_size = 0;
+	CAPE_DBG("require_broadcast_checkpoint enter");
 	if(node==0)
 	{
 		if (total_ckpt_stream != NULL && cape_total_stream_update_size() != 0)
@@ -3887,13 +3995,16 @@ int require_broadcast_checkpoint(){
 		buffer_ckpt = src_ckpt;
 		/* Master sends size and data to all slaves */
 		for(i = 1; i < num_nodes; i++){
+			CAPE_DBG("broadcast send rank=%d size=%zu", i, src_ckpt_size);
 			cape_ucx_send(buffer_ckpt, src_ckpt_size, i, TAG_BCAST_DATA);
 		}
 	}
 	else
 	{
 		size_t recv_size;
+		CAPE_DBG("broadcast recv begin");
 		buffer_ckpt = cape_ucx_recv_probe_alloc(&recv_size, 0, TAG_BCAST_DATA);
+		CAPE_DBG("broadcast recv got size=%zu", recv_size);
 		if (recv_size > (size_t)INT_MAX) {
 			free(buffer_ckpt);
 			return 1;
@@ -3905,6 +4016,7 @@ int require_broadcast_checkpoint(){
 		free(buffer_ckpt);
 	}
 
+	CAPE_DBG("require_broadcast_checkpoint exit rc=%d", rc);
 	return rc;
 }
  
