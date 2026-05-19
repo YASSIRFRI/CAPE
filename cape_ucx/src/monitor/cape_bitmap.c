@@ -3110,3 +3110,58 @@ int require_allreduce_checkpoint(){
 	return rc;
 }
 		
+/* ==========================================================================
+ * cape.c-compatible API surface (bitmap backend)
+ *
+ * cape.c exposes a declarative API used by the source-translated apps
+ * (cape_*.c under src/apps/). The bitmap backend implements those same
+ * symbols so an app links unchanged against either backend.
+ * ========================================================================== */
+
+unsigned long __pc__ = 0;
+unsigned long __time_stamp__ = 0;
+
+int cape_get_node_num(void)  { return (int)node; }
+int cape_get_num_nodes(void) { return num_nodes; }
+
+void __enter_func(void) {}
+void __exit_func(void)  {}
+
+/* Declarative region registration. Maps cape.c's (dtype, n_elements) to a
+ * byte length and adds it to the userfaultfd tracked-range list. */
+int cape_declare_variable(void *addr, unsigned char dtype,
+                          unsigned int n_elements, unsigned char ispointer)
+{
+	unsigned int sz = 4;
+	if (!ispointer) {
+		switch (dtype) {
+			case 1: case 2:                                sz = 1; break;
+			case 5: case 6:                                sz = 2; break;
+			case 7: case 8: case 9: case 10: case 11:      sz = 4; break;
+			case 12:                                       sz = 8; break;
+			default:                                       sz = 4;
+		}
+	}
+	cape_register_region(addr, (size_t)sz * (size_t)n_elements);
+	return 0;
+}
+
+int  ckpt_start(void) { return cape_start_ckpt(); }
+void ckpt_stop(void)  { (void)cape_stop_ckpt(); }
+
+/* OpenMP-directive entry / exit. The bitmap backend treats them as plain
+ * start/stop-tracking boundaries; the heavy lifting (generate / merge /
+ * inject) is driven by the require_*_checkpoint() entry points the app
+ * already calls inside cape_end() in cape.c. Stubbed minimally here — fill
+ * in directive-specific logic (PARALLEL_FOR, SECTIONS, …) as needed. */
+void cape_begin(unsigned char directive, long first, long second)
+{
+	(void)directive; (void)first; (void)second;
+	cape_start_ckpt();
+}
+
+void cape_end(unsigned char directive, unsigned char ops_flag)
+{
+	(void)directive; (void)ops_flag;
+	cape_stop_ckpt();
+}
