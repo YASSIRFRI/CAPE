@@ -1,26 +1,13 @@
 #define _GNU_SOURCE
 
-/*
- *	CAPE Monitor: version 5.0 (UCX)
- *		Using Discontinuous incremental checkpointer.
- *		Using UCX directly to send and receive data between nodes
- *	Some change in Version 5
- * 		- Checkpoint structures ( timespan - 4 bytes, regsiter, memory data)
- * 		- Modified: generate_ckpt, merge_ckpt, merge_extern_ckpt, inject_ckpt
- *
- * Try to implement new model for CAPE
- *
- */
-# include <sys/ptrace.h>
-# include <sys/syscall.h>
-# include <sys/user.h>
-# include <sys/wait.h>
-# include <assert.h>
-# include <stdio.h>
-# include <signal.h>
+
+#include <assert.h>
+#include <sys/syscall.h>
+#include <sys/user.h>
+#include <stdio.h>
+#include <signal.h>
 #include <stdlib.h>
 #include <sys/ioctl.h>
-#include <sys/reg.h>
 #include <sys/uio.h>
 #include <string.h>
 #include <math.h>
@@ -28,19 +15,15 @@
 #include <sys/stat.h>
 #include <sys/epoll.h>
 #include <fcntl.h>
-#include <linux/sched.h>
 #include <linux/userfaultfd.h>
 #include <dirent.h>
-#include <sys/personality.h>
 #include <sys/types.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
 #include <unistd.h>
 #include <errno.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <time.h>
+#include <pthread.h>
 
 #include "../include/cape_monitor.h"
 #include "../include/cape_dickpt_uffd.h"
@@ -65,11 +48,13 @@ struct shared_data_ckpt * list_ckpt_tail = NULL;
 struct shared_data_ckpt * final_list_ckpt_head = NULL;
 struct shared_data_ckpt * final_list_ckpt_tail = NULL;
 
-int process_state = 0; //to follow the state of process
-int child_id, parent_id;
-int control_fd = -1;
 int userfault_fd = -1;
 static int epoll_fd = -1;
+static pthread_t uffd_thread;
+static pthread_mutex_t bitmap_lock = PTHREAD_MUTEX_INITIALIZER;
+static volatile int uffd_thread_run = 0;
+/* Legacy pid argument to the in-process ioctl_*_data wrappers; ignored. */
+static const int child_id = 0;
 
 struct cape_dickpt_range *tracked_ranges = NULL;
 size_t tracked_range_count = 0;
@@ -555,66 +540,6 @@ static FILE *open_binary_memstream(unsigned char **bufloc, size_t *sizeloc)
 	return open_memstream((char **)bufloc, sizeloc);
 }
 
-static int read_remote_memory(pid_t pid, unsigned long remote_addr, void *local_buf,
-			      size_t len)
-{
-	size_t done = 0;
-	CAPE_PROFILE_NS_VAR(start_ns);
-	CAPE_PROFILE_NS_START(start_ns);
-
-	while (done < len) {
-		struct iovec local = {
-			.iov_base = (char *)local_buf + done,
-			.iov_len = len - done
-		};
-		struct iovec remote = {
-			.iov_base = (void *)(remote_addr + done),
-			.iov_len = len - done
-		};
-		ssize_t rc = process_vm_readv(pid, &local, 1, &remote, 1, 0);
-
-		if (rc <= 0)
-			return -1;
-		done += (size_t)rc;
-	}
-
-	CAPE_PROFILE_ADD_NS(process_vm_read_ns, start_ns);
-	CAPE_PROFILE_INC(process_vm_read_calls);
-	CAPE_PROFILE_ADD(process_vm_read_bytes, (uint64_t)len);
-
-	return 0;
-}
-
-static int write_remote_memory(pid_t pid, const void *local_buf,
-			       unsigned long remote_addr, size_t len)
-{
-	size_t done = 0;
-	CAPE_PROFILE_NS_VAR(start_ns);
-	CAPE_PROFILE_NS_START(start_ns);
-
-	while (done < len) {
-		struct iovec local = {
-			.iov_base = (void *)((const char *)local_buf + done),
-			.iov_len = len - done
-		};
-		struct iovec remote = {
-			.iov_base = (void *)(remote_addr + done),
-			.iov_len = len - done
-		};
-		ssize_t rc = process_vm_writev(pid, &local, 1, &remote, 1, 0);
-
-		if (rc <= 0)
-			return -1;
-		done += (size_t)rc;
-	}
-
-	CAPE_PROFILE_ADD_NS(process_vm_write_ns, start_ns);
-	CAPE_PROFILE_INC(process_vm_write_calls);
-	CAPE_PROFILE_ADD(process_vm_write_bytes, (uint64_t)len);
-
-	return 0;
-}
-
 static int cape_userfault_writeprotect(unsigned long start, unsigned long len, int enable)
 {
 	struct uffdio_writeprotect wp;
@@ -636,7 +561,7 @@ static int cape_userfault_writeprotect(unsigned long start, unsigned long len, i
 	return 0;
 }
 
-static int cape_capture_dirty_page(unsigned int pid, unsigned long fault_addr)
+static int cape_capture_dirty_page(unsigned long fault_addr)
 {
 	unsigned long aligned_addr;
 	struct page_node *temp_node, *current_node;
@@ -655,10 +580,7 @@ static int cape_capture_dirty_page(unsigned int pid, unsigned long fault_addr)
 		return 1;
 	memset(current_node, 0, sizeof(*current_node));
 
-	if (read_remote_memory(pid, aligned_addr, &(current_node->data), PAGE_SIZE) != 0) {
-		free(current_node);
-		return 1;
-	}
+	memcpy(&(current_node->data), (const void *)aligned_addr, PAGE_SIZE);
 
 	current_node->addr = aligned_addr;
 
@@ -723,7 +645,7 @@ static int cape_handle_userfault_event(void)
 
 	CAPE_PROFILE_INC(userfault_events);
 	page_addr = msg.arg.pagefault.address & ~(PAGE_SIZE - 1);
-	if (cape_capture_dirty_page(child_id, page_addr) != 0) {
+	if (cape_capture_dirty_page(page_addr) != 0) {
 		fprintf(stderr, "Monitor %ld: failed to snapshot page 0x%lx\n",
 		        node, page_addr);
 		return -1;
@@ -740,188 +662,98 @@ static int cape_handle_userfault_event(void)
 int cape_drain_userfaultfd(void)
 {
 	struct epoll_event ev;
+	int rc = 0;
 
 	if (userfault_fd < 0 || !tracking_is_enabled)
 		return 0;
 
+	/* Serialize against the uffd worker thread which also reads events. */
+	pthread_mutex_lock(&bitmap_lock);
 	while (epoll_wait(epoll_fd, &ev, 1, 0) > 0) {
 		if ((ev.events & EPOLLIN) == 0)
 			break;
-		if (cape_handle_userfault_event() != 0)
-			return -1;
+		if (cape_handle_userfault_event() != 0) {
+			rc = -1;
+			break;
+		}
 	}
-
-	return 0;
+	pthread_mutex_unlock(&bitmap_lock);
+	return rc;
 }
 
-int cape_wait_for_child_event(pid_t pid, int *status)
+static void *uffd_thread_main(void *unused)
 {
-	CAPE_PROFILE_NS_VAR(total_start_ns);
-	CAPE_PROFILE_NS_START(total_start_ns);
-
-	if (userfault_fd < 0 || !tracking_is_enabled)
-	{
-		CAPE_PROFILE_NS_VAR(wait_start_ns);
-		pid_t rc;
-		CAPE_PROFILE_NS_START(wait_start_ns);
-		/* Retry on EINTR — otherwise any signal delivered to the monitor
-		 * before tracking is enabled (e.g. between fork and the app's
-		 * first int3) causes us to return -1, the main loop to break,
-		 * and control_fd[0] to close while the app is mid-sendmsg →
-		 * "sendmsg(userfaultfd setup) failed: Broken pipe". */
-		do {
-			rc = waitpid(pid, status, 0);
-		} while (rc == -1 && errno == EINTR);
-
-		CAPE_PROFILE_ADD_NS(wait_for_child_ns, wait_start_ns);
-		CAPE_PROFILE_ADD_NS(wait_blocking_ns, wait_start_ns);
-		CAPE_PROFILE_ADD_NS(waitpid_ns, wait_start_ns);
-		CAPE_PROFILE_INC(waitpid_calls);
-		return rc;
+	(void)unused;
+	while (uffd_thread_run) {
+		struct epoll_event ev;
+		int n = epoll_wait(epoll_fd, &ev, 1, 100);
+		if (n < 0) {
+			if (errno == EINTR) continue;
+			break;
+		}
+		if (n == 0) continue;
+		if ((ev.events & EPOLLIN) == 0) continue;
+		pthread_mutex_lock(&bitmap_lock);
+		cape_handle_userfault_event();
+		pthread_mutex_unlock(&bitmap_lock);
 	}
-
-	for (;;) {
-		CAPE_PROFILE_NS_VAR(waitpid_start_ns);
-		pid_t rc;
-
-		CAPE_PROFILE_INC(wait_loops);
-		CAPE_PROFILE_NS_START(waitpid_start_ns);
-		rc = waitpid(pid, status, WNOHANG);
-		CAPE_PROFILE_ADD_NS(waitpid_ns, waitpid_start_ns);
-		CAPE_PROFILE_INC(waitpid_calls);
-
-		if (rc == pid) {
-			CAPE_PROFILE_ADD_NS(wait_for_child_ns, total_start_ns);
-			CAPE_PROFILE_ADD_NS(wait_tracked_ns, total_start_ns);
-			return rc;
-		}
-		if (rc == -1) {
-			if (errno == EINTR)
-				continue;
-			return -1;
-		}
-		if (cape_drain_userfaultfd() != 0)
-			return -1;
-
-		{
-			struct epoll_event evs[2];
-			int nfds, i;
-			CAPE_PROFILE_NS_VAR(poll_start_ns);
-			/* Poll userfaultfd briefly, then loop back to waitpid(WNOHANG)
-			 * to detect ptrace stops from the child. */
-			int timeout = 1;
-
-			CAPE_PROFILE_NS_START(poll_start_ns);
-			if (epoll_fd < 0) {
-				/* userfaultfd setup hasn't happened yet (app is still
-				 * starting up and about to sendmsg its uffd to us).
-				 * Just sleep briefly and loop back to waitpid — do NOT
-				 * touch epoll_fd here or we'd EBADF-out, exit, and
-				 * close the control socket while the app is mid-sendmsg. */
-				struct timespec ts = { 0, 1 * 1000 * 1000 }; /* 1 ms */
-				nanosleep(&ts, NULL);
-				nfds = 0;
-			} else {
-				nfds = epoll_wait(epoll_fd, evs, 2, timeout);
-			}
-			CAPE_PROFILE_ADD_NS(poll_ns, poll_start_ns);
-			CAPE_PROFILE_INC(poll_calls);
-			if (nfds == 0)
-				CAPE_PROFILE_INC(poll_timeouts);
-			if (nfds == -1 && errno != EINTR)
-				return -1;
-			for (i = 0; i < nfds; i++) {
-				if (evs[i].data.fd == userfault_fd &&
-				    (evs[i].events & EPOLLIN) != 0) {
-					if (cape_handle_userfault_event() != 0)
-						return -1;
-				}
-			}
-		}
-	}
+	return NULL;
 }
 
-int cape_receive_userfaultfd_setup(void)
+/* Open a userfaultfd in this process, register all tracked_ranges for
+ * write-protect tracking, and start the worker thread that drains
+ * events into the dirty bitmap. */
+int cape_setup_uffd_self(void)
 {
-	char payload[sizeof(struct cape_dickpt_ctl_header) +
-		     (CAPE_DICKPT_MAX_RANGES * sizeof(struct cape_dickpt_range))];
-	union {
-		struct cmsghdr align;
-		char buf[CMSG_SPACE(sizeof(int))];
-	} control;
-	struct cape_dickpt_ctl_header *header;
-	struct cape_dickpt_range *ranges;
-	struct msghdr msg;
-	struct iovec iov;
-	struct cmsghdr *cmsg;
-	ssize_t rc;
+	struct uffdio_api api;
+	struct uffdio_register reg;
+	struct epoll_event ev;
+	size_t i;
 
 	if (userfault_fd >= 0)
 		return 0;
 
-	memset(&msg, 0, sizeof(msg));
-	memset(&control, 0, sizeof(control));
-	memset(payload, 0, sizeof(payload));
-
-	iov.iov_base = payload;
-	iov.iov_len = sizeof(payload);
-	msg.msg_iov = &iov;
-	msg.msg_iovlen = 1;
-	msg.msg_control = control.buf;
-	msg.msg_controllen = sizeof(control.buf);
-
-	rc = recvmsg(control_fd, &msg, 0);
-	if (rc == -1) {
-		perror("recvmsg(userfaultfd setup)");
+	userfault_fd = syscall(SYS_userfaultfd, O_CLOEXEC | O_NONBLOCK);
+	if (userfault_fd < 0) {
+		perror("userfaultfd");
 		return 1;
 	}
-	if ((size_t)rc < sizeof(*header))
-		return 1;
 
-	header = (struct cape_dickpt_ctl_header *)payload;
-	if (header->type != CAPE_DICKPT_CTL_UFFD_SETUP)
+	memset(&api, 0, sizeof(api));
+	api.api = UFFD_API;
+	api.features = UFFD_FEATURE_PAGEFAULT_FLAG_WP;
+	if (ioctl(userfault_fd, UFFDIO_API, &api) == -1) {
+		perror("ioctl(UFFDIO_API)");
 		return 1;
-	if (header->count > CAPE_DICKPT_MAX_RANGES)
-		return 1;
-	if ((size_t)rc < sizeof(*header) +
-			 (header->count * sizeof(struct cape_dickpt_range)))
-		return 1;
+	}
 
-	free(tracked_ranges);
-	tracked_ranges = NULL;
-	tracked_range_count = 0;
-
-	if (header->count > 0) {
-		tracked_ranges = malloc(header->count * sizeof(*tracked_ranges));
-		if (tracked_ranges == NULL)
+	for (i = 0; i < tracked_range_count; ++i) {
+		memset(&reg, 0, sizeof(reg));
+		reg.range.start = tracked_ranges[i].start;
+		reg.range.len = tracked_ranges[i].len;
+		reg.mode = UFFDIO_REGISTER_MODE_WP;
+		if (ioctl(userfault_fd, UFFDIO_REGISTER, &reg) == -1) {
+			perror("ioctl(UFFDIO_REGISTER)");
 			return 1;
-
-		ranges = (struct cape_dickpt_range *)(payload + sizeof(*header));
-		memcpy(tracked_ranges, ranges, header->count * sizeof(*tracked_ranges));
-		tracked_range_count = header->count;
-	}
-
-	for (cmsg = CMSG_FIRSTHDR(&msg); cmsg != NULL; cmsg = CMSG_NXTHDR(&msg, cmsg)) {
-		if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS) {
-			memcpy(&userfault_fd, CMSG_DATA(cmsg), sizeof(userfault_fd));
-			break;
 		}
 	}
 
-	if (userfault_fd < 0)
-		return 1;
-
-	/* Create epoll instance and register userfault_fd */
-	epoll_fd = epoll_create1(0);
+	epoll_fd = epoll_create1(EPOLL_CLOEXEC);
 	if (epoll_fd < 0) {
 		perror("epoll_create1");
 		return 1;
 	}
-	struct epoll_event ev;
 	ev.events = EPOLLIN;
 	ev.data.fd = userfault_fd;
 	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, userfault_fd, &ev) < 0) {
 		perror("epoll_ctl(userfault_fd)");
+		return 1;
+	}
+
+	uffd_thread_run = 1;
+	if (pthread_create(&uffd_thread, NULL, uffd_thread_main, NULL) != 0) {
+		perror("pthread_create(uffd_thread)");
+		uffd_thread_run = 0;
 		return 1;
 	}
 
@@ -1497,282 +1329,75 @@ static void cape_ucx_finalize(void)
  * ---------------------------------------------------------------------------
  */
 int clear_list(struct page_node *list);
-int send_int_value_to_child(int value);
-int get_long_int_from_child(unsigned long *value);
 int init_jobs_per_node();
-int read_current_stack_start(unsigned int pid, unsigned long src, unsigned long dst, int len);
-int read_current_brk(unsigned int pid, unsigned long src, unsigned long dst, int len);
-int ioctl_read_data(unsigned int pid, unsigned long src, void *dst, int len);
-int ioctl_write_data(unsigned int pid, const void *src, unsigned long dst, int len);
-int ioctl_clear_write_protect(unsigned int pid, unsigned long dst);
-void tracer_wait ( pid_t pid, int * status, int options, struct user * u );
-int lock_process_memory(unsigned int pid);
-int unlock_process_memory(unsigned int pid);
 int require_generate_checkpoint();
 int require_send_checkpoint();
 int require_receive_checkpoint();
 int require_inject_checkpoint();
 int require_waitfor_checkpoint();
 int require_broadcast_checkpoint();
-int read_shared_data();
-void end_shared_data();
-
-/* V5: unused */
-// int init_generate_workshare_checkpoint(unsigned int ntask);
-// int require_generate_workshare_checkpoint();
-// int require_generate_total_checkpoint();
-// int require_scatter_checkpoint();
-// int require_inject_workshare_checkpoint();
-
 int require_allreduce_checkpoint();
-int allreduce_checkpoint();
 void print_data_in_list(struct shared_data *list);
-int cape_receive_userfaultfd_setup(void);
-int cape_wait_for_child_event(pid_t pid, int *status);
+int cape_setup_uffd_self(void);
 int cape_drain_userfaultfd(void);
 
 /* ==========================================================================
- * Monitor process
- * 1. Fork another process to run CAPE program
- * 2. Wait for CAPE program finish the start-up
- * 3. Open driver file
- * 4. Monitor CAPE program
- * 	If SIGSEGV (Page-fault occur): Save page addr, data and set page to writable
- * 	If SIGTRAP (Debug signal): do the job that are required by CAPE program
- * ==========================================================================
+ * Library entry points
+ * 	cape_init / cape_finalize : open/close UCX + userfaultfd
+ * 	cape_register_region      : add a tracked range (must precede cape_start_ckpt)
+ * 	cape_start_ckpt           : enable WP tracking on all registered ranges
+ * 	cape_stop_ckpt            : disable tracking
+ * In the userfaultfd backend the dirty bitmap is filled by a worker thread
+ * that drains WP faults from the userfaultfd. The application calls the
+ * require_*_checkpoint() functions directly instead of trapping via int3.
  */
-int main(int argc, char * argv[]){
-	char * exec_file; 
-	int addr, i, state, status, old, sys_num, rc;
-	struct user u ;
-	siginfo_t child_siginfo;
-	struct sigaction sa;
-	int tc = 0, flag_192 = 0, main_flag = 0, opt, reuse = 1;
-	struct user_regs_struct regs, newregs;
-	int control_pair[2];
-	char control_fd_text[32];
 
-	if (argc < 2) {
-		fprintf(stderr, "Usage: %s <app> [app-args...]\n", argv[0]);
+void cape_register_region(void *addr, size_t len)
+{
+	size_t i = tracked_range_count;
+	tracked_ranges = realloc(tracked_ranges, (i + 1) * sizeof(*tracked_ranges));
+	if (tracked_ranges == NULL) {
+		perror("realloc(tracked_ranges)");
+		exit(1);
+	}
+	tracked_ranges[i].start = (unsigned long)addr;
+	tracked_ranges[i].len = len;
+	tracked_range_count = i + 1;
+}
+
+int cape_start_ckpt(void)
+{
+	if (cape_setup_uffd_self() != 0)
 		return 1;
+	tracking_is_enabled = 1;
+	return cape_writeprotect_tracked_ranges(1);
+}
+
+int cape_stop_ckpt(void)
+{
+	int rc = cape_writeprotect_tracked_ranges(0);
+	tracking_is_enabled = 0;
+	return rc;
+}
+
+void cape_init(void)
+{
+	cape_ucx_init();
+}
+
+void cape_finalize(void)
+{
+	if (uffd_thread_run) {
+		uffd_thread_run = 0;
+		pthread_join(uffd_thread, NULL);
 	}
-
-	exec_file = argv[1];
-
-	if (socketpair(AF_UNIX, SOCK_SEQPACKET, 0, control_pair) == -1) {
-		perror("socketpair");
-		return 1;
-	}
-
-
-	//fork a process to run CAPE program
-	switch ( child_id = fork ( ) ) {
-		case -1 :	/* Error */
-			perror ( "fork" ) ;
-			return 1 ;
-		case 0 :	/* Child */
-			close(control_pair[0]);
-			snprintf(control_fd_text, sizeof(control_fd_text), "%d", control_pair[1]);
-			setenv(CAPE_DICKPT_ENV_SOCK_FD, control_fd_text, 1);
-			/* Disable ASLR before exec so the app's globals (bss/data/heap/
-			 * mmap) land at identical VAs on every rank. The personality
-			 * flag persists across execve, so the app sees a non-randomized
-			 * address space without needing to re-exec itself. */
-			{
-				int _p = personality(0xffffffff);
-				if (_p >= 0 && !(_p & ADDR_NO_RANDOMIZE))
-					personality((unsigned long)_p | ADDR_NO_RANDOMIZE);
-			}
-			ptrace ( PTRACE_TRACEME, NULL, NULL, NULL ) ; //This process will be traced
-			execv ( exec_file , &argv[1] );
-			perror (exec_file) ;
-			return 2 ;
-		default :	/* Parent */
-			control_fd = control_pair[0];
-			close(control_pair[1]);
-			/* Initialise UCX in the parent AFTER the fork. Doing it before
-			 * the fork left UCX's memory-registration cache pointing at
-			 * pre-fork physical pages that get broken by COW the first
-			 * time we write to a checkpoint buffer, forcing UCX onto a
-			 * slow per-send memcpy fallback (~20× slowdown vs cape.c).
-			 * Only the parent talks UCX; the child execs the app. */
-			cape_ucx_init();
-			break;
-	}
-	
-	
-
-	//wait for cape program finish startup	
-	for ( process_state = 0 ; process_state != 2 ; ) {
-		tracer_wait ( child_id, & status, 0, & u ) ;
-		switch ( process_state ) {
-		case 0 :	//Wait for ``execve'' to start
-			if ( u . regs . orig_rax == SYS_execve )
-				process_state = 1 ;
-			break ;
-		case 1 :	//Wait for ``execve'' to finish and set the breakpoint
-			if ( u . regs . orig_rax != SYS_execve )
-				process_state = 2 ;
-			break ;
-		case 2 :	//Everything is set up : go !
-			break ;
-		default :
-			assert ( 0 ) ;
-		}//end switch
-	}//end for
-
-	ptrace(PTRACE_CONT, child_id, NULL, NULL ) ;
-
-	//Monitor CAPE program
-	while(1) {
-		if (cape_wait_for_child_event(child_id, &status) == -1) {
-			perror("waitpid");
-			break;
-		}
-		if(WIFEXITED(status)) {
-			break;
-		}
-		if(WIFSIGNALED(status)) {
-			break;
-		}
-		if(WIFSTOPPED(status) && WSTOPSIG(status) == SIGTRAP) {
-				int dx = 0;
-				ptrace(PTRACE_GETREGS, child_id, NULL, &regs);
-				dx = regs.rdx;
-				CAPE_PROFILE_INC(sigtrap_count);
-				switch(dx){
-					case S_LOCK_PROCESS_MEMORY:  //Lock process 		
-						rc = lock_process_memory(child_id);
-						if(process_state == 2) process_state = 3;
-						if(rc != 0){
-							printf ("Monitor %ld: Error on locking the process image\n",node);
-							exit(1);
-						}
-						break;	
-											
-					case S_UNLOCK_PROCESS_MEMORY:
-						rc = unlock_process_memory(child_id);
-						if (rc!=0){
-							dprintf("Monitor %ld: Error on unlock process memory\n",node);
-							exit(1);
-						}
-						break;		
-									
-					case S_GENERATE_CHECKPOINT: 
-						rc = require_generate_checkpoint();						
-						if(rc != 0)	exit(1);		
-						break;
-						
-					case S_SEND_CHECKPOINT:	
-						rc = require_send_checkpoint();
-						if(rc != 0)	exit(1);						
-						break;
-						
-					case S_RECEIVE_CHECKPOINT: 
-						rc = require_receive_checkpoint();
-						if (rc!=0) exit(1);						
-						break;
-						
-					case S_INJECT_CHECKPOINT:
-						rc = require_inject_checkpoint();
-						if (rc!=0)	exit(1);						
-						break;
-					case S_WAIT_FOR_CHECKPOINT:
-						rc= require_waitfor_checkpoint();
-						if( rc !=0) exit(1);						
-						break;
-					case S_BROADCAST_CHECKPOINT:
-						rc= require_broadcast_checkpoint();
-						if( rc !=0) exit(1);						
-						break;
-					case S_ALL_REDUCE:
-						rc = require_allreduce_checkpoint();
-						break;
-					
-					case S_START_SHARE_DATA:												
-						read_shared_data();						
-						break;
-						
-					case S_END_SHARE_DATA:
-						end_shared_data();
-						break;
-
-
-					case S_APP_SEND_NUMBER_OF_JOBS: //get number of job from child process
-						rc = get_long_int_from_child(&number_of_jobs);
-						if(rc!=0){
-							printf("Monitor %ld: Error on get number of jobs from child\n", node);
-							exit(1);
-						}
-						rc = init_jobs_per_node();
-						if(rc!=0){
-							printf("Monitor %ld: Error on initialize jobs for all nodes \n", node);
-							exit(1);
-						}
-						break;
-					case S_APP_SEND_TIMESPAN: //read timespan form child				
-						rc = get_long_int_from_child(&timespan);
-						if(rc != 0){
-							printf("Monitor %ld:Error on read timespan form child\n", node);
-							exit(1);
-						}
-						break;
-						
-					case 95: //read __data_start value of child process					
-						rc = get_long_int_from_child(&child_data_start);
-						if(rc != 0){
-							printf("Monitor %ld:Error on read child_data_start form child\n", node);
-							exit(1);
-						}						
-						
-						break;
-					case 96: //send checkpoint flag
-						rc = send_int_value_to_child(ckpt_flag);
-						if(rc!=0){
-							printf("Monitor %ld: Error on sending checkpoint flag\n", node);
-							exit(0);
-						}
-						break;					
-					case 97:						
-						rc = send_int_value_to_child(num_nodes);
-						if(rc != 0){
-							printf ("Monitor %ld: Error on send num nodes to child\n", node);
-							exit(1);
-						}
-						break;
-					case 98:						
-						rc = send_int_value_to_child(node);
-						if(rc != 0){
-							printf ("Monitor %ld: Error on send node value to child\n", node);
-							exit(1);
-						}
-						break;										
-					default:
-						dprintf("\nMonitor %ld: get breakpoint with unkown edx = %d", node, dx);
-						exit(1);
-				}
-			}//SIGTRAP
-		 else if(WIFSTOPPED(status)) {
-			int sig = WSTOPSIG(status);
-			if (sig == SIGSEGV) {
-				fprintf(stderr,
-					"Monitor %ld: child received SIGSEGV\n", node);
-				kill(child_id, SIGKILL);
-				return 1;
-			}
-			ptrace(PTRACE_CONT, child_id, NULL, (void *)(long)sig);
-			continue;
-		}
-		ptrace(PTRACE_CONT, child_id, NULL, NULL);
-	}
-	if (userfault_fd >= 0)
-		close(userfault_fd);
-	if (control_fd >= 0)
-		close(control_fd);
+	if (epoll_fd >= 0) { close(epoll_fd); epoll_fd = -1; }
+	if (userfault_fd >= 0) { close(userfault_fd); userfault_fd = -1; }
 	free(tracked_ranges);
+	tracked_ranges = NULL;
+	tracked_range_count = 0;
 	cape_ucx_finalize();
 	cape_profile_report();
-	return 0;
 }
 
 /* ----------------------------------------------------------------
@@ -1813,34 +1438,11 @@ int clear_list_data_ckpt(struct shared_data_ckpt *list){
 }
 
 
-/* ---------------------------------------------------
- *  send_int_value_to_child(): version 2.0
- * 	Send a value to child process via edx registes
- * ---------------------------------------------------
- */
-int send_int_value_to_child(int value){
-	struct user_regs_struct child_regs;	
-	ptrace(PTRACE_GETREGS, child_id, NULL, &child_regs);	
-	child_regs.rdx = value;
-	ptrace(PTRACE_SETREGS, child_id, NULL, &child_regs);		
-	return 0;
-}
-/* ----------------------------------------------------
- * get_long_int_from_child(): 
- * 	get a long int number form child process
- * ----------------------------------------------------
- */
-int get_long_int_from_child(unsigned long *value){
-	struct user_regs_struct child_regs;	
-	ptrace(PTRACE_GETREGS, child_id, NULL, &child_regs);	
-	*value = child_regs.rax;	
-	return 0;
-}
 /*-------------------------------------------------------------
  * init_jobs_per_node(): initialize number of job per a process
  * ------------------------------------------------------------
  */
-int init_jobs_per_node(){	
+int init_jobs_per_node(){
 	int rc = 0;
 	if (num_nodes <= 0) {
 		rc = 1;
@@ -1848,180 +1450,24 @@ int init_jobs_per_node(){
 		jobs_per_node = (number_of_jobs + num_nodes - 1) / num_nodes;
 	}
 	current_job = 0;
-	return rc;	
-	
- }
-/* ---------------------------------------------------
- * read_current_stack_start(): read the start adress of stack 
- * ---------------------------------------------------
- */
-int read_current_stack_start(unsigned int pid, unsigned long src, unsigned long dst, int len){
-	char maps_path[64];
-	FILE *maps;
-	char line[512];
-	unsigned long long start, end;
-	char perms[5];
-
-	snprintf(maps_path, sizeof(maps_path), "/proc/%u/maps", pid);
-	maps = fopen(maps_path, "r");
-	if (maps == NULL)
-		return 0;
-
-	while (fgets(line, sizeof(line), maps) != NULL) {
-		if (sscanf(line, "%llx-%llx %4s", &start, &end, perms) != 3)
-			continue;
-		if (strstr(line, "[stack]") == NULL)
-			continue;
-		fclose(maps);
-		return (int)start;
-	}
-
-	fclose(maps);
-	return 0;
-}
-/* ---------------------------------------------------
- * read_current_brk(): read the top address of heap
- * ---------------------------------------------------
- */
-int read_current_brk(unsigned int pid, unsigned long src, unsigned long dst, int len){
-	char maps_path[64];
-	FILE *maps;
-	char line[512];
-	unsigned long long start, end;
-	char perms[5];
-
-	snprintf(maps_path, sizeof(maps_path), "/proc/%u/maps", pid);
-	maps = fopen(maps_path, "r");
-	if (maps == NULL)
-		return 0;
-
-	while (fgets(line, sizeof(line), maps) != NULL) {
-		if (sscanf(line, "%llx-%llx %4s", &start, &end, perms) != 3)
-			continue;
-		if (strstr(line, "[heap]") == NULL)
-			continue;
-		fclose(maps);
-		return (int)end;
-	}
-
-	fclose(maps);
-	return 0;
-}
-/* -----------------------------------------------------
- * ioctl_read_data(): Read data from memory of the process
- * -----------------------------------------------------
- */
-int ioctl_read_data(unsigned int pid, unsigned long src, void *dst, int len){
-	return read_remote_memory(pid, src, dst, (size_t)len) == 0 ? 1 : 0;
-}
-/* -----------------------------------------------------
- * ioctl_write_data(): wite data into memory of the process
- * -----------------------------------------------------
- */
-int ioctl_write_data(unsigned int pid, const void *src, unsigned long dst, int len){
-	return write_remote_memory(pid, src, dst, (size_t)len);
-}
-/* -----------------------------------------------------------------
- * iotcl_clear_write_protect(): Version 2.0
- * Clear write protected and save address, data of a page
- * 	Data wil be save into a list and manage by list_head and list_end
- * 	Data structure: <addr, data>, <addr, data>,...
- * 	This list will be sorted by ascending
- * -----------------------------------------------------------------
- */
- int ioctl_clear_write_protect(unsigned int pid, unsigned long dst){
-	if (cape_capture_dirty_page(pid, dst) != 0)
-		return 1;
-	if (cape_userfault_writeprotect(dst & ~(PAGE_SIZE - 1), PAGE_SIZE, 0) == -1)
-		return 1;
-	return 0;
-}
-
-/* ---------------------------------------------------------------
- * ioctl_set_write_protect(): Version 3.0
- * 	Set write protect to a page that contain dst address
- * ---------------------------------------------------------------
- */
- int ioctl_set_write_protect(unsigned int pid, unsigned long dst){
-	return cape_userfault_writeprotect(dst & ~(PAGE_SIZE - 1), PAGE_SIZE, 1);
-}
-
-/*------------------------------------------------------------------
- * void tracer_wait(): v2.0
- * Monitor wait for CAPE program to start-up.
- * -----------------------------------------------------------------
- */
-void tracer_wait ( pid_t pid, int * status, int options, struct user * u ){
-	static int first = 1 ;
-	if ( ! first )
-		ptrace ( PTRACE_SYSCALL, pid, NULL, NULL ) ;
-	else
-		first = 0 ;
-	waitpid ( pid, status, options ) ;
-	if ( ! WIFEXITED ( * status ) && ! WIFSIGNALED ( * status ) && u )
-		ptrace ( PTRACE_GETREGS, pid, NULL, u ) ;
-}
-
-/* ------------------------------------------------------------------
- * lock_process_memory(): v2.0
- * 	Monitor set write protected to all pages on PTE the process indicated by pid
- * ------------------------------------------------------------------ 
- */
-int lock_process_memory(unsigned int pid){
-	if (cape_receive_userfaultfd_setup() != 0)
-		return 1;
-	tracking_is_enabled = 1;
-	return cape_writeprotect_tracked_ranges(1);
-}
-/* -----------------------------------------------------------------------
- * unlock_process_memory(): version 2.0
- * 	Set writable to all pages of pid process
- * -----------------------------------------------------------------------
- */
-int unlock_process_memory(unsigned int pid){
-	int rc;
-
-	rc = cape_writeprotect_tracked_ranges(0);
-	tracking_is_enabled = 0;
 	return rc;
 }
 
-/* -------------------------------------------------------------
- * read_shared_data(): read shared variables from deriver memory,
- * 	and save to a list manager by data_list_head and data_list_tail 
- *
- * -------------------------------------------------------------
- */
-int read_shared_data(){
-	dprintf("Monitor %ld: shared-data metadata stream is not implemented in the userfaultfd backend\n",
-		node);
+/* In-process memory access helpers: with no separate monitor process,
+ * src/dst are just pointers in our own address space. */
+static inline int ioctl_read_data(unsigned int pid, unsigned long src, void *dst, int len){
+	(void)pid;
+	memcpy(dst, (const void *)src, (size_t)len);
 	return 0;
 }
-/* ---------------------------------------------------------------------
- * end_shared_data: to close the sharing data off current level
- * 
- * ---------------------------------------------------------------------
- */
-void end_shared_data(){
-	unsigned char level;
-	struct shared_data *pp;
-	
-	if (data_list_tail !=NULL)
-		level = data_list_tail ->level;
-	
-	while((data_list_tail->prev !=NULL) && (data_list_tail->level == level)){
-		pp = data_list_tail;
-		data_list_tail = data_list_tail ->prev;
-		data_list_tail->next = NULL;
-		free(pp);
-		pp= NULL;		
-	}
-	if (data_list_tail->level == level){
-		free(data_list_tail);
-		data_list_head = NULL;
-		data_list_tail = NULL;
-	}
-	
+static inline int ioctl_write_data(unsigned int pid, const void *src, unsigned long dst, int len){
+	(void)pid;
+	memcpy((void *)dst, src, (size_t)len);
+	return 0;
+}
+static inline int ioctl_set_write_protect(unsigned int pid, unsigned long dst){
+	(void)pid;
+	return cape_userfault_writeprotect(dst & ~(PAGE_SIZE - 1), PAGE_SIZE, 1);
 }
 
 
@@ -2194,7 +1640,8 @@ int add_item_to_list_ckpt(struct shared_data_ckpt *p){
 	stream = open_binary_memstream(ckpt_data, ckpt_size);		
 		
 	//get the registers
-	ptrace(PTRACE_GETREGS, child_id, NULL, &save_regs);
+	/* No tracer: in-library checkpoint, register state is not relevant. */
+	memset(&save_regs, 0, sizeof(save_regs));
 	
 	//write timespan into checkpoint
 	_timespan = tsp;
@@ -2237,7 +1684,7 @@ int add_item_to_list_ckpt(struct shared_data_ckpt *p){
 				continue;
 
 			page_idx = (uint32_t)(((uint64_t)old_node->addr - base) >> BMP_PAGE_SHIFT);
-			if (read_remote_memory(child_id, old_node->addr,
+			if (ioctl_read_data(child_id, old_node->addr,
 					       current_page, BMP_PAGE_SIZE) != 0) {
 				fprintf(stderr,
 					"Monitor %ld: failed to read dirty page 0x%lx\n",
@@ -2575,10 +2022,11 @@ int inject_checkpoint(FILE *stream, size_t *file_size, struct user_regs_struct *
 	unsigned long current_ckpt_struct;
 	current_ckpt_struct = SSD;  	
 	
-	//save the next instruction
-	ptrace(PTRACE_GETREGS, child_id, NULL, regs);
-	current_sp_addr = regs->rsp;
-	ioctl_read_data(child_id, current_sp_addr + 4, return_addr, 4);
+	/* No tracer: registers are not relevant in the library model. */
+	memset(regs, 0, sizeof(*regs));
+	current_sp_addr = 0;
+	(void)return_addr;
+	(void)current_sp_addr;
 	  	
   	/*
   	 * 1. Open file: No need, because this file have been openned at the receiving time

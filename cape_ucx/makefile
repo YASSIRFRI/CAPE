@@ -37,7 +37,7 @@ endif
 # ── Compiler & flags ─────────────────────────────────────────────────────────
 CC      ?= cc
 CFLAGS   = -O2 -I./$(I_FOLDER) -I$(UCX_SRC) -I$(UCX_GEN) $(PMIX_FLAGS) $(PROF_FLAGS)
-LDFLAGS  = -L$(UCX_LIB) -lucp -lucs $(PMIX_LINK) -Wl,-rpath,$(UCX_LIB)
+LDFLAGS  = -L$(UCX_LIB) -lucp -lucs $(PMIX_LINK) -Wl,-rpath,$(UCX_LIB) -lpthread
 OMP_CFLAGS = -O2 -fopenmp
 
 # ══════════════════════════════════════════════════════════════════════════════
