@@ -97,6 +97,114 @@ struct shared_data *is_in_share_data_list(unsigned long int addr,
 					  struct shared_data *list);
 int add_item_to_list_ckpt(struct shared_data_ckpt *p);
 
+static unsigned reduction_size(unsigned char dt)
+{
+	switch (dt) {
+	case CAPE_CHAR: case CAPE_UNSIGNED_CHAR:
+		return 1;
+	case CAPE_SHORT: case CAPE_UNSIGNED_SHORT:
+		return 2;
+	case CAPE_INT: case CAPE_UNSIGNED_INT: case CAPE_FLOAT:
+		return 4;
+	case CAPE_LONG: case CAPE_UNSIGNED_LONG: case CAPE_DOUBLE:
+		return 8;
+	default:
+		return 4;
+	}
+}
+
+static int reduction_matches_addr(const struct shared_data *p, unsigned long addr)
+{
+	unsigned int elem_size = reduction_size(p->datatype);
+	unsigned long start = p->addr;
+	unsigned long len = p->len;
+	unsigned long end;
+
+	if (elem_size == 0)
+		return 0;
+	if (len <= elem_size)
+		return p->addr == addr;
+	if (addr < start)
+		return 0;
+	end = start + len;
+	if (end < start || addr + elem_size > end)
+		return 0;
+	return ((addr - start) % elem_size) == 0;
+}
+
+static struct shared_data *lookup_reduction(unsigned long addr)
+{
+	struct shared_data *p;
+	for (p = data_list_head; p != NULL; p = p->next) {
+		if (!reduction_matches_addr(p, addr))
+			continue;
+		if (p->properties >= D_REDUCTION_SUM &&
+		    p->properties <= D_REDUCTION_XOR)
+			return p;
+	}
+	return NULL;
+}
+
+#define APPLY_BIN(T, OP) do { T a, b; memcpy(&a, acc, sizeof(T)); \
+	memcpy(&b, in, sizeof(T)); a = (T)(a OP b); \
+	memcpy(acc, &a, sizeof(T)); } while (0)
+#define APPLY_MAX(T) do { T a, b; memcpy(&a, acc, sizeof(T)); \
+	memcpy(&b, in, sizeof(T)); if (b > a) memcpy(acc, in, sizeof(T)); \
+	} while (0)
+#define APPLY_MIN(T) do { T a, b; memcpy(&a, acc, sizeof(T)); \
+	memcpy(&b, in, sizeof(T)); if (b < a) memcpy(acc, in, sizeof(T)); \
+	} while (0)
+
+static void apply_reduction(unsigned char op, unsigned char dt,
+			    void *acc, const void *in)
+{
+	switch (op) {
+	case D_REDUCTION_SUM:
+		switch (dt) {
+		case CAPE_INT:           APPLY_BIN(int32_t,  +); break;
+		case CAPE_UNSIGNED_INT:  APPLY_BIN(uint32_t, +); break;
+		case CAPE_LONG:          APPLY_BIN(int64_t,  +); break;
+		case CAPE_UNSIGNED_LONG: APPLY_BIN(uint64_t, +); break;
+		case CAPE_FLOAT:         APPLY_BIN(float,    +); break;
+		case CAPE_DOUBLE:        APPLY_BIN(double,   +); break;
+		}
+		break;
+	case D_REDUCTION_MUL:
+		switch (dt) {
+		case CAPE_INT:           APPLY_BIN(int32_t,  *); break;
+		case CAPE_UNSIGNED_INT:  APPLY_BIN(uint32_t, *); break;
+		case CAPE_LONG:          APPLY_BIN(int64_t,  *); break;
+		case CAPE_UNSIGNED_LONG: APPLY_BIN(uint64_t, *); break;
+		case CAPE_FLOAT:         APPLY_BIN(float,    *); break;
+		case CAPE_DOUBLE:        APPLY_BIN(double,   *); break;
+		}
+		break;
+	case D_REDUCTION_MAX:
+		switch (dt) {
+		case CAPE_INT:           APPLY_MAX(int32_t);  break;
+		case CAPE_UNSIGNED_INT:  APPLY_MAX(uint32_t); break;
+		case CAPE_LONG:          APPLY_MAX(int64_t);  break;
+		case CAPE_UNSIGNED_LONG: APPLY_MAX(uint64_t); break;
+		case CAPE_FLOAT:         APPLY_MAX(float);    break;
+		case CAPE_DOUBLE:        APPLY_MAX(double);   break;
+		}
+		break;
+	case D_REDUCTION_MIN:
+		switch (dt) {
+		case CAPE_INT:           APPLY_MIN(int32_t);  break;
+		case CAPE_UNSIGNED_INT:  APPLY_MIN(uint32_t); break;
+		case CAPE_LONG:          APPLY_MIN(int64_t);  break;
+		case CAPE_UNSIGNED_LONG: APPLY_MIN(uint64_t); break;
+		case CAPE_FLOAT:         APPLY_MIN(float);    break;
+		case CAPE_DOUBLE:        APPLY_MIN(double);   break;
+		}
+		break;
+	case D_REDUCTION_AND: APPLY_BIN(uint64_t, &); break;
+	case D_REDUCTION_OR:  APPLY_BIN(uint64_t, |); break;
+	case D_REDUCTION_XOR: APPLY_BIN(uint64_t, ^); break;
+	}
+}
+
 struct bmp_range_view {
 	unsigned long base;
 	uint32_t n_pages;
@@ -287,11 +395,41 @@ static int write_merged_bitmap_range(FILE *out,
 		int older_dirty = p < older->n_pages ? bmp_get(older->bmp, p) : 0;
 		int newer_dirty = p < newer->n_pages ? bmp_get(newer->bmp, p) : 0;
 		const unsigned char *page = NULL;
+		unsigned char merged[BMP_PAGE_SIZE];
 
-		if (newer_dirty)
+		if (older_dirty && newer_dirty) {
+			/* Both sides modified this page. Default to newer-wins
+			 * for non-reduction words; for each word whose address
+			 * falls inside a declared reduction range, combine the
+			 * two values with the declared op. */
+			const unsigned char *o = older->pages + ((size_t)older_idx * BMP_PAGE_SIZE);
+			const unsigned char *n = newer->pages + ((size_t)newer_idx * BMP_PAGE_SIZE);
+			unsigned long page_addr = (unsigned long)base + (unsigned long)p * BMP_PAGE_SIZE;
+			size_t off;
+
+			memcpy(merged, n, BMP_PAGE_SIZE);
+			for (off = 0; off < BMP_PAGE_SIZE; off += CAPE_WORD) {
+				struct shared_data *r = lookup_reduction(page_addr + off);
+				if (r == NULL)
+					continue;
+				{
+					unsigned int sz = reduction_size(r->datatype);
+					if (sz == 8 && off + 8 <= BMP_PAGE_SIZE) {
+						apply_reduction(r->properties, r->datatype,
+								merged + off, o + off);
+						off += CAPE_WORD; /* skip 2nd half */
+					} else {
+						apply_reduction(r->properties, r->datatype,
+								merged + off, o + off);
+					}
+				}
+			}
+			page = merged;
+		} else if (newer_dirty) {
 			page = newer->pages + ((size_t)newer_idx * BMP_PAGE_SIZE);
-		else if (older_dirty)
+		} else if (older_dirty) {
 			page = older->pages + ((size_t)older_idx * BMP_PAGE_SIZE);
+		}
 
 		if (page != NULL && fwrite(page, BMP_PAGE_SIZE, 1, out) != 1) {
 			free(union_bmp);
@@ -944,6 +1082,134 @@ static void cape_ucx_recv(void *buf, size_t len, int src, uint32_t token)
     CAPE_PROFILE_ADD_NS(ucx_recv_ns, start_ns);
     CAPE_PROFILE_INC(ucx_recv_calls);
     CAPE_PROFILE_ADD(ucx_recv_bytes, (uint64_t)len);
+}
+
+/* === Probed send/recv (single-message, no separate size header) ============
+ * Mirrors cape_incr_bitmap.c: sender does one cape_ucx_send; receiver probes
+ * the tag to discover the payload size, then issues a single recv sized to
+ * the probe result. Removes every "send sz, then send data" pair below. */
+#define CAPE_UCX_TAG_TOKEN_MASK  ((uint64_t)0x00000000000fffffULL)
+
+static ucp_tag_message_h cape_ucx_probe_msg_exact(ucp_tag_t recv_tag,
+                                                  ucp_tag_recv_info_t *info)
+{
+    ucp_tag_message_h msg;
+    for (;;) {
+        msg = ucp_tag_probe_nb(ucp_worker, recv_tag, CAPE_UCX_TAG_MASK, 1, info);
+        if (msg != NULL)
+            return msg;
+        ucp_worker_progress(ucp_worker);
+    }
+}
+
+static unsigned char *cape_ucx_recv_probe_alloc(size_t *recvlen, int src,
+                                                uint32_t token)
+{
+    ucp_tag_t recv_tag = CAPE_UCX_TAG(src, token);
+    ucp_tag_recv_info_t info;
+    ucp_tag_message_h msg;
+    unsigned char *buf;
+    ucp_request_param_t rp = {
+        .op_attr_mask = UCP_OP_ATTR_FIELD_CALLBACK | UCP_OP_ATTR_FIELD_FLAGS,
+        .flags        = UCP_OP_ATTR_FLAG_NO_IMM_CMPL,
+        .cb.recv      = cape_recv_cb
+    };
+    msg = cape_ucx_probe_msg_exact(recv_tag, &info);
+    buf = malloc(info.length == 0 ? 1 : info.length);
+    if (buf == NULL) { perror("malloc(probed recv)"); exit(1); }
+    void *req = ucp_tag_msg_recv_nbx(ucp_worker, buf, info.length, msg, &rp);
+    cape_ucx_wait(req, info.length, 1, NULL);
+    *recvlen = info.length;
+    CAPE_PROFILE_ADD(ucx_recv_bytes, (uint64_t)info.length);
+    CAPE_PROFILE_INC(ucx_recv_calls);
+    return buf;
+}
+
+/* sendrecv with size discovered by probing. Caller supplies a recv buffer
+ * with at least `recvcap` bytes; returns the actual bytes received. */
+static size_t cape_ucx_sendrecv_probe(
+        const void *sendbuf, size_t sendlen, int dest,
+        void       *recvbuf, size_t recvcap, int src,
+        uint32_t    token)
+{
+    ucp_tag_t send_tag = CAPE_UCX_TAG(node, token);
+    ucp_tag_t recv_tag = CAPE_UCX_TAG(src,  token);
+    ucp_tag_recv_info_t info;
+    ucp_tag_message_h msg;
+    ucp_request_param_t sp = {
+        .op_attr_mask = UCP_OP_ATTR_FIELD_CALLBACK,
+        .cb.send      = cape_send_cb
+    };
+    ucp_request_param_t rp = {
+        .op_attr_mask = UCP_OP_ATTR_FIELD_CALLBACK | UCP_OP_ATTR_FIELD_FLAGS,
+        .flags        = UCP_OP_ATTR_FLAG_NO_IMM_CMPL,
+        .cb.recv      = cape_recv_cb
+    };
+
+    void *sreq = ucp_tag_send_nbx(ucp_endpoints[dest], sendbuf, sendlen,
+                                  send_tag, &sp);
+    if (UCS_PTR_IS_ERR(sreq)) {
+        fprintf(stderr, "CAPE UCX send failed before probe: %s\n",
+                ucs_status_string(UCS_PTR_STATUS(sreq)));
+        exit(1);
+    }
+    msg = cape_ucx_probe_msg_exact(recv_tag, &info);
+    if (info.length > recvcap) {
+        fprintf(stderr,
+                "CAPE UCX: probed message too large (len=%zu cap=%zu)\n",
+                info.length, recvcap);
+        exit(1);
+    }
+    void *rreq = ucp_tag_msg_recv_nbx(ucp_worker, recvbuf, info.length, msg, &rp);
+    cape_ucx_wait(rreq, info.length, 1, NULL);
+    cape_ucx_wait(sreq, 0, 0, NULL);
+    CAPE_PROFILE_ADD(ucx_send_bytes, (uint64_t)sendlen);
+    CAPE_PROFILE_ADD(ucx_recv_bytes, (uint64_t)info.length);
+    CAPE_PROFILE_INC(ucx_sendrecv_calls);
+    return info.length;
+}
+
+/* Variant that mallocs the recv buffer to the probed size. Used by ring/
+ * hypercube allreduce where the peer's payload length varies between
+ * iterations. Caller frees the returned buffer. */
+static unsigned char *cape_ucx_sendrecv_probe_alloc(
+        const void *sendbuf, size_t sendlen, int dest,
+        size_t *recvlen, int src,
+        uint32_t token)
+{
+    ucp_tag_t send_tag = CAPE_UCX_TAG(node, token);
+    ucp_tag_t recv_tag = CAPE_UCX_TAG(src,  token);
+    ucp_tag_recv_info_t info;
+    ucp_tag_message_h msg;
+    unsigned char *buf;
+    ucp_request_param_t sp = {
+        .op_attr_mask = UCP_OP_ATTR_FIELD_CALLBACK,
+        .cb.send      = cape_send_cb
+    };
+    ucp_request_param_t rp = {
+        .op_attr_mask = UCP_OP_ATTR_FIELD_CALLBACK | UCP_OP_ATTR_FIELD_FLAGS,
+        .flags        = UCP_OP_ATTR_FLAG_NO_IMM_CMPL,
+        .cb.recv      = cape_recv_cb
+    };
+
+    void *sreq = ucp_tag_send_nbx(ucp_endpoints[dest], sendbuf, sendlen,
+                                  send_tag, &sp);
+    if (UCS_PTR_IS_ERR(sreq)) {
+        fprintf(stderr, "CAPE UCX send failed before probe: %s\n",
+                ucs_status_string(UCS_PTR_STATUS(sreq)));
+        exit(1);
+    }
+    msg = cape_ucx_probe_msg_exact(recv_tag, &info);
+    buf = malloc(info.length == 0 ? 1 : info.length);
+    if (buf == NULL) { perror("malloc(probed sendrecv)"); exit(1); }
+    void *rreq = ucp_tag_msg_recv_nbx(ucp_worker, buf, info.length, msg, &rp);
+    cape_ucx_wait(rreq, info.length, 1, NULL);
+    cape_ucx_wait(sreq, 0, 0, NULL);
+    CAPE_PROFILE_ADD(ucx_send_bytes, (uint64_t)sendlen);
+    CAPE_PROFILE_ADD(ucx_recv_bytes, (uint64_t)info.length);
+    CAPE_PROFILE_INC(ucx_sendrecv_calls);
+    *recvlen = info.length;
+    return buf;
 }
 
 /* Tag tokens for different message types to avoid collisions */
@@ -1602,24 +1868,7 @@ int add_item_to_list_ckpt(struct shared_data_ckpt *p){
 
 }  
 
-/*-------------------------------------------------------------------------
- * generate_checkpoint() : version 5.0
- * 	generate DICKPT and save to a stream memory file
- * 	This function use to replace the save_checkpoint function of CAPE version 2
- * 	Structure of checkpoint file: <registers info>,<addr, len, data>, <addr, len, data>....
- * 	This function also set write protect to all pages that have been unlocked by clear_write_protect function
- * parametters:
- * 	+ child_id: id process
- * 	+ * list  : a pointer that point to list of data saved before execute command
- * return: the result will be contained in two global variables
- * 	+ A point to stream memory file
- * 	+ Size of this file
- * 
- * Checkpoint files will be divided into two part: C = S + L
- * + S: memory that is not in sharing-data attributes list
- * + L: contain only data in sharing-data attributes list
- * ------------------------------------------------------------------------
- */
+
  FILE *generate_checkpoint(int child_id, 
  	struct page_node * list,
  	unsigned char **ckpt_data,
@@ -1697,9 +1946,7 @@ int add_item_to_list_ckpt(struct shared_data_ckpt *p){
 
 			bmp_set(page_bmp, page_idx);
 			n_dirty++;
-			collect_l_words_from_page(old_node->addr,
-						  (const unsigned char *)old_node->data,
-						  current_page, cflag);
+			(void)cflag;
 			fwrite(current_page, BMP_PAGE_SIZE, 1, stream);
 		}
 
@@ -1757,27 +2004,11 @@ int require_generate_checkpoint(){
 
 
 
-/* ---------------------------------------
- * send_checkpoint(): send checkpoint file to destination node
- * 	This function use to replace a part of function save_checkpoint of vesion 2.0
- * Parametters:
- * 	- destination: rank of destination node
- * Returns: N/A
- * TODO: divide this file to small size if the checkpoint file is too large.*
- * --------------------------------------
- */
-int send_checkpoint(int destination){
-	/* First send the size so the receiver knows how much to allocate */
-	int sz = (int)final_ckpt_size;
-	cape_ucx_send(&sz, sizeof(int), destination, TAG_CKPT_DATA);
-	/* Then send the checkpoint data */
-	cape_ucx_send(final_ckpt, final_ckpt_size, destination, TAG_CKPT_DATA + 1);
 
+int send_checkpoint(int destination){
+	/* Single-message send; receiver discovers the size by probing the tag. */
+	cape_ucx_send(final_ckpt, final_ckpt_size, destination, TAG_CKPT_DATA);
 	fclose(final_ckpt_stream);
-	/* open_memstream's buffer survives fclose — caller must free it.
-	 * Without this the per-phase ckpt buffer accumulates and the
-	 * monitor's RSS grows as O(phases × peers × dirty_per_phase),
-	 * which OOMs at large node counts. */
 	free(final_ckpt);
 	final_ckpt = NULL;
 	final_ckpt_size = 0;
@@ -1805,7 +2036,6 @@ int join_checkpoint (int file_name, struct shared_data_ckpt * list){
 
 	switch (file_name){
 		case FINAL_CHECKPOINT:
-			   //Open checkpoint file if it is closed
 				if (final_ckpt_size == 0){
 					final_ckpt_stream = open_binary_memstream(&final_ckpt, &final_ckpt_size);
 				}
@@ -1841,23 +2071,10 @@ int join_checkpoint (int file_name, struct shared_data_ckpt * list){
  }
 
 
-/* ------------------------------------------------------------------------
- * require_send_checkpoint(): version 3.0 => NOT USED in version 4.0
- * 	Require send checkpoint from to slave, and from slave to master
- * if (Master)
- * 	Send checkpoint and flag_ckpt to slave
- * 	flag_ckpt = 0 if this is the lastest checkpoint, orthewhise flag_ckpt = 1
- * 
- * TODO: implement the scheduling to distribute checkpoint to slave  *  
- * -------------------------------------------------------------------------
- */
 int require_send_checkpoint(){
 	
-	int rc = 0;	
-	//Merge S and L, and then delete L form memory
-//	print_data_in_ckpt_list(list_ckpt_head);
-	
-	join_checkpoint(FINAL_CHECKPOINT, list_ckpt_head);
+	int rc = 0;
+	/* Pure-bitmap format: no L section to join. */
 	list_ckpt_head = NULL;
 	list_ckpt_tail = NULL;
 	
@@ -1893,17 +2110,13 @@ int require_send_checkpoint(){
  * ----------------------------------------
  */
  FILE * receive_checkpoint(int source, unsigned char **ckpt_data, size_t *ckpt_size) {
-	int nbytes;
+	size_t nbytes = 0;
 	unsigned char *buffer;
 	FILE *stream;
 
-	/* Receive the size first */
-	cape_ucx_recv(&nbytes, sizeof(int), source, TAG_CKPT_DATA);
-	buffer = malloc(nbytes);
-	/* Receive the checkpoint data */
-	cape_ucx_recv(buffer, nbytes, source, TAG_CKPT_DATA + 1);
+	/* Single-message recv: tag probe discovers the payload size. */
+	buffer = cape_ucx_recv_probe_alloc(&nbytes, source, TAG_CKPT_DATA);
 
-	//open the stream memory file
 	stream = open_binary_memstream(ckpt_data, ckpt_size);
 	fwrite(buffer, nbytes, 1, stream);
 	fflush(stream);
@@ -1911,7 +2124,7 @@ int require_send_checkpoint(){
 
 	return stream;
 
- } 
+ }
 /* -------------------------------------------------------------
  * require_receive_checkpoint(): receive checkpoint * 	
  * 	Slave: save into after_ckpt
@@ -2045,100 +2258,32 @@ int inject_checkpoint(FILE *stream, size_t *file_size, struct user_regs_struct *
   	file_pointer += sizeof(struct user_regs_struct);
   	fseek(stream, file_pointer , SEEK_SET);
   	
-	//printf("\nNode %ld: prepare to inject checkpoint", node);
-  	while(file_pointer < *file_size)
-  	{
-  		//read address or signal from checkpoint
-  		fread(&addr, sizeof(unsigned long), 1, stream);
-  		file_pointer += sizeof(unsigned long);
-  		fseek(stream, file_pointer, SEEK_SET); 	
-  		
-  		//printf("\nNode %ld: addr = %ld", node, addr);
-  		
-  		//it it is signal, read address again
-  		switch(addr){
-			case BMP_S:
-				rc = inject_bitmap_section_from_stream(stream, *file_size,
-								       &file_pointer);
-				if (rc != 0)
-					goto out_close;
-				fseek(stream, file_pointer, SEEK_SET);
-				continue;
-			case SSD:
-				fread(&addr, sizeof(unsigned long), 1, stream);
-				file_pointer += sizeof(unsigned long);
-				fseek(stream, file_pointer, SEEK_SET);				
-				current_ckpt_struct = SSD;
-				
-				//printf("\nNode %ld: addr = %lx - current_ckpt_struct = SSD", node, addr);			
-				break;
-			case SD:
-				fread(&addr, sizeof(unsigned long), 1, stream);
-				file_pointer += sizeof(unsigned long);
-				fseek(stream, file_pointer, SEEK_SET);				
-				current_ckpt_struct = SD;	
-				break;
-			case EP:
-				fread(&addr, sizeof(unsigned long), 1, stream);
-				file_pointer += sizeof(unsigned long);
-				fseek(stream, file_pointer, SEEK_SET);				
-				current_ckpt_struct = EP;	
-				//printf("\nNode %ld: addr = %ld - current_ckpt_struct = EP", node, addr);
-				break;
-			case MD:
-				fread(&addr, sizeof(unsigned long), 1, stream);
-				file_pointer += sizeof(unsigned long);
-				fseek(stream, file_pointer, SEEK_SET);				
-				current_ckpt_struct = MD;
-				//printf("\nNode %ld: addr = %lx - current_ckpt_struct = MD", node, addr);	
-				break;
+	/* Pure-bitmap format: stream is just [timespan][save_regs][BMP_S section].
+	 * No SSD/SD/MD/EP tail. Find the BMP_S marker and inject pages. */
+	(void)buff; (void)current_ckpt_struct; (void)len;
+	while (file_pointer < *file_size) {
+		if (fread(&addr, sizeof(unsigned long), 1, stream) != 1) {
+			rc = 1;
+			break;
 		}
-		
-  		
-  		//read data from checkpoint  		
-  		//read len from checkpoint
-  		len = 0;
-  		switch(current_ckpt_struct){
-			case EP:
-				len = PAGE_SIZE;
-				break;
-			case SSD:
-				fread(&len, sizeof(int), 1, stream);
-				file_pointer += sizeof(int);
-				fseek(stream, file_pointer, SEEK_SET);
-				break;
-			case SD:
-				len = CAPE_WORD;
-				break;
-			case MD:
-				break;
-		} 
-  		if (len <= 0)
-  			continue;
+		file_pointer += sizeof(unsigned long);
+		fseek(stream, file_pointer, SEEK_SET);
+		if (addr == BMP_S) {
+			rc = inject_bitmap_section_from_stream(stream, *file_size,
+							       &file_pointer);
+			if (rc != 0)
+				goto out_close;
+			fseek(stream, file_pointer, SEEK_SET);
+			continue;
+		}
+		/* Unknown marker — stale-format checkpoint. Stop. */
+		fprintf(stderr,
+			"Monitor %ld: unexpected marker 0x%lx in checkpoint stream\n",
+			node, addr);
+		rc = 1;
+		break;
+	}
 
-  		buff = (unsigned char *) malloc(len);
-  		if (buff == NULL) {
-  			rc = 1;
-  			break;
-  		}
-  		if (fread(buff, len, 1, stream) != 1) {
-  			free(buff);
-  			rc = 1;
-  			break;
-  		}
-  		file_pointer +=len;
-  		fseek(stream, file_pointer, SEEK_SET);  		
- 		
-  		rc = ioctl_write_data(child_id, buff, addr, len);
-  		free(buff);
-  		if (rc != 0) {
-  			fprintf(stderr,
-  				"Monitor %ld: failed to inject checkpoint data at 0x%lx len=%d: %s\n",
-  				node, addr, len, strerror(errno));
-  			break;
-  		}
-  	}  	
-  	
 out_close:
   	fclose(stream); 
   	*file_size = 0;
@@ -2242,230 +2387,20 @@ int add_to_final_ckpt_list(struct shared_data_ckpt *plist, struct shared_data *p
 	while((tmp->next!=NULL) && (tmp->addr < pt->addr))
 			tmp = tmp->next;
 					
-	//This part will act on data, depends on its properties
-	if(tmp->addr == pt->addr){
-		free(pt);
-		pt = plist;
-		if ((prop->properties == D_LAST_PRIVATE) || 
-				(prop->properties == D_SHARED) ||
-				(prop->properties == D_COPY_IN))
-		{
+	if (tmp->addr == pt->addr) {
+		struct shared_data *r = lookup_reduction(pt->addr);
+		if (r != NULL) {
+			unsigned int sz = reduction_size(r->datatype);
+			if (sz == 0 || sz > CAPE_WORD) sz = CAPE_WORD;
+			apply_reduction(r->properties, r->datatype,
+					tmp->data, pt->data);
+			(void)sz;
+		} else {
 			memcpy(tmp->data, pt->data, CAPE_WORD);
-			return 0;
 		}
-		
-		//D_REDUCTION_SUM
-		if (prop->properties == D_REDUCTION_SUM){
-			if(prop->datatype == CAPE_FLOAT){
-				float f=0.0, f1=0.0, f2=0.0;
-				memcpy(&f1,tmp->data, CAPE_WORD);
-				memcpy(&f2,pt->data, CAPE_WORD);
-				f = f1 + f2;
-				memcpy(tmp->data, &f, CAPE_WORD);											
-
-				return 0;
-			}
-			if((prop->datatype == CAPE_INT) || (prop->properties = CAPE_LONG))
-			{
-				int f=0, f1=0, f2=0;
-				memcpy(&f1,tmp->data, sizeof(int));
-				memcpy(&f2,pt->data, sizeof(int));
-				f = f1 + f2;											
-				memcpy(tmp->data, &f, sizeof(int));
-				//printf("\n Sum - int = %d",f); 
-				return 0;
-			}
-			if((prop->datatype == CAPE_UNSIGNED_INT) || (prop->properties = CAPE_UNSIGNED_LONG))
-			{
-				int f=0, f1=0, f2=0;
-				memcpy(&f1,tmp->data, sizeof(unsigned int));
-				memcpy(&f2,pt->data, sizeof(unsigned int));
-				f = f1 + f2;
-				memcpy(tmp->data, &f, sizeof(unsigned int));
-				//printf("\n Sum - unsigned int = %ld",f); 
-				return 0;
-			}
-			if((prop->datatype == CAPE_BYTE) || (prop->properties = CAPE_CHAR))
-			{
-				int f=0, f1=0, f2=0;
-				memcpy(&f1,tmp->data, sizeof(char));
-				memcpy(&f2,pt->data, sizeof(char));
-				f = f1 + f2;
-				memcpy(tmp->data, &f, sizeof(char));
-				return 0;
-			}
-			if(prop->datatype == CAPE_UNSIGNED_CHAR) 
-			{
-				int f=0, f1=0, f2=0;
-				memcpy(&f1,tmp->data, sizeof(unsigned char));
-				memcpy(&f2,pt->data, sizeof(unsigned char));
-				f = f1 + f2;
-				memcpy(tmp->data, &f, sizeof(unsigned char));
-				return 0;
-			}
-			return 1; //error
-		}//end if D_REDUCTION_SUM	
-		
-		//D_REDUCTION_MUL
-		if (prop->properties == D_REDUCTION_MUL){
-			if(prop->datatype == CAPE_FLOAT){
-				float f=0.0, f1=0.0, f2=0.0;
-				memcpy(&f1,tmp->data, CAPE_WORD);
-				memcpy(&f2,pt->data, CAPE_WORD);
-				f = f1 * f2;
-				memcpy(tmp->data, &f, CAPE_WORD);											
-				//printf("\n Sum = %f",f); 
-				return 0;
-			}
-			if((prop->datatype == CAPE_INT) || (prop->properties = CAPE_LONG))
-			{
-				int f=0, f1=0, f2=0;
-				memcpy(&f1,tmp->data, sizeof(int));
-				memcpy(&f2,pt->data, sizeof(int));
-				f = f1 * f2;											
-				memcpy(tmp->data, &f, sizeof(int));
-				//printf("\n Sum - int = %d",f); 
-				return 0;
-			}
-			if((prop->datatype == CAPE_UNSIGNED_INT) || (prop->properties = CAPE_UNSIGNED_LONG))
-			{
-				int f=0, f1=0, f2=0;
-				memcpy(&f1,tmp->data, sizeof(unsigned int));
-				memcpy(&f2,pt->data, sizeof(unsigned int));
-				f = f1 * f2;
-				memcpy(tmp->data, &f, sizeof(unsigned int));
-				//printf("\n Sum - unsigned int = %ld",f); 
-				return 0;
-			}
-			if((prop->datatype == CAPE_BYTE) || (prop->properties = CAPE_CHAR))
-			{
-				int f=0, f1=0, f2=0;
-				memcpy(&f1,tmp->data, sizeof(char));
-				memcpy(&f2,pt->data, sizeof(char));
-				f = f1 * f2 ;
-				memcpy(tmp->data, &f, sizeof(char));
-				return 0;
-			}
-			if(prop->datatype == CAPE_UNSIGNED_CHAR) 
-			{
-				int f=0, f1=0, f2=0;
-				memcpy(&f1,tmp->data, sizeof(unsigned char));
-				memcpy(&f2,pt->data, sizeof(unsigned char));
-				f = f1 * f2;
-				memcpy(tmp->data, &f, sizeof(unsigned char));
-				return 0;
-			}
-			return 1; //error
-		}//end if D_REDUCTION_MUL
-		
-		
-		//D_REDUCTION_MAX
-		if (prop->properties == D_REDUCTION_MAX){
-			if(prop->datatype == CAPE_FLOAT){
-				float f=0.0, f1=0.0, f2=0.0;
-				memcpy(&f1,tmp->data, CAPE_WORD);
-				memcpy(&f2,pt->data, CAPE_WORD);
-				f = (f1 >= f2)? f1 : f2 ;
-				memcpy(tmp->data, &f, CAPE_WORD);											
-				//printf("\n Sum = %f",f); 
-				return 0;
-			}
-			if((prop->datatype == CAPE_INT) || (prop->properties = CAPE_LONG))
-			{
-				int f=0, f1=0, f2=0;
-				memcpy(&f1,tmp->data, sizeof(int));
-				memcpy(&f2,pt->data, sizeof(int));
-				f = (f1 >= f2)? f1 : f2 ;											
-				memcpy(tmp->data, &f, sizeof(int));
-				//printf("\n Sum - int = %d",f); 
-				return 0;
-			}
-			if((prop->datatype == CAPE_UNSIGNED_INT) || (prop->properties = CAPE_UNSIGNED_LONG))
-			{
-				int f=0, f1=0, f2=0;
-				memcpy(&f1,tmp->data, sizeof(unsigned int));
-				memcpy(&f2,pt->data, sizeof(unsigned int));
-				f = (f1 >= f2)? f1 : f2 ;
-				memcpy(tmp->data, &f, sizeof(unsigned int));
-				//printf("\n Sum - unsigned int = %ld",f); 
-				return 0;
-			}
-			if((prop->datatype == CAPE_BYTE) || (prop->properties = CAPE_CHAR))
-			{
-				int f=0, f1=0, f2=0;
-				memcpy(&f1,tmp->data, sizeof(char));
-				memcpy(&f2,pt->data, sizeof(char));
-				f = (f1 >= f2)? f1 : f2 ;
-				memcpy(tmp->data, &f, sizeof(char));
-				return 0;
-			}
-			if(prop->datatype == CAPE_UNSIGNED_CHAR) 
-			{
-				int f=0, f1=0, f2=0;
-				memcpy(&f1,tmp->data, sizeof(unsigned char));
-				memcpy(&f2,pt->data, sizeof(unsigned char));
-				f = (f1 >= f2)? f1 : f2 ;
-				memcpy(tmp->data, &f, sizeof(unsigned char));
-				return 0;
-			}
-			return 1; //error
-		}//end if D_REDUCTION_MAX
-		
-		
-		//D_REDUCTION_MIN
-		if (prop->properties == D_REDUCTION_MIN){
-			if(prop->datatype == CAPE_FLOAT){
-				float f=0.0, f1=0.0, f2=0.0;
-				memcpy(&f1,tmp->data, CAPE_WORD);
-				memcpy(&f2,pt->data, CAPE_WORD);
-				f = (f1 >= f2)? f2 : f1 ;
-				memcpy(tmp->data, &f, CAPE_WORD);											
-				//printf("\n Sum = %f",f); 
-				return 0;
-			}
-			if((prop->datatype == CAPE_INT) || (prop->properties = CAPE_LONG))
-			{
-				int f=0, f1=0, f2=0;
-				memcpy(&f1,tmp->data, sizeof(int));
-				memcpy(&f2,pt->data, sizeof(int));
-				f = (f1 >= f2)? f2 : f1 ;											
-				memcpy(tmp->data, &f, sizeof(int));
-				//printf("\n Sum - int = %d",f); 
-				return 0;
-			}
-			if((prop->datatype == CAPE_UNSIGNED_INT) || (prop->properties = CAPE_UNSIGNED_LONG))
-			{
-				int f=0, f1=0, f2=0;
-				memcpy(&f1,tmp->data, sizeof(unsigned int));
-				memcpy(&f2,pt->data, sizeof(unsigned int));
-				f = (f1 >= f2)? f2 : f1 ;
-				memcpy(tmp->data, &f, sizeof(unsigned int));
-				//printf("\n Sum - unsigned int = %ld",f); 
-				return 0;
-			}
-			if((prop->datatype == CAPE_BYTE) || (prop->properties = CAPE_CHAR))
-			{
-				int f=0, f1=0, f2=0;
-				memcpy(&f1,tmp->data, sizeof(char));
-				memcpy(&f2,pt->data, sizeof(char));
-				f = (f1 >= f2)? f2 : f1 ;
-				memcpy(tmp->data, &f, sizeof(char));
-				return 0;
-			}
-			if(prop->datatype == CAPE_UNSIGNED_CHAR) 
-			{
-				int f=0, f1=0, f2=0;
-				memcpy(&f1,tmp->data, sizeof(unsigned char));
-				memcpy(&f2,pt->data, sizeof(unsigned char));
-				f = (f1 >= f2)? f2 : f1 ;
-				memcpy(tmp->data, &f, sizeof(unsigned char));
-				return 0;
-			}
-			return 1; //error
-		}//end if D_REDUCTION_MIN
-	
-		return 1; //error
-	}//end if tmp->addr = pt->addr	
+		free(pt);
+		return 0;
+	}
 
 	pt->next = tmp;
 	pt->prev = tmp->prev;
@@ -2716,16 +2651,11 @@ int merge_external_checkpoint(FILE *src_ckpt_stream, 		\
 		fflush(total_ckpt_stream);
 
 		//Write merged bitmap S into Total_ckpt, with S1 winning conflicts.
+		//Reductions are applied per-word inside merge_bitmap_sections.
+		//No L tail anymore.
 		rc = merge_bitmap_sections(total_ckpt_stream, &src_bmp, &tmp_bmp);
 		if (rc != 0)
 			goto done;
-
-		//Write L2 into Total_ckpt
-		merge_data(src_read_stream, src_ckpt_data, src_ckpt_size, src_bmp.end, FINAL_CHECKPOINT);
-
-		//Write L1 into Total_ckpt
-		merge_data(tmp_read_stream, tmp_ckpt, tmp_size, tmp_bmp.end, TOTAL_CHECKPOINT);
-
 	}
  	else
  	{
@@ -2737,12 +2667,6 @@ int merge_external_checkpoint(FILE *src_ckpt_stream, 		\
 		rc = merge_bitmap_sections(total_ckpt_stream, &tmp_bmp, &src_bmp);
 		if (rc != 0)
 			goto done;
-
-		//Write L1 into Total_ckpt
-		merge_data(tmp_read_stream, tmp_ckpt, tmp_size, tmp_bmp.end, TOTAL_CHECKPOINT);
-
-		//Write L2 into Total_ckpt
-		merge_data(src_read_stream, src_ckpt_data, src_ckpt_size, src_bmp.end, FINAL_CHECKPOINT);
 	}
 
 done:
@@ -2806,21 +2730,18 @@ int require_broadcast_checkpoint(){
 	{
 		buffer_size = final_ckpt_size;
 		buffer_ckpt = final_ckpt;
-		/* Master sends size and data to all slaves */
+		/* Single-message broadcast: slaves discover size by probe. */
 		for(i = 1; i < num_nodes; i++){
-			cape_ucx_send(&buffer_size, sizeof(int), i, TAG_BCAST_SIZE);
 			cape_ucx_send(buffer_ckpt, buffer_size, i, TAG_BCAST_DATA);
 		}
 	}
 	else
 	{
-		/* Slaves receive size and data from master */
-		cape_ucx_recv(&buffer_size, sizeof(int), 0, TAG_BCAST_SIZE);
-		buffer_ckpt = malloc(buffer_size);
-		cape_ucx_recv(buffer_ckpt, buffer_size, 0, TAG_BCAST_DATA);
-		//open the stream memory file
+		size_t recv_size = 0;
+		buffer_ckpt = cape_ucx_recv_probe_alloc(&recv_size, 0, TAG_BCAST_DATA);
+		buffer_size = (int)recv_size;
 		after_ckpt_stream = open_binary_memstream(&after_ckpt, &after_ckpt_size);
-		fwrite(buffer_ckpt, buffer_size, 1, after_ckpt_stream);
+		fwrite(buffer_ckpt, recv_size, 1, after_ckpt_stream);
 		fflush(after_ckpt_stream);
 		free(buffer_ckpt);
 	}
@@ -2881,16 +2802,14 @@ int prepare_allreduce_checkpoint(){
 		buffer_size = total_ckpt_size;
 		buffer_ckpt = total_ckpt;
 		for (i = 1; i < num_nodes; i++){
-			cape_ucx_send(&buffer_size, sizeof(int), i, TAG_BCAST_SIZE);
 			cape_ucx_send(buffer_ckpt, buffer_size, i, TAG_BCAST_DATA);
 		}
 	}else{
-		cape_ucx_recv(&buffer_size, sizeof(int), 0, TAG_BCAST_SIZE);
-		buffer_ckpt = malloc(buffer_size);
-		cape_ucx_recv(buffer_ckpt, buffer_size, 0, TAG_BCAST_DATA);
-		//write buffer_ckpt to total_ckpt_stream file
+		size_t recv_size = 0;
+		buffer_ckpt = cape_ucx_recv_probe_alloc(&recv_size, 0, TAG_BCAST_DATA);
+		buffer_size = (int)recv_size;
 		total_ckpt_stream = open_binary_memstream(&total_ckpt, &total_ckpt_size);
-		fwrite(buffer_ckpt, buffer_size, 1, total_ckpt_stream);
+		fwrite(buffer_ckpt, recv_size, 1, total_ckpt_stream);
 		fflush(total_ckpt_stream);
 		free(buffer_ckpt);
 	}
@@ -2926,21 +2845,14 @@ int ring_allreduce(){
 
 
 	for(i = 1 ; i < num_nodes; i++){
-		uint32_t token_size = TAG_ALLREDUCE_BASE + (i * 2);
-		uint32_t token_data = TAG_ALLREDUCE_BASE + (i * 2) + 1;
+		uint32_t token_data = TAG_ALLREDUCE_BASE + i;
+		size_t recv_len = 0;
 
-		//send size of message
-		cape_ucx_sendrecv(&message_size, sizeof(int), right,
-						  &recv_message_size, sizeof(int), left,
-						  token_size);
-
-		recv_buffer = malloc(sizeof(char) * recv_message_size) ;
-
-		//send data
-		cape_ucx_sendrecv(send_buffer, message_size, right,
-						  recv_buffer, recv_message_size, left,
-						  token_data);
-
+		/* Single-message sendrecv; recv buffer allocated to probed size. */
+		recv_buffer = cape_ucx_sendrecv_probe_alloc(
+		                  send_buffer, (size_t)message_size, right,
+		                  &recv_len, left, token_data);
+		recv_message_size = (int)recv_len;
 
 		ckpt_stream = open_binary_memstream(&ckpt_data, &ckpt_size);
 		fwrite(recv_buffer, recv_message_size, 1, ckpt_stream);
@@ -2995,33 +2907,22 @@ int hypercube_allreduce(){
 	send_msg_size = total_ckpt_size;
 
 	for(i = 0; i < nsteps; i ++){
-		uint32_t token_size = TAG_ALLREDUCE_BASE + (i * 2);
-		uint32_t token_data = TAG_ALLREDUCE_BASE + (i * 2) + 1;
+		uint32_t token_data = TAG_ALLREDUCE_BASE + i;
+		size_t recv_len = 0;
 
 		partner = node ^ (1 << i);
 
-
-
-		//send size of message
-		cape_ucx_sendrecv(&send_msg_size, sizeof(int), partner,
-						  &recv_msg_size, sizeof(int), partner,
-						  token_size);
-
-
-
-		recv_msg = malloc(sizeof(char) * recv_msg_size) ;
-
-		//send data
-		cape_ucx_sendrecv(send_msg, send_msg_size, partner,
-						  recv_msg, recv_msg_size, partner,
-						  token_data);
+		/* Single-message sendrecv; recv buffer allocated to probed size. */
+		recv_msg = cape_ucx_sendrecv_probe_alloc(
+		               send_msg, (size_t)send_msg_size, partner,
+		               &recv_len, partner, token_data);
+		recv_msg_size = (int)recv_len;
 
 		ckpt_stream = open_binary_memstream(&ckpt_data, &ckpt_size);
 		fwrite(recv_msg, recv_msg_size, 1, ckpt_stream);
 		fflush(ckpt_stream);
 
 		rc = merge_external_checkpoint(ckpt_stream, ckpt_data, ckpt_size);
-		join_checkpoint(TOTAL_CHECKPOINT, final_list_ckpt_head);
 
 		fclose(ckpt_stream);
 		/* open_memstream buffer + UCX recv buffer must be freed
@@ -3052,8 +2953,7 @@ int require_allreduce_checkpoint(){
 //	print_data_in_ckpt_list(final_list_ckpt_head);
 	
 	
-	rc=  merge_external_checkpoint(final_ckpt_stream, final_ckpt, final_ckpt_size);		
-	join_checkpoint(TOTAL_CHECKPOINT, final_list_ckpt_head);
+	rc=  merge_external_checkpoint(final_ckpt_stream, final_ckpt, final_ckpt_size);
 	
 	
 	
@@ -3109,26 +3009,30 @@ int require_allreduce_checkpoint(){
 
 	return rc;
 }
-		
-/* ==========================================================================
- * cape.c-compatible API surface (bitmap backend)
- *
- * cape.c exposes a declarative API used by the source-translated apps
- * (cape_*.c under src/apps/). The bitmap backend implements those same
- * symbols so an app links unchanged against either backend.
- * ========================================================================== */
-
 unsigned long __pc__ = 0;
 unsigned long __time_stamp__ = 0;
+/* OpenMP-translator scratch globals used by the transpiled apps (see
+ * cape.h). cape_begin sets __left__/__right__ for PARALLEL_FOR/FOR; the
+ * generated `for (i = __left__; i < __right__; i++)` consumes them. */
+int __left__  = -1;
+int __right__ = -1;
+int __i__     = 0;
 
 int cape_get_node_num(void)  { return (int)node; }
 int cape_get_num_nodes(void) { return num_nodes; }
 
+static int cape_split_left (long first, long second, int n, int nn) {
+	long long count = (long long)second - (long long)first;
+	return (int)(first + (count * (long long)n) / (long long)nn);
+}
+static int cape_split_right(long first, long second, int n, int nn) {
+	long long count = (long long)second - (long long)first;
+	return (int)(first + (count * (long long)(n + 1)) / (long long)nn);
+}
+
 void __enter_func(void) {}
 void __exit_func(void)  {}
 
-/* Declarative region registration. Maps cape.c's (dtype, n_elements) to a
- * byte length and adds it to the userfaultfd tracked-range list. */
 int cape_declare_variable(void *addr, unsigned char dtype,
                           unsigned int n_elements, unsigned char ispointer)
 {
@@ -3149,14 +3053,64 @@ int cape_declare_variable(void *addr, unsigned char dtype,
 int  ckpt_start(void) { return cape_start_ckpt(); }
 void ckpt_stop(void)  { (void)cape_stop_ckpt(); }
 
-/* OpenMP-directive entry / exit. The bitmap backend treats them as plain
- * start/stop-tracking boundaries; the heavy lifting (generate / merge /
- * inject) is driven by the require_*_checkpoint() entry points the app
- * already calls inside cape_end() in cape.c. Stubbed minimally here — fill
- * in directive-specific logic (PARALLEL_FOR, SECTIONS, …) as needed. */
+/* === OpenMP data-sharing clauses ===
+ * In the userfaultfd bitmap backend, shared regions are tracked by page
+ * faults once registered (via cape_declare_variable / cape_register_region),
+ * and private/scalar variables live on the stack and are never tracked.
+ * So most clauses are advisory no-ops; only reductions must be recorded so
+ * the per-word merge (lookup_reduction) combines instead of overwriting. */
+static void cape_add_reduction(void *addr, unsigned char datatype, unsigned char op)
+{
+	struct shared_data *sd = malloc(sizeof(*sd));
+	if (sd == NULL) { perror("malloc(reduction)"); exit(1); }
+	memset(sd, 0, sizeof(*sd));
+	sd->addr = (unsigned long)addr;
+	sd->datatype = datatype;
+	sd->len = reduction_size(datatype);
+	sd->properties = op;
+	sd->prev = data_list_tail;
+	sd->next = NULL;
+	if (data_list_tail) data_list_tail->next = sd; else data_list_head = sd;
+	data_list_tail = sd;
+}
+
+void cape_set_default_none(void)        { }
+void cape_set_threadprivate(void *addr) { (void)addr; }
+void cape_set_shared(void *addr)        { (void)addr; }
+void cape_set_private(void *addr)       { (void)addr; }
+void cape_set_firstprivate(void *addr)  { (void)addr; }
+void cape_set_lastprivate(void *addr)   { (void)addr; }
+void cape_set_copyin(void *addr)        { (void)addr; }
+void cape_set_copythread(void *addr)    { (void)addr; }
+void cape_set_copyprivate(void *addr)   { (void)addr; }
+
+/* OP is the cape_set_reduction operator keyword (CAPE_SUM/MUL/MAX/MIN);
+ * map it to the monitor's D_REDUCTION_* range. Datatype defaults to
+ * CAPE_INT (the transpiler does not carry the element type here). */
+void cape_set_reduction(void *addr, char op)
+{
+	/* op is a cape.h operator constant (not visible here to avoid header
+	 * clashes): CAPE_SUM=8, CAPE_MUL=9, CAPE_MAX=10, CAPE_MIN=11. */
+	unsigned char dop;
+	switch (op) {
+		case 8:  dop = D_REDUCTION_SUM; break;
+		case 9:  dop = D_REDUCTION_MUL; break;
+		case 10: dop = D_REDUCTION_MAX; break;
+		case 11: dop = D_REDUCTION_MIN; break;
+		default: dop = D_REDUCTION_SUM; break;
+	}
+	cape_add_reduction(addr, CAPE_INT, dop);
+}
+
 void cape_begin(unsigned char directive, long first, long second)
 {
-	(void)directive; (void)first; (void)second;
+	if (directive == PARALLEL_FOR || directive == FOR ||
+	    directive == FOR_NOWAIT) {
+		int nn = num_nodes > 0 ? num_nodes : 1;
+		int n  = (int)node;
+		__left__  = cape_split_left (first, second, n, nn);
+		__right__ = cape_split_right(first, second, n, nn);
+	}
 	cape_start_ckpt();
 }
 
@@ -3169,9 +3123,6 @@ void cape_end(unsigned char directive, unsigned char ops_flag)
 		exit(1);
 	}
 	cape_stop_ckpt();
-	/* require_allreduce_checkpoint merges peer checkpoints AND injects
-	 * the merged result into local memory — do not call require_inject
-	 * separately or we'd fread from the already-closed total_ckpt_stream. */
 	if (require_allreduce_checkpoint() != 0) {
 		fprintf(stderr, "cape_end: allreduce_checkpoint failed on node %ld\n", node);
 		exit(1);
