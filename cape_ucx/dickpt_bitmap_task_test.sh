@@ -68,12 +68,6 @@ for _pfx in "${EBROOTPMIX:-__none__}" \
     fi
 done
 
-TXL_DIR="${TXL_DIR:-${PROJECT_DIR}/../20171001 TXL Transform/20171001 TXL Transform/openmptodickpt}"
-if command -v txl >/dev/null 2>&1 && [ -f "${TXL_DIR}/omptodickpt.Txl" ]; then
-    (cd "${TXL_DIR}" && txl -q -s 400 tests/test_task.c omptodickpt.Txl > "${PROJECT_DIR}/src/apps/cape_task_example_dickpt.c")
-else
-    echo "TXL not found; using checked-in src/apps/cape_task_example_dickpt.c"
-fi
 
 MAKE_ARGS=(
     EXE_FOLDER="${BUILD_DIR}/bin" O_FOLDER="${BUILD_DIR}/obj" L_FOLDER="${BUILD_DIR}/lib"

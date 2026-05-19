@@ -15,6 +15,7 @@ static long task_work (long x) {
 }
 
 int main (int argc, char * * argv) {
+    printf("Script started\n");
     static long input [N];
     static long output [N];
     long checksum = 0;
