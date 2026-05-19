@@ -2551,11 +2551,37 @@ int main(int argc, char * argv[]){
 				fflush(stderr);
 			}
 			if (ptrace(PTRACE_TRACEME, 0, 0, 0) != 0) {
+				int saved_errno = errno;
+				char scope_buf[16] = "?";
+				char tracer_buf[64] = "?";
+				int fd = open("/proc/sys/kernel/yama/ptrace_scope", O_RDONLY);
+				if (fd >= 0) {
+					ssize_t n = read(fd, scope_buf, sizeof(scope_buf) - 1);
+					if (n > 0) scope_buf[n] = 0;
+					close(fd);
+				}
+				fd = open("/proc/self/status", O_RDONLY);
+				if (fd >= 0) {
+					char buf[4096];
+					ssize_t n = read(fd, buf, sizeof(buf) - 1);
+					if (n > 0) {
+						buf[n] = 0;
+						char *p = strstr(buf, "TracerPid:");
+						if (p) {
+							char *e = strchr(p, '\n');
+							if (e) *e = 0;
+							snprintf(tracer_buf, sizeof(tracer_buf), "%s", p);
+						}
+					}
+					close(fd);
+				}
 				fprintf(stderr,
 					"CAPE_DBG child pid=%d: PTRACE_TRACEME FAILED: %s "
-					"(check /proc/sys/kernel/yama/ptrace_scope; "
-					"set to 0, or run with CAP_SYS_PTRACE)\n",
-					getpid(), strerror(errno));
+					"(yama.ptrace_scope=%s %s) "
+					"-- if scope>=2 the cluster admin must lower it, "
+					"or run with CAP_SYS_PTRACE; if TracerPid is nonzero, "
+					"slurmstepd is already attached\n",
+					getpid(), strerror(saved_errno), scope_buf, tracer_buf);
 				fflush(stderr);
 				_exit(3);
 			}
