@@ -2556,12 +2556,26 @@ int main(int argc, char * argv[]){
 	
 	
 
-	//wait for cape program finish startup	
+	//wait for cape program finish startup
 	CAPE_DBG("waiting for child exec startup");
 	for ( process_state = 0 ; process_state != 2 ; ) {
 		tracer_wait ( child_id, & status, 0, & u ) ;
 		CAPE_DBG("startup wait state=%d status=0x%x orig_rax=%lld",
 			 process_state, status, (long long)u.regs.orig_rax);
+		if (WIFEXITED(status)) {
+			fprintf(stderr,
+				"CAPE monitor: child exited during startup (code=%d) before reaching exec sync\n",
+				WEXITSTATUS(status));
+			exit(1);
+		}
+		if (WIFSIGNALED(status)) {
+			fprintf(stderr,
+				"CAPE monitor: child killed during startup by signal %d%s (status=0x%x)\n",
+				WTERMSIG(status),
+				WCOREDUMP(status) ? " (core dumped)" : "",
+				status);
+			exit(1);
+		}
 		switch ( process_state ) {
 		case 0 :	//Wait for ``execve'' to start
 			if ( u . regs . orig_rax == SYS_execve )

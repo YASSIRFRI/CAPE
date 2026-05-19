@@ -28,11 +28,11 @@ int main (int argc, char * * argv) {
         output [i] = 0;
         expected += task_work (input [i]);
     }
-    dickpt_register_region (& input, sizeof (input));
-    dickpt_register_shared (& input, sizeof (input), 1);
-    dickpt_register_region (& output, sizeof (output));
-    dickpt_register_shared (& output, sizeof (output), 1);
     dickpt_start_ckpt ();
+        dickpt_register_region (& input, sizeof (input));
+        dickpt_register_shared (& input, sizeof (input), 1);
+        dickpt_register_region (& output, sizeof (output));
+        dickpt_register_shared (& output, sizeof (output), 1);
         if (1) {
             if (dickpt_read_node () == 0) {
                 dickpt_generate_ckpt ();
