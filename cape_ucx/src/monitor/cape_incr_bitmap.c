@@ -2214,21 +2214,6 @@ static void cape_ucx_init(void)
     }
     node = (unsigned long)pmix_myproc.rank;
 
-    pmix_proc_t wildcard;
-    PMIX_PROC_CONSTRUCT(&wildcard);
-    PMIX_LOAD_NSPACE(wildcard.nspace, pmix_myproc.nspace);
-    wildcard.rank = PMIX_RANK_WILDCARD;
-
-    pmix_value_t *val;
-    pst = PMIx_Get(&wildcard, PMIX_JOB_SIZE, NULL, 0, &val);
-    if (pst != PMIX_SUCCESS) {
-        fprintf(stderr, "CAPE UCX: PMIx_Get(PMIX_JOB_SIZE) failed: %s\n",
-                PMIx_Error_string(pst));
-        exit(1);
-    }
-    num_nodes = (int)val->data.uint32;
-    PMIX_VALUE_RELEASE(val);
-
     {
         int step_tasks = cape_env_int("SLURM_STEP_NUM_TASKS", -1);
         if (step_tasks <= 0)
@@ -2237,8 +2222,25 @@ static void cape_ucx_init(void)
             step_tasks = cape_env_int("PMIX_SIZE", -1);
         if (step_tasks <= 0)
             step_tasks = cape_env_int("SLURM_NTASKS", -1);
-        if (step_tasks > 0)
+        if (step_tasks > 0) {
             num_nodes = step_tasks;
+        } else {
+            pmix_proc_t wildcard;
+            pmix_value_t *val;
+
+            PMIX_PROC_CONSTRUCT(&wildcard);
+            PMIX_LOAD_NSPACE(wildcard.nspace, pmix_myproc.nspace);
+            wildcard.rank = PMIX_RANK_WILDCARD;
+
+            pst = PMIx_Get(&wildcard, PMIX_JOB_SIZE, NULL, 0, &val);
+            if (pst != PMIX_SUCCESS) {
+                fprintf(stderr, "CAPE UCX: PMIx_Get(PMIX_JOB_SIZE) failed: %s\n",
+                        PMIx_Error_string(pst));
+                exit(1);
+            }
+            num_nodes = (int)val->data.uint32;
+            PMIX_VALUE_RELEASE(val);
+        }
     }
     if ((int)node < 0 || (int)node >= num_nodes) {
         fprintf(stderr,
@@ -2326,10 +2328,22 @@ static void cape_ucx_init(void)
                 PMIx_Error_string(pst));
         exit(1);
     }
+    pmix_proc_t *fence_procs;
     pmix_info_t fence_info;
     PMIX_INFO_CONSTRUCT(&fence_info);
     PMIX_INFO_LOAD(&fence_info, PMIX_COLLECT_DATA, NULL, PMIX_BOOL);
-    pst = PMIx_Fence(NULL, 0, &fence_info, 1);
+    fence_procs = calloc((size_t)num_nodes, sizeof(*fence_procs));
+    if (fence_procs == NULL) {
+        perror("calloc(PMIx fence procs)");
+        exit(1);
+    }
+    for (int i = 0; i < num_nodes; i++) {
+        PMIX_PROC_CONSTRUCT(&fence_procs[i]);
+        PMIX_LOAD_NSPACE(fence_procs[i].nspace, pmix_myproc.nspace);
+        fence_procs[i].rank = (pmix_rank_t)i;
+    }
+    pst = PMIx_Fence(fence_procs, (size_t)num_nodes, &fence_info, 1);
+    free(fence_procs);
     PMIX_INFO_DESTRUCT(&fence_info);
     if (pst != PMIX_SUCCESS) {
         fprintf(stderr, "CAPE UCX: PMIx_Fence failed: %s\n",
