@@ -2381,20 +2381,7 @@ static void cape_ucx_init(void)
                 PMIx_Error_string(pst));
         exit(1);
     }
-    CAPE_DBG("PMIx_Commit done; PMIx_Fence begin");
-
-    pmix_info_t fence_info;
-    bool collect_data = true;
-    PMIX_INFO_CONSTRUCT(&fence_info);
-    PMIX_INFO_LOAD(&fence_info, PMIX_COLLECT_DATA, &collect_data, PMIX_BOOL);
-    pst = PMIx_Fence(NULL, 0, &fence_info, 1);
-    PMIX_INFO_DESTRUCT(&fence_info);
-    if (pst != PMIX_SUCCESS) {
-        fprintf(stderr, "CAPE UCX: PMIx_Fence failed: %s\n",
-                PMIx_Error_string(pst));
-        exit(1);
-    }
-    CAPE_DBG("PMIx_Fence done; peer PMIx_Get begins");
+    CAPE_DBG("PMIx_Commit done; peer PMIx_Get begins");
 
     ucp_endpoints = malloc(num_nodes * sizeof(ucp_ep_h));
     for (int i = 0; i < num_nodes; i++) {
