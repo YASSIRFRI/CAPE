@@ -34,6 +34,18 @@
 #include <pmix.h>
 #endif
 
+/* OpenMP directive codes (mirror cape.h; defined here so cape_bitmap.c
+ * does not need to include cape.h, which would clash with cape_monitor.h). */
+#ifndef PARALLEL
+#define PARALLEL      2
+#define FOR           3
+#define FOR_NOWAIT    4
+#define PARALLEL_FOR  5
+#define SECTIONS      6
+#define MASTER        8
+#define SINGLE        9
+#endif
+
 struct page_node * list_head = NULL, * list_end = NULL;
 
 
