@@ -43,22 +43,24 @@ function main
 
 	% Export of the list of global variable varDeclarationRules
 	% So it can be accessed by other functions.
-	export GlobalVars 
+	export GlobalVars
+
+	% Set of array ids already given a cape_declare_variable, so the
+	% augmenting rule registers each array exactly once (and does not
+	% recurse on the declaration it preserves).
+	construct RegisteredArrays [repeat id]
+		_
+	export RegisteredArrays
 
 	construct ThreadDecls [cape_threadprivate]
 	export ThreadDecls
 
 	% New includes into the C program.
 	construct NewIncludes [repeat declaration]
-		'#include <unistd.h>
-		'#include <sys/types.h>
-		'#include <sys/stat.h>
-		'#include <fcntl.h>
-		'#include <signal.h>
-		'#include <malloc.h>
-		'#include <errno.h>
-		'#include "../../include/cape.h"
-		'#include "mpi.h"
+		'#include <stdio.h>
+		'#include <stdlib.h>
+		'#include <string.h>
+		'#include "../../../cape_ucx/include/cape.h"
 
 	construct NewCProgram [repeat declaration_or_function_definition]
 		_ [changeUnit each CompilationUnit]
@@ -237,10 +239,10 @@ function addGlobalVarsToMain
     import ThreadDecls [cape_threadprivate]
 
     construct NewInit [cape_statement]
-    	CAPE_Init();
+    	cape_init();
 
     construct NewFinalize [compound_statement_body]
-    	CAPE_Finalize();
+    	cape_finalize();
       
     construct NewMainFunction [function_definition]
     	Specifiers MainName

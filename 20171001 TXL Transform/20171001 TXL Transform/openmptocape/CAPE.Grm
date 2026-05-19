@@ -42,11 +42,11 @@ end keys
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 define cape_init
-		CAPE_Init(); [NL]
+		cape_init(); [NL]
 end define
 
 define cape_finalize
-		CAPE_Finalize(); [NL]
+		cape_finalize(); [NL]
 end define
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -54,7 +54,7 @@ end define
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 define cape_declaration
-		CAPE_Declare_Variable(&[reference], [data_type], [constant_expression]); [NL]
+		cape_declare_variable(&[reference], [data_type], [constant_expression], 0); [NL]
 end define
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -71,11 +71,11 @@ define cape_argument_type
 end define 	
 
 define cape_begin
-	CAPE_Begin([list cape_argument_type]); [NL]
+	cape_begin([list cape_argument_type]); [NL]
 end define
 
 define cape_end 
-	CAPE_End([list cape_argument_type]); [NL]
+	cape_end([list cape_argument_type]); [NL]
 end define
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -181,11 +181,11 @@ define cape_automic_critical
 end define
 
 define cape_barrier
-	CAPE_Barrier(); [NL]
+	cape_barrier(); [NL]
 end define 
 
 define cape_flush
-	CAPE_Flush(); [NL]
+	cape_flush(); [NL]
 end define 
 
 define cape_construct 
@@ -236,7 +236,7 @@ define cape_clause
 	|	cape_set_private(&[reference_id]);					[NL]
 	|	cape_set_firstprivate(&[reference_id]);				[NL]
 	|	cape_set_lastprivate(&[reference_id]);				[NL]
-	|	cape_reduction(&[reference_id] , [operators]);		[NL]
+	|	cape_set_reduction(&[reference_id] , [operators]);		[NL]
 	|	cape_set_copyin(&[reference_id]);					[NL]
 	|	cape_set_copyprivate(&[reference_id]);				[NL]
 end define

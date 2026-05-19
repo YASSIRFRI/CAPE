@@ -41,52 +41,90 @@ end rule
 %				SINGLE VARIABLE REPLACEMENT 		  	%
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-% Replacement rule for a single variable declaration
-rule replaceVariableDeclaration
+% Scalar declarations are passed through unchanged. Scalars live on the
+% stack (private per rank by nature); only arrays/regions need to be
+% registered with cape so the userfaultfd backend can track their pages.
+function replaceVariableDeclaration
 	replace [declaration]
 		DeclSpec [decl_specifiers] Var [id];
-
-	construct NewVarType [data_type]
-		DeclSpec 
 	by
-		CAPE_Declare_Variable(& Var, NewVarType [replaceVarType] , 1);
-end rule
+		DeclSpec Var;
+end function
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %				1-DIMENSION ARRAY REPLACEMENT 		  	%
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 % Replacement rule for 1 dimension array declaration
-rule replaceArrayDeclaration
+% Keep the original 1D-array declaration AND append a cape_declare_variable
+% so &Var resolves at compile time and the backend knows the region size.
+function replaceArrayDeclaration
 
 	replace [declaration]
-		DeclSpec [decl_specifiers] Var [id] '[ Expression [constant_expression] '];
+		DeclSpec [decl_specifiers] Var [id] '[ Expression [constant_expression] '] Attrs [repeat attribute_spec];
+
+	% Register each array once; the preserved Original would otherwise
+	% re-match this rule and recurse forever.
+	import RegisteredArrays [repeat id]
+	where not
+		RegisteredArrays [containsId Var]
+	export RegisteredArrays
+		RegisteredArrays [. Var]
 
 	construct NewVarType [data_type]
 		DeclSpec
-	by 
-		CAPE_Declare_Variable(&Var, NewVarType [replaceVarType], Expression);
-end rule
+
+	construct Original [declaration]
+		DeclSpec Var '[ Expression '] Attrs;
+
+	construct CapeDecl [declaration]
+		cape_declare_variable(&Var, NewVarType [replaceVarType], Expression, 0);
+
+	construct Both [repeat declaration]
+		Original CapeDecl
+	by
+		Both
+end function
+
+% True if Id already appears in the registered-arrays list.
+function containsId Id [id]
+	match * [id]
+		Id
+end function
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %				2-DIMENSION ARRAY REPLACEMENT 		  	%
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 % Replacement rule for a 2 dimension array declaration
-rule replace2DimArrayDeclaration
+function replace2DimArrayDeclaration
 
 	replace [declaration]
-		DeclSpec [decl_specifiers] Var [id] '[ Exp1 [reference] ']'[ Exp2 [reference] '];
+		DeclSpec [decl_specifiers] Var [id] '[ Exp1 [reference] ']'[ Exp2 [reference] '] Attrs [repeat attribute_spec];
+
+	import RegisteredArrays [repeat id]
+	where not
+		RegisteredArrays [containsId Var]
+	export RegisteredArrays
+		RegisteredArrays [. Var]
 
 	construct NewVarType [data_type]
-		DeclSpec 
+		DeclSpec
 
 	construct NewConstantExp [binary_expression]
 		Exp1 * Exp2
 
-	by 
-		CAPE_Declare_Variable(&Var, NewVarType [replaceVarType], NewConstantExp);
-end rule
+	construct Original [declaration]
+		DeclSpec Var '[ Exp1 '] '[ Exp2 '] Attrs;
+
+	construct CapeDecl [declaration]
+		cape_declare_variable(&Var, NewVarType [replaceVarType], NewConstantExp, 0);
+
+	construct Both [repeat declaration]
+		Original CapeDecl
+	by
+		Both
+end function
 
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%

@@ -209,7 +209,7 @@ function addReductionClause Operator [omp_operator] Variable [reference_id]
 	construct NewOperator [operators]
 		Operator 
 	construct CapeClause [clauses]
-		cape_reduction(&Variable, NewOperator[replaceOperator]);
+		cape_set_reduction(&Variable, NewOperator[replaceOperator]);
 	replace [repeat clauses]
 		CapeClauseList [repeat clauses]
 	by 

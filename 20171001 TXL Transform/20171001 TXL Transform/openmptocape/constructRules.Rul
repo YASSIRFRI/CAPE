@@ -127,13 +127,13 @@ function replaceParallel
 		FALSE 
 
 	construct EndList [list cape_argument_type]
-		PARALLEL, time_stamp, BooleanArg [replaceReductionBooleanInParallel Clauses]
+		PARALLEL, BooleanArg [replaceReductionBooleanInParallel Clauses]
 
 	construct CapeBegin [cape_begin]
-		CAPE_Begin(PARALLEL, 0, 0)';
+		cape_begin(PARALLEL, 0, 0)';
 
 	construct CapeEnd [cape_end]
-		CAPE_End(EndList)';
+		cape_end(EndList)';
 
 	construct NewCapeParallel [cape_parallel]
 		CapeBegin
@@ -193,7 +193,7 @@ function replaceParallelFor
 		i
 
 	construct CapeBegin [cape_begin]
-		CAPE_Begin(PARALLEL_FOR,UnExp1, UnExp2)';
+		cape_begin(PARALLEL_FOR,UnExp1, UnExp2)';
 
 	% The boolean argument for the cape_end statement is 
 	% FALSE by default. It is change by TRUE in case of 
@@ -203,10 +203,10 @@ function replaceParallelFor
 		FALSE 
 
 	construct EndList [list cape_argument_type]
-		PARALLEL_FOR, Var, BooleanArg [replaceReductionBooleanInParallel Clauses]
+		PARALLEL_FOR, BooleanArg [replaceReductionBooleanInParallel Clauses]
 	
 	construct CapeEnd [cape_end]
-		CAPE_End(EndList)';
+		cape_end(EndList)';
 
 	construct NewCapeParallel [cape_parallel_for]
 		CapeBegin
@@ -243,13 +243,13 @@ function replaceParallelSections
 		FALSE 
 	
 	construct EndList [list cape_argument_type]
-		PARALLEL_SECTIONS, time_stamp, BooleanArg [replaceReductionBooleanInParallel Clauses]
+		PARALLEL_SECTIONS, BooleanArg [replaceReductionBooleanInParallel Clauses]
 
 	construct CapeBegin [cape_begin]
-		CAPE_Begin(PARALLEL_SECTIONS,0,0)';
+		cape_begin(PARALLEL_SECTIONS,0,0)';
 
 	construct CapeEnd [cape_end]
-		CAPE_End(EndList)';
+		cape_end(EndList)';
 
 	construct NewClausesList [repeat clauses]
 		_ 	[addParallelDefaultClauses each Clauses] 
@@ -319,10 +319,10 @@ function replaceForNowait
 		i
 
 	construct CapeBegin [cape_begin]
-		CAPE_Begin(FOR_NOWAIT,UnExp1, UnExp2)';
+		cape_begin(FOR_NOWAIT,UnExp1, UnExp2)';
 
 	construct CapeEnd [cape_end]
-		CAPE_End(FOR_NOWAIT, Var, FALSE)';
+		cape_end(FOR_NOWAIT, FALSE)';
 
 	construct NewCapeFor [cape_for]
 		CapeBegin 
@@ -365,13 +365,13 @@ function replaceRegularFor
 		FALSE 
 
 	construct EndList [list cape_argument_type]
-		FOR, Var, BooleanArg [replaceReductionBooleanInFor Clauses]
+		FOR, BooleanArg [replaceReductionBooleanInFor Clauses]
 	
 	construct CapeBegin [cape_begin]
-		CAPE_Begin(FOR,UnExp1, UnExp2)';
+		cape_begin(FOR,UnExp1, UnExp2)';
 
 	construct CapeEnd [cape_end]
-		CAPE_End(EndList)';
+		cape_end(EndList)';
 
 	construct NewCapeFor [cape_for]
 		CapeBegin 
@@ -449,10 +449,10 @@ function replaceSectionsNowait
 			[addSectionsNowaitClauses each NewOMPClauses]
 
 	construct CapeBegin [cape_begin]
-		CAPE_Begin(SECTIONS_NOWAIT,0,0)';
+		cape_begin(SECTIONS_NOWAIT,0,0)';
 
 	construct CapeEnd [cape_end]
-		CAPE_End(SECTIONS_NOWAIT, time_stamp, FALSE)';
+		cape_end(SECTIONS_NOWAIT, FALSE)';
 
 	construct NewCapeSections [cape_sections]
 		CapeBegin
@@ -483,13 +483,13 @@ function replaceRegularSections
 		FALSE 
 
 	construct EndList [list cape_argument_type]
-		SECTIONS, time_stamp, BooleanArg [replaceReductionBooleanInSections Clauses]
+		SECTIONS, BooleanArg [replaceReductionBooleanInSections Clauses]
 
 	construct CapeBegin [cape_begin]
-		CAPE_Begin(SECTIONS,0,0)';
+		cape_begin(SECTIONS,0,0)';
 
 	construct CapeEnd [cape_end]
-		CAPE_End(EndList)';
+		cape_end(EndList)';
 
 	construct NewClausesList [repeat clauses]
 		_ 	[addSectionsPrivateClauses each Clauses]
@@ -559,10 +559,10 @@ function replaceSingle
 		CompoundStatement [compound_statement]
 
 	construct CapeBegin [cape_begin]
-		CAPE_Begin(SINGLE, 0, 0)';
+		cape_begin(SINGLE, 0, 0)';
 
 	construct CapeEnd [cape_end]
-		CAPE_End(SINGLE, time_stamp, FALSE)';
+		cape_end(SINGLE, FALSE)';
 
 	construct NewCAPEClauses [repeat clauses]
 		_ 	[addSinglePrivateClauses each Clauses]
@@ -592,10 +592,10 @@ function replaceMaster
 		CompoundStatement [compound_statement]
 
 	construct CapeBegin [cape_begin]
-		CAPE_Begin(MASTER, 0, 0)';
+		cape_begin(MASTER, 0, 0)';
 
 	construct CapeEnd [cape_end]
-		CAPE_End(MASTER, time_stamp, FALSE)';
+		cape_end(MASTER, FALSE)';
 
 	construct NewCapeMaster [cape_master]
 		CapeBegin
@@ -618,7 +618,7 @@ function replaceCritical
 		CompoundStatement [compound_statement]
 	
 	construct CapeFlush [cape_flush]
-		'CAPE_Flush'(')';
+		'cape_flush'(')';
 
 	construct NewCapeCritical [cape_automic_critical]
 		for (__i__ = 0 '; __i__ < cape_get_num_nodes'(') '; __i__ ++)
@@ -641,7 +641,7 @@ function replaceBarrier
 	replace [directives]
 		'#pragma omp barrier
 	by 
-		CAPE_Barrier();
+		cape_barrier();
 end function
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -656,7 +656,7 @@ function replaceAutomic
 		CompoundStatement [compound_statement]
 	
 	construct CapeFlush [cape_flush]
-		CAPE_Flush();
+		cape_flush();
 
 	construct NewCapeAutomic [cape_automic_critical]
 		for (__i__ = 0 '; __i__ < cape_get_num_nodes'(') '; __i__ ++)
@@ -679,7 +679,7 @@ function replaceFlush
 	replace [directives]
 		'#pragma omp FlushConstruct [flush_construct]
 	by 
-		CAPE_Flush();
+		cape_flush();
 end function
 
 

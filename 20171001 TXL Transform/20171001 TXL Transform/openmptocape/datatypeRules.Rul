@@ -30,18 +30,28 @@ end define
 
 % Functions for replacing the variable type to the corresponding one.
 % replaceVarType is the intermediate function.
-function replaceVarType 
+function replaceVarType
 	replace [data_type]
 		DeclSpec [data_type]
-	by 
-		DeclSpec [replaceIntType] 
+	by
+		DeclSpec [stripDeclQualifiers]
+				 [replaceIntType]
 				 [replaceCharType]
 				 [replaceDoubleType]
-				 [replaceFloatType] 
-				 [replaceLongType] 
+				 [replaceFloatType]
+				 [replaceLongType]
 				 [replaceUnsignedCharType]
-				 [replaceUnsignedFloatType] 
+				 [replaceUnsignedFloatType]
 				 [replaceUnsignedIntType]
+end function
+
+% Drop storage-class / cv qualifiers (static, extern, const, ...) so the
+% bare type maps cleanly to a CAPE_* constant.
+function stripDeclQualifiers
+	replace [data_type]
+		Q1 [repeat decl_qualifier] T [type_specifier] Q2 [repeat decl_qualifier]
+	by
+		T
 end function
 
 % Handles the character type.
