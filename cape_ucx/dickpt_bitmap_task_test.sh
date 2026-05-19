@@ -84,7 +84,6 @@ BIN="${BUILD_DIR}/bin/dickpt_task_example"
 TOTAL_NODES="${SLURM_JOB_NUM_NODES:-4}"
 
 echo "Testing DICKPT bitmap OpenMP task scheduling"
-echo "OMP:     ${TXL_DIR}/tests/test_task.c"
 echo "DICKPT:  src/apps/cape_task_example_dickpt.c -> ${BIN}"
 echo "Monitor: src/monitor/cape_incr_bitmap.c -> ${MONITOR}"
 echo "Nodes: ${NODES_LIST[*]}  Reps: ${REPS}  MPI mode: ${SRUN_MPI_MODE}"
