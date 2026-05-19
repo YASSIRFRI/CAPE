@@ -168,15 +168,41 @@ define dickpt_sections
 	[repeat dickpt_section_statement+]
 end define
 
-define dickpt_single
-	[clauses]
-	if ([dickpt_read_node] == 0 )
-		[statement]
-end define
+	define dickpt_single
+		[clauses]
+		if ([dickpt_read_node] == 0 )
+			[statement]
+	end define
 
-define dickpt_master
-	if ([dickpt_read_node] == 0 )
-		[statement]
+	define dickpt_task_single
+		if (1)
+			[compound_statement]
+	end define
+
+	define dickpt_task
+		if ([dickpt_read_node] == 0 )
+		'{														[IN] [NL]
+			'dickpt_generate_ckpt(); [NL]
+			'dickpt_dispatch_task_ckpt(); [NL]
+		'}														[EX] [NL]
+		else if ('dickpt_receive_task_ckpt())
+		'{														[IN] [NL]
+			'dickpt_inject_ckpt(); [NL]
+			[statement]
+			'dickpt_generate_ckpt(); [NL]
+			'dickpt_send_ckpt(); [NL]
+		'}														[EX] [NL]
+	end define
+
+	define dickpt_taskwait
+		'dickpt_waitfor_ckpt(); [NL]
+		'dickpt_broadcast_ckpt(); [NL]
+		'dickpt_inject_ckpt(); [NL]
+	end define
+
+	define dickpt_master
+		if ([dickpt_read_node] == 0 )
+			[statement]
 end define
 
 % ── Synchronization (inside parallel) ────────────────
@@ -213,9 +239,12 @@ define dickpt_construct
 	|	[dickpt_parallel_for]
 	|	[dickpt_parallel_sections]
 	|	[dickpt_for]
-	|	[dickpt_sections]
-	|	[dickpt_single]
-	|	[dickpt_master]
+		|	[dickpt_sections]
+		|	[dickpt_single]
+		|	[dickpt_task_single]
+		|	[dickpt_task]
+		|	[dickpt_taskwait]
+		|	[dickpt_master]
 	|	[dickpt_automic_critical]
 	|	[dickpt_flush]
 	|	[dickpt_barrier]

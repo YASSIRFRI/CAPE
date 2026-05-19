@@ -36,11 +36,14 @@ rule replaceConstruct
 					[replaceParallelFor]
 					[replaceParallelSections]
 					[replaceParallel]
-					[replaceFor]
-					[replaceSections]
-					[replaceSingle]
-					[replaceMaster]
-					[replaceCritical]
+						[replaceFor]
+						[replaceSections]
+						[replaceSingleTaskRegion]
+						[replaceSingle]
+						[replaceTaskwait]
+						[replaceTask]
+						[replaceMaster]
+						[replaceCritical]
 					[replaceBarrier]
 					[replaceAutomic]
 					[replaceFlush]
@@ -491,12 +494,35 @@ function addDickptSection Section [section_structure]
 
 end function
 
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-%			SINGLE CONSTRUCT REPLACEMENT 			  	%
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+	%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+	%			SINGLE CONSTRUCT REPLACEMENT 			  	%
+	%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-% Inner single: just route to node 0. No checkpoint ops.
-function replaceSingle
+	% A task-producing single must still be encountered by every node:
+	% rank 0 dispatches each task, while worker ranks block in receive.
+	function replaceSingleTaskRegion
+		replace [directives]
+			'#pragma omp single Clauses [repeat single_construct_clauses]
+			CompoundStatement [compound_statement]
+
+		where
+			CompoundStatement [containsTaskDirective]
+
+		construct NewDickptTaskSingle [dickpt_task_single]
+			if(1)
+				CompoundStatement
+		by
+			NewDickptTaskSingle
+	end function
+
+	function containsTaskDirective
+		match * [pragma_omp]
+			'#pragma omp task Clauses [repeat task_construct_clauses]
+			Statement [statement]
+	end function
+
+	% Inner single: just route to node 0. No checkpoint ops.
+	function replaceSingle
 	replace [directives]
 		'#pragma omp single Clauses [repeat single_construct_clauses]
 		CompoundStatement [compound_statement]
@@ -512,11 +538,49 @@ function replaceSingle
 		if('dickpt_read_node()==0)
 			CompoundStatement
 	by
-		NewDickptSingle
-end function
+			NewDickptSingle
+	end function
 
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-%			MASTER CONSTRUCT REPLACEMENT 			  	%
+	%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+	%			TASK CONSTRUCT REPLACEMENT 			  	  	%
+	%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+	function replaceTask
+		replace [directives]
+			'#pragma omp task Clauses [repeat task_construct_clauses]
+			Statement [statement]
+
+		construct NewDickptTask [dickpt_task]
+			if('dickpt_read_node()==0)
+			'{
+				'dickpt_generate_ckpt();
+				'dickpt_dispatch_task_ckpt();
+			'}
+			else if('dickpt_receive_task_ckpt())
+			'{
+				'dickpt_inject_ckpt();
+				Statement
+				'dickpt_generate_ckpt();
+				'dickpt_send_ckpt();
+			'}
+		by
+			NewDickptTask
+	end function
+
+	function replaceTaskwait
+		replace [directives]
+			'#pragma omp taskwait
+
+		construct NewDickptTaskwait [dickpt_taskwait]
+			'dickpt_waitfor_ckpt();
+			'dickpt_broadcast_ckpt();
+			'dickpt_inject_ckpt();
+		by
+			NewDickptTaskwait
+	end function
+
+	%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+	%			MASTER CONSTRUCT REPLACEMENT 			  	%
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 % Inner master: just route to node 0. No checkpoint ops.

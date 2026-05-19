@@ -31,10 +31,12 @@ keys
 	private
 	reduction
 	shared
-	sections
-	single
-	threadprivat
-end keys
+		sections
+		single
+		task
+		taskwait
+		threadprivat
+	end keys
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %				ENVIRONMENT ROUTINES 				  	%
@@ -44,7 +46,7 @@ define omp_environment_routine
 		omp_set_num_threads([reference_id])	    
 	|	omp_get_num_threads()					
 	|	omp_get_thread_num()					
-end define 
+end define
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %					DIRECTIVES 						  	%
@@ -65,9 +67,11 @@ define omp_construct
 	|	[parallel_sections_construct]
 	|	[for_construct]
 	|	[sections_construct]
-	|	[single_construct]
-	|	[master_construct]
-	|	[critical_construct]
+		|	[single_construct]
+		|	[taskwait_construct]
+		|	[task_construct]
+		|	[master_construct]
+		|	[critical_construct]
 	|	[barrier_construct]
 	|	[automic_construct] 
 	|	[flush_construct]
@@ -115,9 +119,18 @@ end define
 define single_construct
 		single 	[repeat single_construct_clauses]	[NL]
 		[compound_statement]
-end define 
+end define
 
-define master_construct 
+define task_construct
+		task [repeat task_construct_clauses]	[NL]
+		[statement]
+end define
+
+define taskwait_construct
+		taskwait [NL]
+end define
+
+define master_construct
 		master [NL]
 		[compound_statement]
 end define 
@@ -156,8 +169,9 @@ define omp_clause
 	|	[omp_copyin_clause]
 	|	[omp_copyprivate_clause]
 	|	[omp_nowait_clause]
-	|	[single_construct_clauses]
-	|	[sections_construct_clauses]
+		|	[single_construct_clauses]
+		|	[task_construct_clauses]
+		|	[sections_construct_clauses]
 	|	[for_construct_clauses]
 	|	[parallel_construct_clauses]
 end define
@@ -210,9 +224,10 @@ end define
 define multiple_clause
 		[parallel_construct_clauses]
 	|	[for_construct_clauses]
-	|	[sections_construct_clauses]
-	|	[single_construct_clauses]
-end define
+		|	[sections_construct_clauses]
+		|	[single_construct_clauses]
+		|	[task_construct_clauses]
+	end define
 
 define parallel_construct_clauses
 		[omp_default_clause]
@@ -240,12 +255,18 @@ define sections_construct_clauses
 	|	[omp_nowait_clause]
 end define
 
-define single_construct_clauses
-		[omp_private_clause]
-	|	[omp_firstprivate_clause]
-	|	[omp_copyprivate_clause]
-	|	[omp_nowait_clause]
-end define
+	define single_construct_clauses
+			[omp_private_clause]
+		|	[omp_firstprivate_clause]
+		|	[omp_copyprivate_clause]
+		|	[omp_nowait_clause]
+	end define
+
+	define task_construct_clauses
+			[omp_shared_clause]
+		|	[omp_private_clause]
+		|	[omp_firstprivate_clause]
+	end define
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %						OPERATORS	 				  	%
@@ -257,5 +278,3 @@ define omp_operator
 	|	max
 	|	min
 end define
-
-

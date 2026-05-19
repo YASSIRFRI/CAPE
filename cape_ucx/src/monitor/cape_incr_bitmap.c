@@ -557,6 +557,23 @@ int current_job =0; //count the current job
 unsigned long number_of_jobs; //save number of step that will be sent from CAPE program
 int jobs_per_node; //save the number of step that is divided to a node
 
+/* Master-side dynamic task pool for the legacy DICKPT workshare protocol.
+ * Each dispatched checkpoint is one task. A worker finishes the task by
+ * generating a checkpoint and sending it back to rank 0; the master receives
+ * completions with a UCX wildcard token match and recovers the worker rank
+ * from UCX's sender_tag. */
+static int *task_idle_workers;
+static unsigned char *task_worker_busy;
+static int task_idle_count;
+static int task_active_workers;
+static int task_pool_ready;
+static unsigned long task_dispatched_jobs;
+static unsigned long task_completed_jobs;
+static int cape_task_pool_reset(void);
+
+#define CAPE_TASK_SKIP 0u
+#define CAPE_TASK_RUN  1u
+
 unsigned long timespan = 1 ; // timespan of checkpoints
 
 //checkpoint variables
@@ -1719,10 +1736,17 @@ static unsigned long long cape_ucx_wait(void *req, size_t expect_len,
 }
 
 #define CAPE_UCX_TAG(sender_rank, token) \
-    ((uint64_t)((((uint32_t)(sender_rank) & 0x0fffU) << 20) | ((uint32_t)(token) & 0x000fffffU)))
-#define CAPE_UCX_TAG_MASK  ((uint64_t)0x00000000ffffffffULL)
+	((uint64_t)((((uint32_t)(sender_rank) & 0x0fffU) << 20) | ((uint32_t)(token) & 0x000fffffU)))
+#define CAPE_UCX_TAG_MASK        ((uint64_t)0x00000000ffffffffULL)
+#define CAPE_UCX_TAG_TOKEN_MASK  ((uint64_t)0x00000000000fffffULL)
+
+static int cape_ucx_sender_from_tag(ucp_tag_t tag)
+{
+	return (int)(((uint64_t)tag >> 20) & 0x0fffU);
+}
 
 static ucp_tag_message_h cape_ucx_probe_msg(ucp_tag_t recv_tag,
+                                            ucp_tag_t recv_mask,
                                             ucp_tag_recv_info_t *info,
                                             unsigned long long *wait_ns_out)
 {
@@ -1731,9 +1755,9 @@ static ucp_tag_message_h cape_ucx_probe_msg(ucp_tag_t recv_tag,
     CAPE_PROFILE_NS_VAR(wait_start_ns);
     CAPE_PROFILE_NS_START(wait_start_ns);
 
-    for (;;) {
-        msg = ucp_tag_probe_nb(ucp_worker, recv_tag, CAPE_UCX_TAG_MASK,
-                               1, info);
+	for (;;) {
+		msg = ucp_tag_probe_nb(ucp_worker, recv_tag, recv_mask,
+	                               1, info);
         if (msg != NULL)
             break;
 
@@ -1760,7 +1784,24 @@ static ucp_tag_message_h cape_ucx_probe_msg(ucp_tag_t recv_tag,
 #else
     *wait_ns_out = 0;
 #endif
-    return msg;
+	return msg;
+}
+
+static ucp_tag_message_h cape_ucx_probe_msg_exact(ucp_tag_t recv_tag,
+                                                  ucp_tag_recv_info_t *info,
+                                                  unsigned long long *wait_ns_out)
+{
+	return cape_ucx_probe_msg(recv_tag, CAPE_UCX_TAG_MASK, info,
+	                          wait_ns_out);
+}
+
+static ucp_tag_message_h cape_ucx_probe_msg_any(uint32_t token,
+                                                ucp_tag_recv_info_t *info,
+                                                unsigned long long *wait_ns_out)
+{
+	return cape_ucx_probe_msg(CAPE_UCX_TAG(0, token),
+	                          CAPE_UCX_TAG_TOKEN_MASK, info,
+	                          wait_ns_out);
 }
 
 static size_t cape_ucx_sendrecv_probe(
@@ -1807,7 +1848,7 @@ static size_t cape_ucx_sendrecv_probe(
 			ucs_status_string(UCS_PTR_STATUS(sreq)));
 		exit(1);
 	}
-	msg = cape_ucx_probe_msg(recv_tag, &info, &probe_wait_ns);
+	msg = cape_ucx_probe_msg_exact(recv_tag, &info, &probe_wait_ns);
     if (info.length > recvcap) {
         fprintf(stderr,
                 "CAPE UCX: probed message too large (len=%zu cap=%zu); "
@@ -1857,7 +1898,7 @@ static unsigned char *cape_ucx_recv_probe_alloc(size_t *recvlen, int src,
         .cb.recv      = cape_recv_cb
     };
 
-    msg = cape_ucx_probe_msg(recv_tag, &info, &probe_wait_ns);
+	msg = cape_ucx_probe_msg_exact(recv_tag, &info, &probe_wait_ns);
     buf = malloc(info.length == 0 ? 1 : info.length);
     if (buf == NULL) {
         perror("malloc(probed UCX recv)");
@@ -1873,8 +1914,48 @@ static unsigned char *cape_ucx_recv_probe_alloc(size_t *recvlen, int src,
     CAPE_PROFILE_ADD(ucx_wait_recv_ns, probe_wait_ns + recv_wait_ns);
     CAPE_PROFILE_INC(ucx_wait_recv_calls);
 #endif
-    *recvlen = info.length;
-    return buf;
+	*recvlen = info.length;
+	return buf;
+}
+
+static unsigned char *cape_ucx_recv_probe_alloc_any(size_t *recvlen,
+                                                    int *sender,
+                                                    uint32_t token)
+{
+	CAPE_PROFILE_NS_VAR(start_ns);
+	CAPE_PROFILE_NS_START(start_ns);
+	ucp_tag_recv_info_t info;
+	ucp_tag_message_h msg;
+	unsigned long long probe_wait_ns = 0;
+	unsigned long long recv_wait_ns;
+	unsigned char *buf;
+	ucp_request_param_t rp = {
+	    .op_attr_mask = UCP_OP_ATTR_FIELD_CALLBACK
+	                  | UCP_OP_ATTR_FIELD_FLAGS,
+	    .flags        = UCP_OP_ATTR_FLAG_NO_IMM_CMPL,
+	    .cb.recv      = cape_recv_cb
+	};
+
+	msg = cape_ucx_probe_msg_any(token, &info, &probe_wait_ns);
+	buf = malloc(info.length == 0 ? 1 : info.length);
+	if (buf == NULL) {
+		perror("malloc(probed wildcard UCX recv)");
+		exit(1);
+	}
+
+	void *req = ucp_tag_msg_recv_nbx(ucp_worker, buf, info.length, msg, &rp);
+	recv_wait_ns = cape_ucx_wait(req, info.length, 1, NULL);
+#ifdef CAPE_PROFILE
+	CAPE_PROFILE_ADD_NS(ucx_recv_ns, start_ns);
+	CAPE_PROFILE_INC(ucx_recv_calls);
+	CAPE_PROFILE_ADD(ucx_recv_bytes, (uint64_t)info.length);
+	CAPE_PROFILE_ADD(ucx_wait_recv_ns, probe_wait_ns + recv_wait_ns);
+	CAPE_PROFILE_INC(ucx_wait_recv_calls);
+#endif
+	*recvlen = info.length;
+	if (sender != NULL)
+		*sender = cape_ucx_sender_from_tag(info.sender_tag);
+	return buf;
 }
 
 /* Simple blocking send via UCX tag. */
@@ -2321,12 +2402,17 @@ int unlock_process_memory(unsigned int pid);
 int require_generate_checkpoint();
 int require_send_checkpoint();
 int require_receive_checkpoint();
+int require_dispatch_task_checkpoint();
+int require_receive_task_checkpoint();
 int require_inject_checkpoint();
 int require_waitfor_checkpoint();
 int require_broadcast_checkpoint();
 int read_shared_data();
 void end_shared_data();
 int require_allreduce_checkpoint();
+int merge_external_checkpoint(FILE *src_ckpt_stream,
+			      unsigned char *src_ckpt_data,
+			      size_t src_ckpt_size);
 int cape_receive_userfaultfd_setup(void);
 int cape_wait_for_child_event(pid_t pid, int *status);
 int cape_drain_userfaultfd(void);
@@ -2459,15 +2545,25 @@ int main(int argc, char * argv[]){
 						if(rc != 0)	exit(1);						
 						break;
 						
-					case S_RECEIVE_CHECKPOINT: 
-						rc = require_receive_checkpoint();
-						if (rc!=0) exit(1);						
-						break;
-						
-					case S_INJECT_CHECKPOINT:
-						rc = require_inject_checkpoint();
-						if (rc!=0)	exit(1);						
-						break;
+						case S_RECEIVE_CHECKPOINT:
+							rc = require_receive_checkpoint();
+							if (rc!=0) exit(1);
+							break;
+
+						case S_DISPATCH_TASK_CHECKPOINT:
+							rc = require_dispatch_task_checkpoint();
+							if (rc!=0) exit(1);
+							break;
+
+						case S_RECEIVE_TASK_CHECKPOINT:
+							rc = require_receive_task_checkpoint();
+							if (rc!=0) exit(1);
+							break;
+
+						case S_INJECT_CHECKPOINT:
+							rc = require_inject_checkpoint();
+							if (rc!=0)	exit(1);
+							break;
 					case S_WAIT_FOR_CHECKPOINT:
 						rc= require_waitfor_checkpoint();
 						if( rc !=0) exit(1);						
@@ -2671,9 +2767,12 @@ int init_jobs_per_node(){
 	if (num_nodes <= 0) {
 		rc = 1;
 	} else {
-		jobs_per_node = (number_of_jobs + num_nodes - 1) / num_nodes;
+		unsigned long jpn = (number_of_jobs + num_nodes - 1) / num_nodes;
+		jobs_per_node = (jpn > (unsigned long)INT_MAX) ? INT_MAX : (int)jpn;
 	}
 	current_job = 0;
+	if (rc == 0)
+		rc = cape_task_pool_reset();
 	return rc;	
 	
  }
@@ -2984,61 +3083,336 @@ int require_generate_checkpoint(){
  * TODO: divide this file to small size if the checkpoint file is too large.*
  * --------------------------------------
  */
-int send_checkpoint(int destination){
-	cape_ucx_send(final_ckpt, final_ckpt_size, destination, TAG_CKPT_DATA);
-
-	fclose(final_ckpt_stream);
+static void release_final_checkpoint(void)
+{
+	if (final_ckpt_stream != NULL) {
+		fclose(final_ckpt_stream);
+		final_ckpt_stream = NULL;
+	}
 	if (!final_ckpt_uses_scratch)
 		free(final_ckpt);
 	final_ckpt = NULL;
 	final_ckpt_size = 0;
 	final_ckpt_uses_scratch = 0;
+}
+
+int send_checkpoint(int destination){
+	cape_ucx_send(final_ckpt, final_ckpt_size, destination, TAG_CKPT_DATA);
+	release_final_checkpoint();
 	return 0;
 }
 
-/* ------------------------------------------------------------------------
- * require_send_checkpoint(): version 3.0 => NOT USED in version 4.0
- * 	Require send checkpoint from to slave, and from slave to master
- * if (Master)
- * 	Send checkpoint and flag_ckpt to slave
- * 	flag_ckpt = 0 if this is the lastest checkpoint, orthewhise flag_ckpt = 1
- * 
- * TODO: implement the scheduling to distribute checkpoint to slave  *  
- * -------------------------------------------------------------------------
- */
-int require_send_checkpoint(){
+static int cape_task_pool_reset(void)
+{
+	int i;
 
-	int rc = 0;	
-	printf("Called %d\n",node)	;
-	if (node==0){
-		current_job++;
-		ckpt_flag = 1;	
+	free(task_idle_workers);
+	free(task_worker_busy);
+	task_idle_workers = NULL;
+	task_worker_busy = NULL;
+	task_idle_count = 0;
+	task_active_workers = 0;
+	task_pool_ready = 0;
+	task_dispatched_jobs = 0;
+	task_completed_jobs = 0;
 
-		rc= send_checkpoint(current_node);	
-				
-		if ((current_job % jobs_per_node == 0) || ((unsigned long)current_job >= number_of_jobs))
-		{					
-			ckpt_flag = 0;
-		}		
-		cape_ucx_send(&ckpt_flag, sizeof(int), current_node, TAG_CKPT_FLAG);
-		dprintf("Monitor %ld: send checkpoint and ckpt_flag =%d to %d \n",
-				node, ckpt_flag, current_node);				
-		if (current_job % jobs_per_node == 0) {
-			current_node++;			
-		}
-		
+	if (node != 0 || num_nodes <= 1) {
+		task_pool_ready = 1;
+		return 0;
 	}
-	else
-	{
-		rc = send_checkpoint(0); // send to master node
+
+	task_idle_workers = calloc((size_t)num_nodes, sizeof(*task_idle_workers));
+	task_worker_busy = calloc((size_t)num_nodes, sizeof(*task_worker_busy));
+	if (task_idle_workers == NULL || task_worker_busy == NULL) {
+		free(task_idle_workers);
+		free(task_worker_busy);
+		task_idle_workers = NULL;
+		task_worker_busy = NULL;
+		return 1;
 	}
-	
-	if (rc!=0) printf("Monitor %ld: Error on sending checkpoint \n", node);
-	return 0;	
+
+	for (i = 1; i < num_nodes; ++i)
+		task_idle_workers[task_idle_count++] = i;
+	task_pool_ready = 1;
+	return 0;
 }
 
-/* ----------------------------------------
- * receive_checkpoint(): receive final checkpoint and save into a memory stream file 
+static int cape_task_record_completion(int worker, unsigned char *payload,
+				       size_t payload_size)
+{
+	FILE *stream;
+	int rc;
+
+	if (worker <= 0 || worker >= num_nodes) {
+		fprintf(stderr,
+			"Monitor %ld: wildcard completion from invalid worker %d\n",
+			node, worker);
+		free(payload);
+		return 1;
+	}
+	if (task_worker_busy == NULL || task_worker_busy[worker] == 0) {
+		fprintf(stderr,
+			"Monitor %ld: unexpected completion from idle worker %d\n",
+			node, worker);
+		free(payload);
+		return 1;
+	}
+	if (payload_size == 0) {
+		fprintf(stderr,
+			"Monitor %ld: empty task checkpoint from worker %d\n",
+			node, worker);
+		free(payload);
+		return 1;
+	}
+
+	stream = fmemopen(payload, payload_size, "rb");
+	if (stream == NULL) {
+		free(payload);
+		return 1;
+	}
+	rc = merge_external_checkpoint(stream, payload, payload_size);
+	fclose(stream);
+	free(payload);
+	if (rc != 0)
+		return rc;
+
+	task_worker_busy[worker] = 0;
+	task_idle_workers[task_idle_count++] = worker;
+	task_active_workers--;
+	task_completed_jobs++;
+	return 0;
+}
+
+static int cape_task_wait_for_completion(void)
+{
+	unsigned char *payload;
+	size_t payload_size = 0;
+	int worker = -1;
+
+	payload = cape_ucx_recv_probe_alloc_any(&payload_size, &worker,
+						TAG_CKPT_DATA);
+	return cape_task_record_completion(worker, payload, payload_size);
+}
+
+static int cape_task_get_idle_worker(int *worker)
+{
+	int rc;
+
+	if (!task_pool_ready) {
+		rc = cape_task_pool_reset();
+		if (rc != 0)
+			return rc;
+	}
+
+	while (task_idle_count == 0) {
+		if (task_active_workers <= 0)
+			return 1;
+		rc = cape_task_wait_for_completion();
+		if (rc != 0)
+			return rc;
+	}
+
+	*worker = task_idle_workers[--task_idle_count];
+	return 0;
+}
+
+static int cape_task_dispatch_checkpoint(int worker)
+{
+	int rc;
+
+	if (worker <= 0 || worker >= num_nodes)
+		return 1;
+	if (task_worker_busy[worker])
+		return 1;
+
+	current_job++;
+	task_dispatched_jobs++;
+
+	/* The checkpoint is the task payload. The legacy flag still tells the
+	 * worker whether the global task stream has more checkpoints after this
+	 * dispatch; completion ownership itself is now discovered by wildcard
+	 * receives on TAG_CKPT_DATA. */
+	ckpt_flag = ((unsigned long)current_job < number_of_jobs) ? 1 : 0;
+	current_node = worker;
+
+	rc = send_checkpoint(worker);
+	if (rc != 0)
+		return rc;
+	cape_ucx_send(&ckpt_flag, sizeof(int), worker, TAG_CKPT_FLAG);
+
+	task_worker_busy[worker] = 1;
+	task_active_workers++;
+	dprintf("Monitor %ld: dispatched task %d/%lu to worker %d (flag=%d)\n",
+		node, current_job, number_of_jobs, worker, ckpt_flag);
+	return 0;
+}
+
+static int cape_task_dispatch_directive(int worker)
+{
+	unsigned char skip_msg = CAPE_TASK_SKIP;
+	unsigned char *run_msg = NULL;
+	size_t run_size;
+	int i;
+
+	if (worker <= 0 || worker >= num_nodes)
+		return 1;
+	if (task_worker_busy[worker])
+		return 1;
+	if (final_ckpt_stream != NULL)
+		fflush(final_ckpt_stream);
+	if (final_ckpt == NULL || final_ckpt_size == 0)
+		return 1;
+	if (final_ckpt_size > SIZE_MAX - 1)
+		return 1;
+
+	run_size = final_ckpt_size + 1;
+	run_msg = malloc(run_size);
+	if (run_msg == NULL)
+		return 1;
+	run_msg[0] = CAPE_TASK_RUN;
+	memcpy(run_msg + 1, final_ckpt, final_ckpt_size);
+
+	current_job++;
+	task_dispatched_jobs++;
+	current_node = worker;
+	for (i = 1; i < num_nodes; ++i) {
+		if (i == worker)
+			cape_ucx_send(run_msg, run_size, i, TAG_CKPT_DATA);
+		else
+			cape_ucx_send(&skip_msg, sizeof(skip_msg), i,
+				      TAG_CKPT_DATA);
+	}
+	free(run_msg);
+	release_final_checkpoint();
+
+	task_worker_busy[worker] = 1;
+	task_active_workers++;
+	dprintf("Monitor %ld: scheduled task directive %d to worker %d\n",
+		node, current_job, worker);
+	return 0;
+}
+
+int require_dispatch_task_checkpoint()
+{
+	int rc = 0;
+	int worker = -1;
+
+	if (node != 0)
+		return 0;
+	if (num_nodes <= 1) {
+		fprintf(stderr,
+			"Monitor %ld: OpenMP task requires at least one worker rank\n",
+			node);
+		release_final_checkpoint();
+		return 1;
+	}
+
+	rc = cape_task_get_idle_worker(&worker);
+	if (rc == 0)
+		rc = cape_task_dispatch_directive(worker);
+	if (rc != 0)
+		printf("Monitor %ld: Error on task checkpoint dispatch\n", node);
+	return rc;
+}
+
+
+int require_send_checkpoint(){
+	int rc = 0;
+
+	if (node == 0) {
+		int worker = -1;
+
+		if (num_nodes <= 1) {
+			release_final_checkpoint();
+			return 0;
+		}
+		if (number_of_jobs != 0 &&
+		    (unsigned long)current_job >= number_of_jobs) {
+			fprintf(stderr,
+				"Monitor %ld: no queued task left for checkpoint dispatch "
+				"(current=%d total=%lu)\n",
+				node, current_job, number_of_jobs);
+			release_final_checkpoint();
+			return 1;
+		}
+
+		rc = cape_task_get_idle_worker(&worker);
+		if (rc == 0)
+			rc = cape_task_dispatch_checkpoint(worker);
+	} else {
+		/* Worker completion: every task ends with a checkpoint back to
+		 * master. Rank 0 matches this with a token-only wildcard receive,
+		 * which is the control plane that identifies the finished worker. */
+		rc = send_checkpoint(0);
+	}
+
+	if (rc != 0)
+		printf("Monitor %ld: Error on sending checkpoint \n", node);
+		return rc;
+	}
+
+int require_receive_task_checkpoint()
+{
+	unsigned char *packet;
+	size_t packet_size = 0;
+	unsigned long assigned = 0;
+	int rc = 0;
+
+	if (node == 0)
+		return send_int_value_to_child(0);
+
+	packet = cape_ucx_recv_probe_alloc(&packet_size, 0, TAG_CKPT_DATA);
+	if (packet_size < 1) {
+		free(packet);
+		return 1;
+	}
+
+	if (packet[0] == CAPE_TASK_RUN) {
+		size_t payload_size = packet_size - 1;
+
+		if (payload_size == 0) {
+			free(packet);
+			return 1;
+		}
+		if (after_ckpt_stream != NULL) {
+			fclose(after_ckpt_stream);
+			after_ckpt_stream = NULL;
+		}
+		free(after_ckpt);
+		after_ckpt = NULL;
+		after_ckpt_size = 0;
+		after_ckpt_stream = open_binary_memstream(&after_ckpt,
+							  &after_ckpt_size);
+		if (after_ckpt_stream == NULL) {
+			free(packet);
+			return 1;
+		}
+		if (fwrite(packet + 1, payload_size, 1, after_ckpt_stream) != 1) {
+			fclose(after_ckpt_stream);
+			after_ckpt_stream = NULL;
+			free(after_ckpt);
+			after_ckpt = NULL;
+			after_ckpt_size = 0;
+			free(packet);
+			return 1;
+		}
+		fflush(after_ckpt_stream);
+		assigned = 1;
+	} else if (packet[0] != CAPE_TASK_SKIP) {
+		fprintf(stderr,
+			"Monitor %ld: unknown task control opcode %u\n",
+			node, (unsigned)packet[0]);
+		rc = 1;
+	}
+
+	free(packet);
+	if (rc == 0)
+		rc = send_int_value_to_child((int)assigned);
+	return rc;
+}
+
+	/* ----------------------------------------
+	 * receive_checkpoint(): receive final checkpoint and save into a memory stream file
  * ----------------------------------------
  */
  FILE * receive_checkpoint(int source, unsigned char **ckpt_data, size_t *ckpt_size) {
@@ -3237,22 +3611,67 @@ static int inject_checkpoint_with_write_access(FILE *stream, size_t *file_size,
 	return rc;
 }
   
- /* -----------------------------------------------------------------
-  * require_inject_checkpoint(): version 3 => version 4
-  * 		inject checkpoint into CAPE program memory
-  * 	Slave: Inject checkpoint that saved at after_ckpt_stream
-  * 	Master: Inject checkpoint that saved at final_ckpt_stream
-  * ----------------------------------------------------------------
-  */
-  int require_inject_checkpoint() {
-  	int rc =0;
-  	
-	//Inject checkpoint	
-	rc = inject_checkpoint_with_write_access(total_ckpt_stream, &total_ckpt_size, &save_regs); 	
-  	 
-  	
-  	return rc;
-  }
+
+int require_inject_checkpoint()
+{
+	FILE *inject_stream = NULL;
+	size_t inject_size = 0;
+	int rc = 0;
+
+	if (node != 0) {
+		if (after_ckpt_stream != NULL) {
+			fflush(after_ckpt_stream);
+			fclose(after_ckpt_stream);
+			after_ckpt_stream = NULL;
+		}
+		if (after_ckpt == NULL || after_ckpt_size == 0)
+			return 0;
+		inject_stream = fmemopen(after_ckpt, after_ckpt_size, "rb");
+		if (inject_stream == NULL)
+			return 1;
+		inject_size = after_ckpt_size;
+		rc = inject_checkpoint_with_write_access(inject_stream, &inject_size,
+							 &save_regs);
+		free(after_ckpt);
+		after_ckpt = NULL;
+		after_ckpt_size = 0;
+		return rc;
+	}
+
+	if (total_ckpt_stream != NULL) {
+		if (cape_total_stream_update_size() != 0)
+			return 1;
+		fclose(total_ckpt_stream);
+		total_ckpt_stream = NULL;
+	}
+
+	if (total_ckpt != NULL && total_ckpt_size > 0) {
+		inject_stream = fmemopen(total_ckpt, total_ckpt_size, "rb");
+		if (inject_stream == NULL)
+			return 1;
+		inject_size = total_ckpt_size;
+		rc = inject_checkpoint_with_write_access(inject_stream, &inject_size,
+							 &save_regs);
+		cape_total_release();
+		return rc;
+	}
+
+	if (final_ckpt_stream != NULL) {
+		fflush(final_ckpt_stream);
+		fclose(final_ckpt_stream);
+		final_ckpt_stream = NULL;
+	}
+	if (final_ckpt == NULL || final_ckpt_size == 0)
+		return 0;
+	inject_stream = fmemopen(final_ckpt, final_ckpt_size, "rb");
+	if (inject_stream == NULL)
+		return 1;
+	inject_size = final_ckpt_size;
+	rc = inject_checkpoint_with_write_access(inject_stream, &inject_size,
+						 &save_regs);
+	release_final_checkpoint();
+	return rc;
+}
 
 
 
@@ -3393,31 +3812,36 @@ done:
  	return rc;
  }
  
- 
- /* --------------------------------------------------------------
-  * require_waitfor_checkpoint(): NOT USE in version 4
-  * 
-  * Master waiting for checkpoint all slave nodes
-  * 	Receive checkpoint from slave nodes
-  * 	Merge into final_ckpt
-  * --------------------------------------------------------------  
-  */
+
  int require_waitfor_checkpoint() {
  	int rc = 0, i;
- 	for(i=1; i <num_nodes; i++)
- 	{
- 		after_ckpt_stream = receive_checkpoint(i, &after_ckpt, &after_ckpt_size);
- 		
- 		rc = merge_external_checkpoint(after_ckpt_stream, after_ckpt, after_ckpt_size);
- 		fclose(after_ckpt_stream);
- 		after_ckpt_size = 0;
- 		
- 	}
- 	
-	dprintf("Monitor %ld: After wait for all checkpoint - final_ckpt_size = %zu\n", node, final_ckpt_size);
- 	
- 	if (rc!=0) printf("Monitor %ld: Error on require_waitfor_checkpoint\n", node);
- 	return rc; 	
+
+	if (node == 0 && task_pool_ready) {
+		while (task_active_workers > 0) {
+			rc = cape_task_wait_for_completion();
+			if (rc != 0)
+				break;
+		}
+	} else if (node == 0) {
+		for (i = 1; i < num_nodes; i++) {
+			after_ckpt_stream = receive_checkpoint(i, &after_ckpt, &after_ckpt_size);
+			rc = merge_external_checkpoint(after_ckpt_stream, after_ckpt,
+						       after_ckpt_size);
+			fclose(after_ckpt_stream);
+			free(after_ckpt);
+			after_ckpt = NULL;
+			after_ckpt_size = 0;
+			if (rc != 0)
+				break;
+		}
+	}
+
+	dprintf("Monitor %ld: waitfor drained tasks dispatched=%lu completed=%lu active=%d\n",
+		node, task_dispatched_jobs, task_completed_jobs, task_active_workers);
+
+	if (rc != 0)
+		printf("Monitor %ld: Error on require_waitfor_checkpoint\n", node);
+	return rc;
  }
  /* -----------------------------------------------------------------
   * require_broadcast_checkpoint(): Synchronize data between node
@@ -3427,17 +3851,27 @@ done:
 int require_broadcast_checkpoint(){
 	int rc = 0;
 	int i;
+	unsigned char *src_ckpt = NULL;
+	size_t src_ckpt_size = 0;
 	if(node==0)
 	{
-		buffer_ckpt = final_ckpt;
+		if (total_ckpt_stream != NULL && cape_total_stream_update_size() != 0)
+			return 1;
+		if (total_ckpt != NULL && total_ckpt_size > 0) {
+			src_ckpt = total_ckpt;
+			src_ckpt_size = total_ckpt_size;
+		} else {
+			src_ckpt = final_ckpt;
+			src_ckpt_size = final_ckpt_size;
+		}
+		buffer_ckpt = src_ckpt;
 		/* Master sends size and data to all slaves */
 		for(i = 1; i < num_nodes; i++){
-			cape_ucx_send(buffer_ckpt, final_ckpt_size, i, TAG_BCAST_DATA);
+			cape_ucx_send(buffer_ckpt, src_ckpt_size, i, TAG_BCAST_DATA);
 		}
 	}
 	else
 	{
-		/* Slaves receive size and data from master */
 		size_t recv_size;
 		buffer_ckpt = cape_ucx_recv_probe_alloc(&recv_size, 0, TAG_BCAST_DATA);
 		if (recv_size > (size_t)INT_MAX) {
@@ -3445,7 +3879,6 @@ int require_broadcast_checkpoint(){
 			return 1;
 		}
 		buffer_size = (int)recv_size;
-		//open the stream memory file
 		after_ckpt_stream = open_binary_memstream(&after_ckpt, &after_ckpt_size);
 		fwrite(buffer_ckpt, recv_size, 1, after_ckpt_stream);
 		fflush(after_ckpt_stream);

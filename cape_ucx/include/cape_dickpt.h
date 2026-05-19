@@ -21,7 +21,6 @@ void dickpt_register_region(void *addr, size_t len);
 void *dickpt_map_region(size_t len);
 
 /* ── Breakpoint helpers (x86-64) ───────────────────────────────────────── */
-
 /* Issue a signal to the monitor: push rdx, set rdx=code, int3, pop rdx */
 static inline void __cape_signal(int code)
 {
@@ -83,6 +82,8 @@ static inline void dickpt_generate_workshare_ckpt(void) { __cape_signal(S_GENERA
 /* Send / Receive / Merge */
 static inline void dickpt_send_ckpt(void)    { __cape_signal(S_SEND_CHECKPOINT); }
 static inline void dickpt_receive_ckpt(void) { __cape_signal(S_RECEIVE_CHECKPOINT); }
+static inline void dickpt_dispatch_task_ckpt(void) { __cape_signal(S_DISPATCH_TASK_CHECKPOINT); }
+static inline unsigned long dickpt_receive_task_ckpt(void) { return __cape_signal_read(S_RECEIVE_TASK_CHECKPOINT); }
 static inline void dickpt_inject_ckpt(void)  { __cape_signal(S_INJECT_CHECKPOINT); }
 static inline void dickpt_inject_workshare_ckpt(void) { __cape_signal(S_INJECT_WORKSHARE_CHECKPOINT); }
 static inline void dickpt_merge_ckpt(void)   { __cape_signal(S_MERGE_CHECKPOINT); }
