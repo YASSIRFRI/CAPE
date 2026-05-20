@@ -112,9 +112,13 @@ static inline void wbmp_set(uint8_t *b, unsigned w) {
 	b[w >> 3] |= (uint8_t)(1u << (w & 7));
 }
 static inline unsigned wbmp_popcount(const uint8_t *b) {
+	/* Manual byte popcount — avoids __builtin_popcount, which pulls
+	 * _popcountsi2.o out of libgcc.a and trips the cluster's
+	 * binutils/libgcc mismatch ("File format not recognized"). */
+	static const uint8_t nbits[16] = {0,1,1,2,1,2,2,3,1,2,2,3,2,3,3,4};
 	unsigned n = 0, i;
 	for (i = 0; i < BMP_WORD_BMP_BYTES; ++i)
-		n += (unsigned)__builtin_popcount(b[i]);
+		n += nbits[b[i] & 0xf] + nbits[b[i] >> 4];
 	return n;
 }
 
