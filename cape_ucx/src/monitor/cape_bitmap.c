@@ -731,6 +731,22 @@ static int cape_userfault_writeprotect(unsigned long start, unsigned long len, i
 	return 0;
 }
 
+static int cape_userfault_register_range(unsigned long start, unsigned long len)
+{
+	struct uffdio_register reg;
+
+	if (userfault_fd < 0)
+		return 0;
+
+	memset(&reg, 0, sizeof(reg));
+	reg.range.start = start;
+	reg.range.len = len;
+	reg.mode = UFFDIO_REGISTER_MODE_WP;
+	if (ioctl(userfault_fd, UFFDIO_REGISTER, &reg) == -1)
+		return -1;
+	return 0;
+}
+
 static int cape_capture_dirty_page(unsigned long fault_addr)
 {
 	unsigned long aligned_addr;
@@ -876,7 +892,6 @@ static void *uffd_thread_main(void *unused)
 int cape_setup_uffd_self(void)
 {
 	struct uffdio_api api;
-	struct uffdio_register reg;
 	struct epoll_event ev;
 	size_t i;
 
@@ -898,11 +913,8 @@ int cape_setup_uffd_self(void)
 	}
 
 	for (i = 0; i < tracked_range_count; ++i) {
-		memset(&reg, 0, sizeof(reg));
-		reg.range.start = tracked_ranges[i].start;
-		reg.range.len = tracked_ranges[i].len;
-		reg.mode = UFFDIO_REGISTER_MODE_WP;
-		if (ioctl(userfault_fd, UFFDIO_REGISTER, &reg) == -1) {
+		if (cape_userfault_register_range(tracked_ranges[i].start,
+						  tracked_ranges[i].len) == -1) {
 			perror("ioctl(UFFDIO_REGISTER)");
 			return 1;
 		}
@@ -1642,7 +1654,8 @@ int cape_drain_userfaultfd(void);
 /* ==========================================================================
  * Library entry points
  * 	cape_init / cape_finalize : open/close UCX + userfaultfd
- * 	cape_register_region      : add a tracked range (must precede cape_start_ckpt)
+ * 	cape_register_region      : add a tracked range; if checkpoint tracking is
+ * 	                            already active, register + write-protect it now
  * 	cape_start_ckpt           : enable WP tracking on all registered ranges
  * 	cape_stop_ckpt            : disable tracking
  * In the userfaultfd backend the dirty bitmap is filled by a worker thread
@@ -1661,6 +1674,67 @@ void cape_register_region(void *addr, size_t len)
 	tracked_ranges[i].start = (unsigned long)addr;
 	tracked_ranges[i].len = len;
 	tracked_range_count = i + 1;
+
+	if (cape_userfault_register_range(tracked_ranges[i].start,
+					  tracked_ranges[i].len) == -1) {
+		perror("ioctl(UFFDIO_REGISTER)");
+		exit(1);
+	}
+	if (tracking_is_enabled &&
+	    cape_userfault_writeprotect(tracked_ranges[i].start,
+					tracked_ranges[i].len, 1) == -1) {
+		perror("ioctl(UFFDIO_WRITEPROTECT range)");
+		exit(1);
+	}
+}
+
+/* Append a D_SHARED entry to data_list_head so generate_checkpoint's
+ * is_address_shared() mask keeps words in [addr, addr+len). */
+static void cape_mark_shared(void *addr, size_t len, unsigned char dtype)
+{
+	struct shared_data *sd = malloc(sizeof(*sd));
+	if (sd == NULL) { perror("malloc(shared_data)"); exit(1); }
+	memset(sd, 0, sizeof(*sd));
+	sd->addr = (unsigned long)addr;
+	sd->len = (unsigned int)len;
+	sd->datatype = dtype;
+	sd->properties = D_SHARED;
+	sd->prev = data_list_tail;
+	sd->next = NULL;
+	if (data_list_tail) data_list_tail->next = sd; else data_list_head = sd;
+	data_list_tail = sd;
+}
+
+/* Stable cross-rank allocation for OpenMP-task closure records.
+ *
+ * A task's captured `shared` variables normally live on the parent's
+ * stack, whose VA is only valid on a rank sitting at the same stack
+ * frame. The transpiler hoists the captures into a "task environment"
+ * struct allocated here.
+ *
+ * We rely on CAPE's symmetric-memory assumption: ASLR is disabled and
+ * every rank runs the identical SPMD allocation sequence, so a plain
+ * page-aligned heap allocation returns the *same virtual address* on
+ * every rank — no fixed high-address mapping needed. The region is then
+ * tracked + marked shared so its words are checkpointed and merged like
+ * any other shared region, and inject lands at the matching VA. */
+void *cape_task_env_alloc(size_t len)
+{
+	size_t aligned = (len + (BMP_PAGE_SIZE - 1)) & ~(size_t)(BMP_PAGE_SIZE - 1);
+	void *addr;
+
+	if (aligned == 0)
+		aligned = BMP_PAGE_SIZE;
+
+	/* Page-aligned because userfaultfd registration needs page
+	 * granularity; symmetric layout makes the VA identical across ranks. */
+	addr = aligned_alloc(BMP_PAGE_SIZE, aligned);
+	if (addr == NULL) { perror("aligned_alloc(task_env)"); exit(1); }
+	memset(addr, 0, aligned);
+
+	cape_register_region(addr, aligned);
+	cape_mark_shared(addr, aligned, CAPE_UNSIGNED_LONG);
+	return addr;
 }
 
 int cape_start_ckpt(void)
@@ -3076,7 +3150,6 @@ int cape_declare_variable(void *addr, unsigned char dtype,
 {
 	unsigned int sz = 4;
 	size_t bytes;
-	struct shared_data *sd;
 
 	if (!ispointer) {
 		switch (dtype) {
@@ -3089,23 +3162,8 @@ int cape_declare_variable(void *addr, unsigned char dtype,
 	}
 	bytes = (size_t)sz * (size_t)n_elements;
 
-	/* Register for userfaultfd page tracking. */
-	cape_register_region(addr, bytes);
-
-	/* Record as a shared region so generate_checkpoint's per-word
-	 * is_address_shared() mask keeps this variable's words (and masks
-	 * out anything not declared). */
-	sd = malloc(sizeof(*sd));
-	if (sd == NULL) { perror("malloc(shared_data)"); exit(1); }
-	memset(sd, 0, sizeof(*sd));
-	sd->addr = (unsigned long)addr;
-	sd->len = (unsigned int)bytes;
-	sd->datatype = dtype;
-	sd->properties = D_SHARED;
-	sd->prev = data_list_tail;
-	sd->next = NULL;
-	if (data_list_tail) data_list_tail->next = sd; else data_list_head = sd;
-	data_list_tail = sd;
+	cape_register_region(addr, bytes);     /* userfaultfd page tracking */
+	cape_mark_shared(addr, bytes, dtype);  /* keep words in is_address_shared mask */
 	return 0;
 }
 

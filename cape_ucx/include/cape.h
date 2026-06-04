@@ -203,6 +203,12 @@
         
     int unlock_memory(unsigned long start_addr, unsigned long len );
     int lock_memory(unsigned long start_addr, unsigned long len );
+
+    /* OpenMP-task closure support: allocate a "task environment" record at
+     * a stable cross-rank virtual address (tracked + shared). The transpiler
+     * hoists a task's captured shared variables into this struct so the task
+     * body no longer touches parent-stack addresses. */
+    void *cape_task_env_alloc(size_t len);
  
 	
  

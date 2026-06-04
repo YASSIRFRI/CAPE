@@ -30,11 +30,13 @@ UCX_INC="${UCX_INC:-${EBROOTUCX:-/usr}/include}"
 UCX_LIB="${UCX_LIB:-${EBROOTUCX:-/usr}/lib}"
 PMIX_FLAGS="${PMIX_FLAGS:-}"
 PMIX_LINK="${PMIX_LINK:-}"
-CFLAGS="-O2 -I${CAPE_DIR}/include -I${UCX_INC} ${PMIX_FLAGS} -DCAPE_PROFILE"
-LDFLAGS="-L${UCX_LIB} -lucp -lucs -lpthread ${PMIX_LINK} -Wl,-rpath,${UCX_LIB}"
+read -r -a PMIX_CFLAGS <<< "${PMIX_FLAGS}"
+read -r -a PMIX_LDFLAGS <<< "${PMIX_LINK}"
+CFLAGS=(-O2 "-I${CAPE_DIR}/include" "-I${UCX_INC}" "${PMIX_CFLAGS[@]}" -DCAPE_PROFILE)
+LDFLAGS=("-L${UCX_LIB}" -lucp -lucs -lpthread "${PMIX_LDFLAGS[@]}" "-Wl,-rpath,${UCX_LIB}")
 
-"${CC}" -w ${CFLAGS} \
+"${CC}" -w "${CFLAGS[@]}" \
     "${CAPE_DIR}/src/monitor/cape_bitmap.c" \
     "${CAPE_SRC}" \
-    -o "${OUT}" ${LDFLAGS}
+    -o "${OUT}" "${LDFLAGS[@]}"
 echo "[cc]  -> ${OUT}"

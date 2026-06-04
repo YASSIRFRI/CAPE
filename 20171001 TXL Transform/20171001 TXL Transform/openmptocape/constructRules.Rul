@@ -56,6 +56,7 @@ rule replaceConstruct
 					[replaceBarrier]
 					[replaceAutomic]
 					[replaceFlush]
+					[replaceTask]
 	where not 
 		NewConstruct [= Construct]
 	by 
@@ -682,4 +683,109 @@ function replaceFlush
 		cape_flush();
 end function
 
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%			TASK CONSTRUCT REPLACEMENT 			  	%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
+% Lower a task with shared captures into an inline closure environment.
+% Captured values are copied into stable shared storage, the body references
+% that storage, then values are copied back to the parent stack.
+function replaceTask
+	replace [directives]
+		'#pragma omp task Clauses [repeat task_construct_clauses]
+		'{
+			Body [repeat compound_statement_body]
+		'}
+
+	construct Captures [repeat reference_id]
+		_ [addTaskSharedCaptures each Clauses]
+
+	construct Fields [repeat cape_task_field]
+		_ [addTaskEnvField each Captures]
+
+	construct CopyIns [repeat cape_task_copyin]
+		_ [addTaskCopyIn each Captures]
+
+	construct RewrittenBody [repeat compound_statement_body]
+		Body [rewriteTaskCapturedRefs Captures]
+
+	construct CopyOuts [repeat cape_task_copyout]
+		_ [addTaskCopyOut each Captures]
+
+	construct NewCapeTask [cape_task]
+		'{
+			'struct '{ Fields '} '* __cape_env '= cape_task_env_alloc('sizeof(*__cape_env));
+			CopyIns
+			RewrittenBody
+			CopyOuts
+		'}
+	by
+		NewCapeTask
+end function
+
+% Collect every name mentioned in shared(...) clauses.
+function addTaskSharedCaptures Clause [task_construct_clauses]
+	replace [repeat reference_id]
+		Captures [repeat reference_id]
+
+	deconstruct Clause
+		shared(Variables [list reference_id])
+
+	construct NewCaptures [repeat reference_id]
+		Captures [addTaskCapture each Variables]
+	by
+		NewCaptures
+end function
+
+function addTaskCapture Variable [reference_id]
+	replace [repeat reference_id]
+		Captures [repeat reference_id]
+	by
+		Captures [. Variable]
+end function
+
+function addTaskEnvField Variable [reference_id]
+	replace [repeat cape_task_field]
+		Fields [repeat cape_task_field]
+
+	construct Field [cape_task_field]
+		__typeof__(Variable) Variable;
+	by
+		Fields [. Field]
+end function
+
+function addTaskCopyIn Variable [reference_id]
+	replace [repeat cape_task_copyin]
+		CopyIns [repeat cape_task_copyin]
+
+	construct CopyIn [cape_task_copyin]
+		__cape_env -> Variable = Variable;
+	by
+		CopyIns [. CopyIn]
+end function
+
+function addTaskCopyOut Variable [reference_id]
+	replace [repeat cape_task_copyout]
+		CopyOuts [repeat cape_task_copyout]
+
+	construct CopyOut [cape_task_copyout]
+		Variable = __cape_env -> Variable;
+	by
+		CopyOuts [. CopyOut]
+end function
+
+rule rewriteTaskCapturedRefs Captures [repeat reference_id]
+	replace [reference]
+		Variable [reference_id]
+	where
+		Captures [containsTaskCapture Variable]
+	deconstruct Variable
+		Field [id]
+	by
+		__cape_env -> Field
+end rule
+
+function containsTaskCapture Variable [reference_id]
+	match * [reference_id]
+		Variable
+end function

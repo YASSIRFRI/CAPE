@@ -33,6 +33,7 @@ keys
 	shared
 	sections
 	single
+	task
 	threadprivat
 end keys
 
@@ -69,9 +70,22 @@ define omp_construct
 	|	[master_construct]
 	|	[critical_construct]
 	|	[barrier_construct]
-	|	[automic_construct] 
+	|	[automic_construct]
 	|	[flush_construct]
+	|	[task_construct]
 	|	ordered
+end define
+
+define task_construct
+		task [repeat task_construct_clauses]	[NL]
+		[compound_statement]
+end define
+
+define task_construct_clauses
+		[omp_shared_clause]
+	|	[omp_private_clause]
+	|	[omp_firstprivate_clause]
+	|	[omp_default_clause]
 end define
 
 define threadprivate_construct 
@@ -257,5 +271,4 @@ define omp_operator
 	|	max
 	|	min
 end define
-
 

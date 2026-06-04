@@ -188,7 +188,7 @@ define cape_flush
 	cape_flush(); [NL]
 end define 
 
-define cape_construct 
+define cape_construct
 		[cape_threadprivate]
 	|	[cape_parallel]
 	|	[cape_parallel_for]
@@ -200,7 +200,38 @@ define cape_construct
 	|	[cape_automic_critical]
 	|	[cape_flush]
 	|	[cape_barrier]
-end define 
+	|	[cape_task]
+end define
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%		TASK CLOSURE (by-value into stable env)		  	%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% A #pragma omp task with shared() captures is lowered to a block that
+% allocates a "task environment" record at a stable cross-rank VA, copies
+% each captured variable in by value, runs the (reference-rewritten) body
+% against the env, then copies the results back out. This decouples the
+% task from the parent stack frame.
+
+define cape_task_field
+	__typeof__([reference_id]) [reference_id]; [NL]
+end define
+
+define cape_task_copyin
+	__cape_env -> [reference_id] = [reference_id]; [NL]
+end define
+
+define cape_task_copyout
+	[reference_id] = __cape_env -> [reference_id]; [NL]
+end define
+
+define cape_task
+	'{											[IN] [NL]
+		'struct '{ [repeat cape_task_field] '} '* __cape_env '= cape_task_env_alloc('sizeof(*__cape_env)); [NL]
+		[repeat cape_task_copyin]
+		[repeat compound_statement_body]
+		[repeat cape_task_copyout]			[EX]
+	'}											[NL]
+end define
 
 define cape_construct_name
 		FOR_NOWAIT
