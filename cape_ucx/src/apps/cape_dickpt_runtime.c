@@ -129,6 +129,25 @@ static void cape_add_range(uint64_t start, uint64_t len)
 	cape_range_count++;
 }
 
+/* True if [start, end) is already fully inside one tracked range. Used to
+ * avoid re-issuing UFFDIO_REGISTER for a region that the enclosing scope
+ * already registered (e.g. a task's shared() captures, which the parallel
+ * region tracked first) — the kernel rejects a duplicate WP registration of
+ * an already-registered range with EINVAL. */
+static int cape_range_already_covered(uint64_t start, uint64_t end)
+{
+	size_t i;
+
+	for (i = 0; i < cape_range_count; ++i) {
+		uint64_t cs = cape_ranges[i].start;
+		uint64_t ce = cs + cape_ranges[i].len;
+
+		if (start >= cs && end <= ce)
+			return 1;
+	}
+	return 0;
+}
+
 static void cape_register_stack_range(void)
 {
 	FILE *maps;
@@ -281,15 +300,25 @@ void dickpt_register_region(void *addr, size_t len)
 				       page_size);
 	uint64_t alen  = end - start;
 
-	cape_add_range(start, alen);
-
 	/* Whitelist the exact bytes so the region's contents are actually
 	 * shipped. Level 1 (region scope); explicit shared()/reduction clauses
-	 * add their own finer-grained entries and unwind independently. */
+	 * add their own finer-grained entries and unwind independently. This is
+	 * unconditional: tracking and the ship-whitelist are independent, and a
+	 * region already tracked by an enclosing scope still needs its words in
+	 * this scope's whitelist. */
 	cape_signal_register_shared((uint64_t)(uintptr_t)addr, (uint64_t)len, 1);
 
-	/* If tracking has already started (this is a region declared inside an
-	 * already-running checkpoint scope, e.g. a task body), the one-shot
+	/* Already tracked by an enclosing scope (the common task-body case):
+	 * the page range is registered on the uffd and known to the monitor, so
+	 * re-registering would only earn an EINVAL from the kernel. Nothing more
+	 * to do — the whitelist entry above is what this scope needed. */
+	if (cape_range_already_covered(start, end))
+		return;
+
+	cape_add_range(start, alen);
+
+	/* If tracking has already started (this is a genuinely new region
+	 * declared inside an already-running checkpoint scope), the one-shot
 	 * prepare_tracking() has already run, so register on the live uffd and
 	 * tell the monitor now. Otherwise prepare_tracking() will pick it up. */
 	if (cape_tracking_ready && cape_uffd >= 0) {
