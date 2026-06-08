@@ -550,7 +550,18 @@ end function
 			'#pragma omp task Clauses [repeat task_construct_clauses]
 			Statement [statement]
 
+		% Register each shared() variable in its actual place (no stable-VA
+		% env struct): region -> userfaultfd tracking, shared -> whitelist.
+		% Level 2 (task scope) so it unwinds independently of the enclosing
+		% parallel region's level-1 entries.
+		construct RegisterList [repeat clauses]
+			_ [addTaskSharedClauses each Clauses]
+
+		construct DickptUnregister [clauses]
+			'dickpt_unregister_level(2);
+
 		construct NewDickptTask [dickpt_task]
+			RegisterList
 			if('dickpt_read_node()==0)
 			'{
 				'dickpt_generate_ckpt();
@@ -563,6 +574,7 @@ end function
 				'dickpt_generate_ckpt();
 				'dickpt_send_ckpt();
 			'}
+			DickptUnregister
 		by
 			NewDickptTask
 	end function

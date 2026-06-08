@@ -180,6 +180,7 @@ end define
 	end define
 
 	define dickpt_task
+		[repeat clauses]										[NL]
 		if ([dickpt_read_node] == 0 )
 		'{														[IN] [NL]
 			'dickpt_generate_ckpt(); [NL]
@@ -192,6 +193,7 @@ end define
 			'dickpt_generate_ckpt(); [NL]
 			'dickpt_send_ckpt(); [NL]
 		'}														[EX] [NL]
+		[clauses]												[NL]
 	end define
 
 	define dickpt_taskwait

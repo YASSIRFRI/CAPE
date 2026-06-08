@@ -95,6 +95,32 @@ function addSharedClause Variable [reference_id]
 		DickptClauseList [. RegisterRange] [. RegisterShared]
 end function
 
+% Task-scope variant of the shared registration. Identical to the
+% parallel path but registers the whitelist entry at level 2, so a task's
+% shared captures unwind (dickpt_unregister_level(2)) without disturbing
+% the enclosing parallel region's level-1 entries.
+function addTaskSharedClauses Clause [task_construct_clauses]
+	replace [repeat clauses]
+		ClauseList [repeat clauses]
+
+	deconstruct Clause
+		shared(Variables [list reference_id])
+
+	by
+		ClauseList [addTaskSharedClause each Variables]
+end function
+
+function addTaskSharedClause Variable [reference_id]
+	construct RegisterRange [clauses]
+		'dickpt_register_region(& Variable, 'sizeof( Variable));
+	construct RegisterShared [clauses]
+		'dickpt_register_shared(& Variable, 'sizeof( Variable), 2);
+	replace [repeat clauses]
+		DickptClauseList [repeat clauses]
+	by
+		DickptClauseList [. RegisterRange] [. RegisterShared]
+end function
+
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %				PRIVATE CLAUSE REPLACEMENT 			  	%
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%

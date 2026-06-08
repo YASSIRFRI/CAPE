@@ -2742,6 +2742,47 @@ int main(int argc, char * argv[]){
 						end_shared_data();
 						break;
 
+					case S_REGISTER_REGION: {
+						/* Region declared at runtime (after tracking started),
+						 * e.g. a task's shared() captures. App already
+						 * UFFDIO_REGISTER'd it on the shared uffd; append to
+						 * tracked_ranges and write-protect now if live. */
+						unsigned long addr_v = regs.rax;
+						unsigned long len_v  = regs.rsi;
+						struct cape_dickpt_range *grown;
+						size_t i;
+						int dup = 0;
+
+						for (i = 0; i < tracked_range_count; i++) {
+							if (tracked_ranges[i].start == addr_v &&
+							    tracked_ranges[i].len == len_v) {
+								dup = 1;
+								break;
+							}
+						}
+						if (dup)
+							break;
+						if (tracked_range_count >= CAPE_DICKPT_MAX_RANGES) {
+							fprintf(stderr, "Monitor %ld: too many tracked ranges\n",
+								node);
+							exit(1);
+						}
+						grown = realloc(tracked_ranges,
+								(tracked_range_count + 1) *
+								sizeof(*tracked_ranges));
+						if (grown == NULL) { perror("realloc(tracked_ranges)"); exit(1); }
+						tracked_ranges = grown;
+						tracked_ranges[tracked_range_count].start = addr_v;
+						tracked_ranges[tracked_range_count].len = len_v;
+						tracked_range_count++;
+						if (tracking_is_enabled &&
+						    cape_userfault_writeprotect(addr_v, len_v, 1) == -1) {
+							perror("ioctl(UFFDIO_WRITEPROTECT add)");
+							exit(1);
+						}
+						break;
+					}
+
 					case S_DECLARE_REDUCTION: {
 						/* rax = addr; rdx high bytes = datatype, op */
 						unsigned long addr_v = regs.rax;

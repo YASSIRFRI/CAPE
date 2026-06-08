@@ -19,6 +19,7 @@
 #include <unistd.h>
 
 #include "../../include/cape_dickpt_uffd.h"
+#include "../../include/cape_signal.h"
 
 /*
  * DICKPT requires identical virtual addresses for tracked regions on every
@@ -36,6 +37,11 @@
 static struct cape_dickpt_range cape_ranges[CAPE_DICKPT_MAX_RANGES];
 static size_t cape_range_count;
 static int cape_tracking_ready;
+/* Kept open after prepare_tracking so regions declared at runtime (e.g. a
+ * task's shared() captures, which register after the enclosing region's
+ * start_ckpt) can be UFFDIO_REGISTER'd on the same uffd the monitor holds. */
+static int cape_uffd = -1;
+static int cape_monitor_fd = -1;
 
 static size_t cape_page_size(void)
 {
@@ -232,9 +238,70 @@ static void cape_send_setup_to_monitor(int monitor_fd, int uffd)
 		cape_die_errno("sendmsg(userfaultfd setup)");
 }
 
+/* Issue the S_REGISTER_REGION int3 signal: rax = aligned start, rsi = aligned
+ * len, rdx = code. The monitor reads these registers on SIGTRAP, appends the
+ * range to tracked_ranges, and write-protects it if tracking is live. */
+static void cape_signal_register_region(uint64_t start, uint64_t len)
+{
+	register unsigned long _addr asm("rax") = (unsigned long)start;
+	register unsigned long _len  asm("rsi") = (unsigned long)len;
+	register unsigned long _code asm("rdx") = (unsigned long)S_REGISTER_REGION;
+	__asm__ volatile ("int $3"
+			  : "+r"(_addr), "+r"(_len), "+r"(_code)
+			  :
+			  : "memory");
+}
+
+/* Add the *exact* (un-page-aligned) byte range to the monitor's shared
+ * whitelist (S_START_SHARE_DATA: rax=addr, rsi=len, rcx=level). Tracking
+ * registration is page-aligned so writes fault, but the whitelist that
+ * generate_checkpoint() consults to decide which words to ship must be exact:
+ * a registered region is, by definition, shippable data, while a private
+ * variable that merely shares a 4 KiB page with it is never registered and so
+ * stays masked out. Without this, an app that only calls dickpt_register_region
+ * (no explicit shared/reduction clause) would ship an empty checkpoint. */
+static void cape_signal_register_shared(uint64_t addr, uint64_t len,
+					unsigned long level)
+{
+	register unsigned long _addr  asm("rax") = (unsigned long)addr;
+	register unsigned long _len   asm("rsi") = (unsigned long)len;
+	register unsigned long _level asm("rcx") = level;
+	register unsigned long _code  asm("rdx") = (unsigned long)S_START_SHARE_DATA;
+	__asm__ volatile ("int $3"
+			  : "+r"(_addr), "+r"(_len), "+r"(_level), "+r"(_code)
+			  :
+			  : "memory");
+}
+
 void dickpt_register_region(void *addr, size_t len)
 {
-	cape_add_range((uint64_t)(uintptr_t)addr, (uint64_t)len);
+	size_t page_size = cape_page_size();
+	uint64_t start = cape_align_down((uint64_t)(uintptr_t)addr, page_size);
+	uint64_t end   = cape_align_up((uint64_t)(uintptr_t)addr + (uint64_t)len,
+				       page_size);
+	uint64_t alen  = end - start;
+
+	cape_add_range(start, alen);
+
+	/* Whitelist the exact bytes so the region's contents are actually
+	 * shipped. Level 1 (region scope); explicit shared()/reduction clauses
+	 * add their own finer-grained entries and unwind independently. */
+	cape_signal_register_shared((uint64_t)(uintptr_t)addr, (uint64_t)len, 1);
+
+	/* If tracking has already started (this is a region declared inside an
+	 * already-running checkpoint scope, e.g. a task body), the one-shot
+	 * prepare_tracking() has already run, so register on the live uffd and
+	 * tell the monitor now. Otherwise prepare_tracking() will pick it up. */
+	if (cape_tracking_ready && cape_uffd >= 0) {
+		struct uffdio_register reg;
+		memset(&reg, 0, sizeof(reg));
+		reg.range.start = start;
+		reg.range.len = alen;
+		reg.mode = UFFDIO_REGISTER_MODE_WP;
+		if (ioctl(cape_uffd, UFFDIO_REGISTER, &reg) == -1 && errno != EEXIST)
+			cape_die_errno("ioctl(UFFDIO_REGISTER) [runtime add]");
+		cape_signal_register_region(start, alen);
+	}
 }
 
 /*
@@ -291,6 +358,8 @@ void dickpt_prepare_tracking(void)
 	uffd = cape_create_userfaultfd();
 	cape_register_userfault_ranges(uffd);
 	cape_send_setup_to_monitor(monitor_fd, uffd);
-	close(uffd);
+	/* Keep uffd open: regions registered later (task scope) reuse it. */
+	cape_uffd = uffd;
+	cape_monitor_fd = monitor_fd;
 	cape_tracking_ready = 1;
 }

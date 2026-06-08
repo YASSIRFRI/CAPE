@@ -27,6 +27,15 @@
 #define S_START_SHARE_DATA 15
 #define S_END_SHARE_DATA 16
 
+/* Register a userfaultfd-tracked region with the monitor at runtime (after
+ * tracking has already started, e.g. a task's shared() captures). App packs:
+ *   rax = page-aligned start address
+ *   rsi = page-aligned length in bytes
+ * The app has already UFFDIO_REGISTER'd the range on the shared uffd before
+ * issuing this; the monitor appends it to tracked_ranges and, if tracking is
+ * live, write-protects it immediately so subsequent writes fault. */
+#define S_REGISTER_REGION 17
+
 #define S_APP_SEND_NUMBER_OF_JOBS 94
 #define S_APP_SEND_TIMESPAN 100
 
