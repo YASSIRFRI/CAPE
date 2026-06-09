@@ -575,6 +575,40 @@ static int cape_task_pool_reset(void);
 #define CAPE_TASK_SKIP 0u
 #define CAPE_TASK_RUN  1u
 
+/* ===== Task dependency DAG (master only) =====
+ * The transpiler emits dickpt_task_depend(addr, type) for every depend()
+ * item just before a task's dispatch block. The master records them per
+ * task (task_pending_*), and at dispatch time derives the predecessor task
+ * ids using the standard OpenMP rules:
+ *   - IN x      depends on the last writer of x            (RAW)
+ *   - OUT/INOUT depends on the last writer and all readers (WAW + WAR)
+ * It then blocks dispatch until every predecessor has completed (and thus
+ * merged into total_ckpt), so the dependent task's worker — which is shipped
+ * total_ckpt as its inject payload — observes its inputs. Tasks with no
+ * recorded deps schedule exactly as before. */
+#define CAPE_TASK_MAX_DEPS 128
+
+struct cape_dep_item {
+	unsigned long addr;
+	int type;
+};
+
+struct cape_dep_obj {
+	unsigned long addr;
+	long last_writer;        /* task id of last OUT/INOUT, -1 if none */
+	long *readers;           /* task ids of IN's since last writer */
+	int n_readers, cap_readers;
+	struct cape_dep_obj *next;
+};
+
+static struct cape_dep_item task_pending_deps[CAPE_TASK_MAX_DEPS];
+static int task_pending_dep_count;
+static struct cape_dep_obj *task_dep_objs;   /* per-address dependency state */
+static long *task_of_worker;                 /* worker -> running task id, -1 idle */
+static unsigned char *task_done;             /* task id -> completed flag */
+static size_t task_done_cap;
+static long task_next_id;                    /* id of next task to dispatch */
+
 unsigned long timespan = 1 ; // timespan of checkpoints
 
 //checkpoint variables
@@ -2708,6 +2742,27 @@ int main(int argc, char * argv[]){
 							if (rc!=0) exit(1);
 							break;
 
+						case S_TASK_DEPEND: {
+							/* Record one depend() item for the task about to
+							 * dispatch. Only the master builds the DAG; workers
+							 * issue the same signal but ignore it. */
+							unsigned long addr_v = regs.rax;
+							int dep_type = (int)((regs.rdx >> 32) & 0xFFu);
+							if (node == 0) {
+								if (task_pending_dep_count < CAPE_TASK_MAX_DEPS) {
+									task_pending_deps[task_pending_dep_count].addr = addr_v;
+									task_pending_deps[task_pending_dep_count].type = dep_type;
+									task_pending_dep_count++;
+								} else {
+									fprintf(stderr,
+										"Monitor %ld: too many depend() items on one task\n",
+										node);
+									exit(1);
+								}
+							}
+							break;
+						}
+
 						case S_DISPATCH_TASK_CHECKPOINT:
 							rc = require_dispatch_task_checkpoint();
 							if (rc!=0) exit(1);
@@ -3306,6 +3361,78 @@ int send_checkpoint(int destination){
 	return 0;
 }
 
+/* Tear down the dependency DAG between OpenMP scopes. */
+static void cape_task_dag_reset(void)
+{
+	struct cape_dep_obj *p = task_dep_objs, *next;
+
+	while (p != NULL) {
+		next = p->next;
+		free(p->readers);
+		free(p);
+		p = next;
+	}
+	task_dep_objs = NULL;
+	task_pending_dep_count = 0;
+	task_next_id = 0;
+	free(task_of_worker);
+	task_of_worker = NULL;
+	free(task_done);
+	task_done = NULL;
+	task_done_cap = 0;
+}
+
+static struct cape_dep_obj *cape_dep_obj_get(unsigned long addr)
+{
+	struct cape_dep_obj *p;
+
+	for (p = task_dep_objs; p != NULL; p = p->next)
+		if (p->addr == addr)
+			return p;
+	p = malloc(sizeof(*p));
+	if (p == NULL) { perror("malloc(dep_obj)"); exit(1); }
+	p->addr = addr;
+	p->last_writer = -1;
+	p->readers = NULL;
+	p->n_readers = 0;
+	p->cap_readers = 0;
+	p->next = task_dep_objs;
+	task_dep_objs = p;
+	return p;
+}
+
+static void cape_dep_obj_add_reader(struct cape_dep_obj *o, long task_id)
+{
+	if (o->n_readers == o->cap_readers) {
+		int ncap = o->cap_readers ? o->cap_readers * 2 : 4;
+		long *grown = realloc(o->readers, (size_t)ncap * sizeof(long));
+		if (grown == NULL) { perror("realloc(readers)"); exit(1); }
+		o->readers = grown;
+		o->cap_readers = ncap;
+	}
+	o->readers[o->n_readers++] = task_id;
+}
+
+/* Record that task_id is now running on worker, and ensure task_done can be
+ * indexed by task_id. */
+static void cape_task_mark_dispatched(long task_id, int worker)
+{
+	if ((size_t)task_id >= task_done_cap) {
+		size_t ncap = task_done_cap ? task_done_cap * 2 : 64;
+		unsigned char *grown;
+		while ((size_t)task_id >= ncap)
+			ncap *= 2;
+		grown = realloc(task_done, ncap);
+		if (grown == NULL) { perror("realloc(task_done)"); exit(1); }
+		memset(grown + task_done_cap, 0, ncap - task_done_cap);
+		task_done = grown;
+		task_done_cap = ncap;
+	}
+	task_done[task_id] = 0;
+	if (task_of_worker != NULL)
+		task_of_worker[worker] = task_id;
+}
+
 static int cape_task_pool_reset(void)
 {
 	int i;
@@ -3320,6 +3447,7 @@ static int cape_task_pool_reset(void)
 	task_pool_ready = 0;
 	task_dispatched_jobs = 0;
 	task_completed_jobs = 0;
+	cape_task_dag_reset();
 
 	if (node != 0 || num_nodes <= 1) {
 		task_pool_ready = 1;
@@ -3328,13 +3456,19 @@ static int cape_task_pool_reset(void)
 
 	task_idle_workers = calloc((size_t)num_nodes, sizeof(*task_idle_workers));
 	task_worker_busy = calloc((size_t)num_nodes, sizeof(*task_worker_busy));
-	if (task_idle_workers == NULL || task_worker_busy == NULL) {
+	task_of_worker = malloc((size_t)num_nodes * sizeof(*task_of_worker));
+	if (task_idle_workers == NULL || task_worker_busy == NULL ||
+	    task_of_worker == NULL) {
 		free(task_idle_workers);
 		free(task_worker_busy);
+		free(task_of_worker);
 		task_idle_workers = NULL;
 		task_worker_busy = NULL;
+		task_of_worker = NULL;
 		return 1;
 	}
+	for (i = 0; i < num_nodes; ++i)
+		task_of_worker[i] = -1;
 
 	for (i = 1; i < num_nodes; ++i)
 		task_idle_workers[task_idle_count++] = i;
@@ -3388,6 +3522,16 @@ static int cape_task_record_completion(int worker, unsigned char *payload,
 	task_idle_workers[task_idle_count++] = worker;
 	task_active_workers--;
 	task_completed_jobs++;
+
+	/* Mark this worker's task complete so dependent tasks waiting on it can
+	 * be dispatched (its output is now merged into total_ckpt). */
+	if (task_of_worker != NULL && task_of_worker[worker] >= 0) {
+		long tid = task_of_worker[worker];
+		if ((size_t)tid < task_done_cap)
+			task_done[tid] = 1;
+		task_of_worker[worker] = -1;
+	}
+
 	CAPE_DBG("task completion merged worker=%d completed=%lu active=%d idle=%d",
 		 worker, task_completed_jobs, task_active_workers, task_idle_count);
 	return 0;
@@ -3470,6 +3614,8 @@ static int cape_task_dispatch_directive(int worker)
 {
 	unsigned char skip_msg = CAPE_TASK_SKIP;
 	unsigned char *run_msg = NULL;
+	const unsigned char *src;
+	size_t src_size;
 	size_t run_size;
 	int i;
 
@@ -3481,15 +3627,33 @@ static int cape_task_dispatch_directive(int worker)
 		fflush(final_ckpt_stream);
 	if (final_ckpt == NULL || final_ckpt_size == 0)
 		return 1;
-	if (final_ckpt_size > SIZE_MAX - 1)
+
+	/* Ship the accumulated checkpoint of all completed tasks (total_ckpt)
+	 * when present, so a dependent task's worker observes its predecessors'
+	 * outputs after the dispatch barrier waited for them. Independent tasks
+	 * also receive it harmlessly: injected (clean) pages are not re-dirtied,
+	 * so the worker only sends back its own writes. The first task (empty
+	 * accumulator) falls back to the master's base checkpoint header. */
+	if (total_ckpt_stream != NULL) {
+		fflush(total_ckpt_stream);
+		cape_total_stream_update_size();
+	}
+	if (total_ckpt != NULL && total_ckpt_size > 0) {
+		src = total_ckpt;
+		src_size = total_ckpt_size;
+	} else {
+		src = final_ckpt;
+		src_size = final_ckpt_size;
+	}
+	if (src_size == 0 || src_size > SIZE_MAX - 1)
 		return 1;
 
-	run_size = final_ckpt_size + 1;
+	run_size = src_size + 1;
 	run_msg = malloc(run_size);
 	if (run_msg == NULL)
 		return 1;
 	run_msg[0] = CAPE_TASK_RUN;
-	memcpy(run_msg + 1, final_ckpt, final_ckpt_size);
+	memcpy(run_msg + 1, src, src_size);
 
 	current_job++;
 	task_dispatched_jobs++;
@@ -3513,14 +3677,95 @@ static int cape_task_dispatch_directive(int worker)
 	return 0;
 }
 
+/* Wait until task pid has completed (merged into total_ckpt). Drains task
+ * completions in the meantime. pid is always an earlier (already-dispatched)
+ * task, so it is either done or in flight on some worker — never deadlocks. */
+static int cape_task_wait_for_task(long pid)
+{
+	if (pid < 0 || (size_t)pid >= task_done_cap)
+		return 0;
+	while (!task_done[pid]) {
+		int rc;
+		if (task_active_workers <= 0)
+			return 0;   /* nothing in flight; treat as done */
+		rc = cape_task_wait_for_completion();
+		if (rc != 0)
+			return rc;
+	}
+	return 0;
+}
+
+/* Resolve the pending depend() items into predecessor task ids, block until
+ * they finish, then fold this task into the DAG. Returns the new task id. */
+static int cape_task_resolve_deps(long this_id)
+{
+	long *preds;
+	int n_preds = 0;
+	int i, j, rc = 0;
+
+	/* At most this_id distinct earlier tasks can be predecessors. */
+	preds = malloc((size_t)(this_id > 0 ? this_id : 1) * sizeof(long));
+	if (preds == NULL) { perror("malloc(preds)"); exit(1); }
+
+#define CAPE_ADD_PRED(p) do { \
+		long _p = (p); \
+		int _seen = 0, _k; \
+		if (_p >= 0 && _p != this_id) { \
+			for (_k = 0; _k < n_preds; ++_k) \
+				if (preds[_k] == _p) { _seen = 1; break; } \
+			if (!_seen) \
+				preds[n_preds++] = _p; \
+		} \
+	} while (0)
+
+	/* Derive predecessors (read the DAG before mutating it). */
+	for (i = 0; i < task_pending_dep_count; ++i) {
+		struct cape_dep_obj *o = cape_dep_obj_get(task_pending_deps[i].addr);
+		if (task_pending_deps[i].type == CAPE_DEP_IN) {
+			CAPE_ADD_PRED(o->last_writer);            /* RAW */
+		} else {
+			CAPE_ADD_PRED(o->last_writer);            /* WAW */
+			for (j = 0; j < o->n_readers; ++j)
+				CAPE_ADD_PRED(o->readers[j]);     /* WAR */
+		}
+	}
+
+	for (i = 0; i < n_preds; ++i) {
+		rc = cape_task_wait_for_task(preds[i]);
+		if (rc != 0) {
+			free(preds);
+			return rc;
+		}
+	}
+	free(preds);
+
+	/* Fold this task into the DAG: writers reset the readers history. */
+	for (i = 0; i < task_pending_dep_count; ++i) {
+		struct cape_dep_obj *o = cape_dep_obj_get(task_pending_deps[i].addr);
+		if (task_pending_deps[i].type == CAPE_DEP_IN) {
+			cape_dep_obj_add_reader(o, this_id);
+		} else {
+			o->last_writer = this_id;
+			o->n_readers = 0;
+		}
+	}
+	task_pending_dep_count = 0;
+#undef CAPE_ADD_PRED
+	return 0;
+}
+
 int require_dispatch_task_checkpoint()
 {
 	int rc = 0;
 	int worker = -1;
-	CAPE_DBG("require_dispatch_task_checkpoint enter");
+	long this_id;
+	CAPE_DBG("require_dispatch_task_checkpoint enter pending_deps=%d",
+		 task_pending_dep_count);
 
-	if (node != 0)
+	if (node != 0) {
+		task_pending_dep_count = 0;
 		return 0;
+	}
 	if (num_nodes <= 1) {
 		fprintf(stderr,
 			"Monitor %ld: OpenMP task requires at least one worker rank\n",
@@ -3529,12 +3774,33 @@ int require_dispatch_task_checkpoint()
 		return 1;
 	}
 
+	if (!task_pool_ready) {
+		rc = cape_task_pool_reset();
+		if (rc != 0) {
+			release_final_checkpoint();
+			return rc;
+		}
+	}
+
+	this_id = task_next_id++;
+
+	/* Honor depend(): block this dispatch until predecessor tasks complete
+	 * and merge, so the accumulated total_ckpt we ship carries the inputs. */
+	rc = cape_task_resolve_deps(this_id);
+	if (rc != 0) {
+		printf("Monitor %ld: Error resolving task dependencies\n", node);
+		release_final_checkpoint();
+		return rc;
+	}
+
 	rc = cape_task_get_idle_worker(&worker);
 	if (rc == 0)
 		rc = cape_task_dispatch_directive(worker);
+	if (rc == 0)
+		cape_task_mark_dispatched(this_id, worker);
 	if (rc != 0)
 		printf("Monitor %ld: Error on task checkpoint dispatch\n", node);
-	CAPE_DBG("require_dispatch_task_checkpoint exit rc=%d", rc);
+	CAPE_DBG("require_dispatch_task_checkpoint exit rc=%d task_id=%ld", rc, this_id);
 	return rc;
 }
 

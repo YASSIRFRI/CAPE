@@ -84,6 +84,19 @@ static inline void dickpt_send_ckpt(void)    { __cape_signal(S_SEND_CHECKPOINT);
 static inline void dickpt_receive_ckpt(void) { __cape_signal(S_RECEIVE_CHECKPOINT); }
 static inline void dickpt_dispatch_task_ckpt(void) { __cape_signal(S_DISPATCH_TASK_CHECKPOINT); }
 static inline unsigned long dickpt_receive_task_ckpt(void) { return __cape_signal_read(S_RECEIVE_TASK_CHECKPOINT); }
+
+/* Register one task depend() item (type = CAPE_DEP_IN/OUT/INOUT). Issued by
+ * every rank before the task block; only the master acts on it, building the
+ * task DAG so dependent tasks are dispatched after their predecessors. */
+static inline void dickpt_task_depend(void *addr, int type)
+{
+    register unsigned long _addr asm("rax") = (unsigned long)addr;
+    register unsigned long _code asm("rdx") =
+        (unsigned long)S_TASK_DEPEND
+        | ((unsigned long)(unsigned int)type << 32);
+    __asm__ volatile ("int $3" : "+r"(_addr), "+r"(_code) : : "memory");
+}
+
 static inline void dickpt_inject_ckpt(void)  { __cape_signal(S_INJECT_CHECKPOINT); }
 static inline void dickpt_inject_workshare_ckpt(void) { __cape_signal(S_INJECT_WORKSHARE_CHECKPOINT); }
 static inline void dickpt_merge_ckpt(void)   { __cape_signal(S_MERGE_CHECKPOINT); }

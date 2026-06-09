@@ -277,6 +277,13 @@ define dickpt_clause
 	|	'dickpt_register_region(&[reference_id], 'sizeof([reference_id]));	[NL]
 	|	'dickpt_register_shared(&[reference_id], 'sizeof([reference_id]), [number]);	[NL]
 	|	'dickpt_unregister_level([number]);	[NL]
+	|	'dickpt_task_depend(&[reference_id], [dickpt_depend_type]);	[NL]
+end define
+
+define dickpt_depend_type
+		CAPE_DEP_IN
+	|	CAPE_DEP_OUT
+	|	CAPE_DEP_INOUT
 end define
 
 define dickpt_reduction_op

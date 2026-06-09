@@ -266,6 +266,19 @@ end define
 			[omp_shared_clause]
 		|	[omp_private_clause]
 		|	[omp_firstprivate_clause]
+		|	[omp_depend_clause]
+	end define
+
+	% OpenMP task dependency clause: depend(in|out|inout: var, var, ...)
+	define omp_depend_clause
+		'depend '( [depend_type] ': [list reference_id] ')
+	end define
+
+	% 'inout listed before 'in so the longest keyword wins the parse.
+	define depend_type
+			'inout
+		|	'in
+		|	'out
 	end define
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%

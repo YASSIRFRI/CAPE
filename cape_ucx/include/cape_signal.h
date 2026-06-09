@@ -14,6 +14,20 @@
 #define S_DISPATCH_TASK_CHECKPOINT 34
 #define S_RECEIVE_TASK_CHECKPOINT 35
 
+/* Register one OpenMP task depend() item with the monitor's task DAG, issued
+ * (by every rank, acted on only by the master) just before the task's
+ * dispatch/run block. App packs:
+ *   rax = dependency object address
+ *   rdx = S_TASK_DEPEND | (dep_type << 32)   dep_type in {IN, OUT, INOUT}
+ * The master accumulates these per task; at S_DISPATCH_TASK_CHECKPOINT it
+ * derives the predecessor tasks (RAW/WAR/WAW) and blocks the dispatch until
+ * they have completed and merged, so dependent tasks observe their inputs. */
+#define S_TASK_DEPEND 36
+
+#define CAPE_DEP_IN    1
+#define CAPE_DEP_OUT   2
+#define CAPE_DEP_INOUT 3
+
 #define S_INJECT_CHECKPOINT 7
 #define S_INJECT_WORKSHARE_CHECKPOINT 77
 

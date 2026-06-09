@@ -557,11 +557,17 @@ end function
 		construct RegisterList [repeat clauses]
 			_ [addTaskSharedClauses each Clauses]
 
+		% Append depend(in|out|inout: ...) -> dickpt_task_depend() calls after
+		% the shared registrations, all emitted before the dispatch block so
+		% the master DAG knows this task's edges and can order its dispatch.
+		construct PrologueList [repeat clauses]
+			RegisterList [addTaskDependClauses each Clauses]
+
 		construct DickptUnregister [clauses]
 			'dickpt_unregister_level(2);
 
 		construct NewDickptTask [dickpt_task]
-			RegisterList
+			PrologueList
 			if('dickpt_read_node()==0)
 			'{
 				'dickpt_generate_ckpt();

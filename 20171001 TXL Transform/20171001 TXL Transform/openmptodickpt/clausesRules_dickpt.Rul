@@ -121,6 +121,78 @@ function addTaskSharedClause Variable [reference_id]
 		DickptClauseList [. RegisterRange] [. RegisterShared]
 end function
 
+% Task dependency clauses: depend(in|out|inout: a, b) -> one
+% dickpt_task_depend(&v, CAPE_DEP_*) per variable, emitted before the task's
+% dispatch block. The monitor uses them to build the task DAG and to block a
+% dependent task's dispatch until its predecessors have completed.
+function addTaskDependClauses Clause [task_construct_clauses]
+	replace [repeat clauses]
+		ClauseList [repeat clauses]
+
+	deconstruct Clause
+		depend( Kind [depend_type] : Variables [list reference_id] )
+
+	% Exactly one of the three guarded emitters fires, per the dep kind.
+	by
+		ClauseList [emitDependIn    Kind Variables]
+		           [emitDependOut   Kind Variables]
+		           [emitDependInout Kind Variables]
+end function
+
+function emitDependIn Kind [depend_type] Variables [list reference_id]
+	deconstruct Kind
+		'in
+	replace [repeat clauses]
+		ClauseList [repeat clauses]
+	by
+		ClauseList [addDependIn each Variables]
+end function
+
+function emitDependOut Kind [depend_type] Variables [list reference_id]
+	deconstruct Kind
+		'out
+	replace [repeat clauses]
+		ClauseList [repeat clauses]
+	by
+		ClauseList [addDependOut each Variables]
+end function
+
+function emitDependInout Kind [depend_type] Variables [list reference_id]
+	deconstruct Kind
+		'inout
+	replace [repeat clauses]
+		ClauseList [repeat clauses]
+	by
+		ClauseList [addDependInout each Variables]
+end function
+
+function addDependIn Variable [reference_id]
+	construct RegisterDepend [clauses]
+		'dickpt_task_depend(& Variable, 'CAPE_DEP_IN);
+	replace [repeat clauses]
+		DickptClauseList [repeat clauses]
+	by
+		DickptClauseList [. RegisterDepend]
+end function
+
+function addDependOut Variable [reference_id]
+	construct RegisterDepend [clauses]
+		'dickpt_task_depend(& Variable, 'CAPE_DEP_OUT);
+	replace [repeat clauses]
+		DickptClauseList [repeat clauses]
+	by
+		DickptClauseList [. RegisterDepend]
+end function
+
+function addDependInout Variable [reference_id]
+	construct RegisterDepend [clauses]
+		'dickpt_task_depend(& Variable, 'CAPE_DEP_INOUT);
+	replace [repeat clauses]
+		DickptClauseList [repeat clauses]
+	by
+		DickptClauseList [. RegisterDepend]
+end function
+
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %				PRIVATE CLAUSE REPLACEMENT 			  	%
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
