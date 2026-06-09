@@ -236,11 +236,20 @@ function addGlobalVarsToMain
 
     import ThreadDecls [dickpt_threadprivate]
 
+    % Page-align the globals that get registered for checkpoint tracking.
+    % userfaultfd write-protect registration only accepts anonymous VMAs, but
+    % the linker packs small statics onto the .data/.got.plt/.bss boundary
+    % page, which is file-backed -> registration fails (EINVAL) and the region
+    % is untracked. aligned(4096) puts each on its own clean anonymous .bss
+    % page so dickpt_register_region's whole-range UFFDIO_REGISTER succeeds.
+    construct AlignedGlobalVars [repeat declaration]
+        GlobalVars [alignSharedDeclarators]
+
     construct NewMainFunction [function_definition]
     	Specifiers MainName
     	'{
     		% Add the declarations to the main function.
-    		GlobalVars
+    		AlignedGlobalVars
     		% Add the omp threadprivate statements that used to be global.
     		ThreadDecls
     		InnerStatement
@@ -248,4 +257,23 @@ function addGlobalVarsToMain
 
 	by
 		NewMainFunction
+end function
+
+% Append __attribute__((aligned(4096))) to every registered global's
+% declarator so it lands on its own anonymous page (see addGlobalVarsToMain).
+rule alignSharedDeclarators
+	replace [init_declarator]
+		Dtor [declarator] Init [opt initialization]
+		Attrs [repeat attributes_or_asm]
+	where not
+		Attrs [hasAlignedAttribute]
+	construct PageAlign [attributes_or_asm]
+		'__attribute__ '(( 'aligned '( 4096 ') '))
+	by
+		Dtor Init Attrs [. PageAlign]
+end rule
+
+function hasAlignedAttribute
+	match * [attribute_aligned]
+		_ [attribute_aligned]
 end function

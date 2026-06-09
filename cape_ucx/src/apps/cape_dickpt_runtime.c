@@ -213,34 +213,16 @@ static int cape_uffd_try_register(int uffd, uint64_t start, uint64_t len)
 	return ioctl(uffd, UFFDIO_REGISTER, &reg);
 }
 
-/* Convert a single (file-backed) page to an anonymous private mapping in
- * place, preserving its contents. The linker packs the tail of .data (file
- * content) and the head of .bss onto a shared page; that page belongs to the
- * executable's file-backed VMA, and userfaultfd write-protect registration
- * only accepts anonymous/shmem VMAs, so it returns EINVAL for it. A small
- * static array that lands on that boundary page is otherwise untrackable.
- * Save → MAP_FIXED anonymous → restore turns it anonymous without disturbing
- * the (private, mutable) globals that share it. */
-static void cape_force_anonymous_page(uint64_t page, size_t page_size)
-{
-	void *buf = malloc(page_size);
-	void *res;
-
-	if (buf == NULL)
-		cape_die_errno("malloc(page conversion)");
-	memcpy(buf, (void *)(uintptr_t)page, page_size);
-	res = mmap((void *)(uintptr_t)page, page_size, PROT_READ | PROT_WRITE,
-		   MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
-	if (res == MAP_FAILED)
-		cape_die_errno("mmap(anonymize file-backed page)");
-	memcpy((void *)(uintptr_t)page, buf, page_size);
-	free(buf);
-}
-
 /* Register [start, start+len) for write-protect faults. Fast path registers
- * the whole range at once; if the kernel rejects it (a file-backed boundary
- * page), fall back to page granularity and anonymize any page it refuses, so
- * tracked data that straddles the .data/.bss boundary is still captured. */
+ * the whole range at once. If the kernel rejects it (EINVAL), the range
+ * overlaps a file-backed page — the linker packs the tail of .data and the
+ * .got.plt onto the same page as the head of .bss, and userfaultfd WP only
+ * accepts anonymous/shmem VMAs. Fall back to page granularity and *skip* any
+ * page the kernel refuses: we must not MAP_FIXED-anonymize it, because that
+ * page also holds the GOT and zeroing it would crash the next PLT call. The
+ * skip is best-effort for unaligned hand-written apps; transpiler-generated
+ * shared data is page-aligned (see emitAlignedGlobal) so it lands on its own
+ * clean anonymous page and the whole-range fast path always succeeds. */
 static void cape_uffd_register_wp(int uffd, uint64_t start, uint64_t len)
 {
 	size_t page_size = cape_page_size();
@@ -257,9 +239,10 @@ static void cape_uffd_register_wp(int uffd, uint64_t start, uint64_t len)
 			continue;
 		if (errno != EINVAL)
 			cape_die_errno("ioctl(UFFDIO_REGISTER)");
-		cape_force_anonymous_page(p, page_size);
-		if (cape_uffd_try_register(uffd, p, page_size) != 0)
-			cape_die_errno("ioctl(UFFDIO_REGISTER) after anonymize");
+		fprintf(stderr,
+			"dickpt runtime: page 0x%llx not WP-registerable "
+			"(file-backed; page-align this shared region) — skipping\n",
+			(unsigned long long)p);
 	}
 }
 

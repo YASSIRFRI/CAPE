@@ -15,8 +15,8 @@ static long task_work (long x) {
 }
 
 int main (int argc, char * * argv) {
-    static long input [N];
-    static long output [N];
+    static long input [N] __attribute__ ((aligned (4096)));
+    static long output [N] __attribute__ ((aligned (4096)));
     long checksum = 0;
     long expected = 0;
     int i;
