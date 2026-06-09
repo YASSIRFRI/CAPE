@@ -2753,6 +2753,8 @@ int main(int argc, char * argv[]){
 									task_pending_deps[task_pending_dep_count].addr = addr_v;
 									task_pending_deps[task_pending_dep_count].type = dep_type;
 									task_pending_dep_count++;
+									CAPE_DBG("S_TASK_DEPEND addr=0x%lx type=%d pending=%d",
+										 addr_v, dep_type, task_pending_dep_count);
 								} else {
 									fprintf(stderr,
 										"Monitor %ld: too many depend() items on one task\n",
@@ -3654,6 +3656,9 @@ static int cape_task_dispatch_directive(int worker)
 		return 1;
 	run_msg[0] = CAPE_TASK_RUN;
 	memcpy(run_msg + 1, src, src_size);
+	CAPE_DBG("dispatch_directive worker=%d ships=%s size=%zu total_size=%zu",
+		 worker, (src == final_ckpt) ? "final" : "total",
+		 src_size, total_ckpt_size);
 
 	current_job++;
 	task_dispatched_jobs++;
@@ -3730,7 +3735,13 @@ static int cape_task_resolve_deps(long this_id)
 		}
 	}
 
+	CAPE_DBG("resolve_deps this_id=%ld pending=%d n_preds=%d",
+		 this_id, task_pending_dep_count, n_preds);
 	for (i = 0; i < n_preds; ++i) {
+		CAPE_DBG("  wait this_id=%ld on pred=%ld done=%d active=%d cap=%zu",
+			 this_id, preds[i],
+			 ((size_t)preds[i] < task_done_cap) ? task_done[preds[i]] : -1,
+			 task_active_workers, task_done_cap);
 		rc = cape_task_wait_for_task(preds[i]);
 		if (rc != 0) {
 			free(preds);
