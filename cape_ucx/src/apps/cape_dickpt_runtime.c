@@ -202,19 +202,74 @@ static int cape_create_userfaultfd(void)
 	return uffd;
 }
 
+static int cape_uffd_try_register(int uffd, uint64_t start, uint64_t len)
+{
+	struct uffdio_register reg;
+
+	memset(&reg, 0, sizeof(reg));
+	reg.range.start = start;
+	reg.range.len = len;
+	reg.mode = UFFDIO_REGISTER_MODE_WP;
+	return ioctl(uffd, UFFDIO_REGISTER, &reg);
+}
+
+/* Convert a single (file-backed) page to an anonymous private mapping in
+ * place, preserving its contents. The linker packs the tail of .data (file
+ * content) and the head of .bss onto a shared page; that page belongs to the
+ * executable's file-backed VMA, and userfaultfd write-protect registration
+ * only accepts anonymous/shmem VMAs, so it returns EINVAL for it. A small
+ * static array that lands on that boundary page is otherwise untrackable.
+ * Save → MAP_FIXED anonymous → restore turns it anonymous without disturbing
+ * the (private, mutable) globals that share it. */
+static void cape_force_anonymous_page(uint64_t page, size_t page_size)
+{
+	void *buf = malloc(page_size);
+	void *res;
+
+	if (buf == NULL)
+		cape_die_errno("malloc(page conversion)");
+	memcpy(buf, (void *)(uintptr_t)page, page_size);
+	res = mmap((void *)(uintptr_t)page, page_size, PROT_READ | PROT_WRITE,
+		   MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+	if (res == MAP_FAILED)
+		cape_die_errno("mmap(anonymize file-backed page)");
+	memcpy((void *)(uintptr_t)page, buf, page_size);
+	free(buf);
+}
+
+/* Register [start, start+len) for write-protect faults. Fast path registers
+ * the whole range at once; if the kernel rejects it (a file-backed boundary
+ * page), fall back to page granularity and anonymize any page it refuses, so
+ * tracked data that straddles the .data/.bss boundary is still captured. */
+static void cape_uffd_register_wp(int uffd, uint64_t start, uint64_t len)
+{
+	size_t page_size = cape_page_size();
+	uint64_t end = start + len;
+	uint64_t p;
+
+	if (len == 0)
+		return;
+	if (cape_uffd_try_register(uffd, start, len) == 0)
+		return;
+
+	for (p = start; p < end; p += page_size) {
+		if (cape_uffd_try_register(uffd, p, page_size) == 0)
+			continue;
+		if (errno != EINVAL)
+			cape_die_errno("ioctl(UFFDIO_REGISTER)");
+		cape_force_anonymous_page(p, page_size);
+		if (cape_uffd_try_register(uffd, p, page_size) != 0)
+			cape_die_errno("ioctl(UFFDIO_REGISTER) after anonymize");
+	}
+}
+
 static void cape_register_userfault_ranges(int uffd)
 {
 	size_t i;
 
-	for (i = 0; i < cape_range_count; ++i) {
-		struct uffdio_register reg;
-		memset(&reg, 0, sizeof(reg));
-		reg.range.start = cape_ranges[i].start;
-		reg.range.len = cape_ranges[i].len;
-		reg.mode = UFFDIO_REGISTER_MODE_WP;
-		if (ioctl(uffd, UFFDIO_REGISTER, &reg) == -1)
-			cape_die_errno("ioctl(UFFDIO_REGISTER)");
-	}
+	for (i = 0; i < cape_range_count; ++i)
+		cape_uffd_register_wp(uffd, cape_ranges[i].start,
+				      cape_ranges[i].len);
 }
 
 static void cape_send_setup_to_monitor(int monitor_fd, int uffd)
@@ -322,13 +377,7 @@ void dickpt_register_region(void *addr, size_t len)
 	 * prepare_tracking() has already run, so register on the live uffd and
 	 * tell the monitor now. Otherwise prepare_tracking() will pick it up. */
 	if (cape_tracking_ready && cape_uffd >= 0) {
-		struct uffdio_register reg;
-		memset(&reg, 0, sizeof(reg));
-		reg.range.start = start;
-		reg.range.len = alen;
-		reg.mode = UFFDIO_REGISTER_MODE_WP;
-		if (ioctl(cape_uffd, UFFDIO_REGISTER, &reg) == -1 && errno != EEXIST)
-			cape_die_errno("ioctl(UFFDIO_REGISTER) [runtime add]");
+		cape_uffd_register_wp(cape_uffd, start, alen);
 		cape_signal_register_region(start, alen);
 	}
 }
