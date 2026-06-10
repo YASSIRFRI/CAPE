@@ -38,8 +38,10 @@ rule replaceConstruct
 					[replaceParallel]
 						[replaceFor]
 						[replaceSections]
+						[replaceSingleTaskRegionDyn]
 						[replaceSingleTaskRegion]
 						[replaceSingle]
+						[replaceTaskwaitDyn]
 						[replaceTaskwait]
 						[replaceTask]
 						[replaceMaster]
@@ -595,6 +597,234 @@ end function
 			'dickpt_inject_ckpt();
 		by
 			NewDickptTaskwait
+	end function
+
+	%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+	%		DYNAMIC (NESTED/RECURSIVE) TASK REPLACEMENT  	%
+	%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+	% Triggered program-wide (DynFlag = 1) when any plain function
+	% (no parallel construct of its own) contains a task construct,
+	% i.e. a recursive/dynamic task graph the static lockstep model
+	% cannot dispatch. Each task body is outlined into a top-level
+	% function; the spawn ships the function pointer plus one
+	% by-value capture (the first firstprivate() variable, whose
+	% type is recovered from the enclosing function's parameter or
+	% local declarations). taskwait maps to dickpt_task_wait() and
+	% the single region becomes the master/serve-loop wrapper.
+	% Limitation: lexically nested task pragmas (a task pragma
+	% directly inside another task's body) are not transformed;
+	% nest through a function call instead.
+
+	% One-pass detection: any function with a task but no parallel.
+	rule setDynFlagIfNested
+		replace $ [function_definition]
+			F [function_definition]
+		where
+			F [containsTaskDirective]
+		where not
+			F [containsParallelDirective]
+		export DynFlag [number]
+			1
+		by
+			F
+	end rule
+
+	function containsParallelDirective
+		match * [pragma_omp]
+			'#pragma omp parallel Clauses [repeat parallel_construct_clauses]
+			Statement [statement]
+	end function
+
+	% Per-function entry point, called from treatFunction before
+	% replaceConstruct so the static task rules never see these tasks.
+	function replaceNestedTasksInFunction
+		replace [function_definition]
+			F [function_definition]
+		import DynFlag [number]
+		deconstruct DynFlag
+			1
+		by
+			F	[replaceDynTaskCapture F]
+				[replaceDynTaskNoCapture]
+	end function
+
+	% Task with a firstprivate capture: outline body + unpack capture.
+	rule replaceDynTaskCapture F [function_definition]
+		replace $ [directives]
+			'#pragma omp task Clauses [repeat task_construct_clauses]
+			Statement [statement]
+
+		deconstruct * [omp_firstprivate_clause] Clauses
+			'firstprivate(Vars [list reference_id])
+		deconstruct * [reference_id] Vars
+			V [reference_id]
+
+		construct CaptureDecls [repeat declaration]
+			_ [buildCaptureDecl V F]
+		deconstruct CaptureDecls
+			CapDecl [declaration]
+			Rest [repeat declaration]
+
+		construct BaseId [id]
+			'__dickpt_task_fn
+		construct FnId [id]
+			BaseId [!]
+
+		construct MemcpyStmt [statement]
+			'memcpy( & V, '__dickpt_args__, 'sizeof( V));
+		construct OutFn [function_definition]
+			'static 'void FnId '( 'void '* '__dickpt_args__ ')
+			'{
+				CapDecl
+				MemcpyStmt
+				Statement
+			'}
+		construct OutUnit [declaration_or_function_definition]
+			OutFn
+		import DynTaskFns [repeat declaration_or_function_definition]
+		export DynTaskFns
+			DynTaskFns [. OutUnit]
+
+		construct FwdDecl [declaration]
+			'static 'void FnId '( 'void '* ') ';
+		import DynFwdDecls [repeat declaration]
+		export DynFwdDecls
+			DynFwdDecls [. FwdDecl]
+
+		by
+			'dickpt_task_spawn(FnId, & V, 'sizeof( V));
+	end rule
+
+	% Recover "Type Declarator;" for the captured variable from the
+	% enclosing function's parameters or local declarations, and emit
+	% the unpack: declaration + memcpy from the args buffer.
+	function buildCaptureDecl V [reference_id] F [function_definition]
+		replace [repeat declaration]
+			Holder [repeat declaration]
+		construct Locals [repeat declaration_body]
+			_ [^ F]
+		construct Params [repeat argument_declaration]
+			_ [^ F]
+		by
+			Holder	[pickLocalDecl V each Locals]
+					[pickParamDecl V each Params]
+	end function
+
+	function pickParamDecl V [reference_id] AD [argument_declaration]
+		deconstruct AD
+			Specs [decl_specifiers] Dtor [declarator]
+		deconstruct * [type_specifier] Specs
+			TS [type_specifier]
+		deconstruct Dtor
+			Ptrs [repeat ptr_operator] V Exts [repeat declarator_extension]
+		replace [repeat declaration]
+			_ [repeat declaration]
+		by
+			Specs Dtor ';
+	end function
+
+	function pickLocalDecl V [reference_id] DB [declaration_body]
+		deconstruct DB
+			Specs [decl_specifiers] Inits [list init_declarator+]
+		% require a real type: rejects expression statements that the C
+		% grammar also stores as (K&R-style) declarations, e.g. f(l);
+		deconstruct * [type_specifier] Specs
+			TS [type_specifier]
+		construct InitList [repeat init_declarator]
+			_ [^ Inits]
+		replace [repeat declaration]
+			Holder [repeat declaration]
+		by
+			Holder [pickLocalDeclarator V Specs each InitList]
+	end function
+
+	function pickLocalDeclarator V [reference_id] Specs [decl_specifiers] ID [init_declarator]
+		deconstruct * [declarator] ID
+			Dtor [declarator]
+		deconstruct Dtor
+			Ptrs [repeat ptr_operator] V Exts [repeat declarator_extension]
+		replace [repeat declaration]
+			_ [repeat declaration]
+		by
+			Specs Dtor ';
+	end function
+
+	% Task without (usable) firstprivate capture: outline body only.
+	rule replaceDynTaskNoCapture
+		replace $ [directives]
+			'#pragma omp task Clauses [repeat task_construct_clauses]
+			Statement [statement]
+
+		construct BaseId [id]
+			'__dickpt_task_fn
+		construct FnId [id]
+			BaseId [!]
+
+		construct OutFn [function_definition]
+			'static 'void FnId '( 'void '* '__dickpt_args__ ')
+			'{
+				Statement
+			'}
+		construct OutUnit [declaration_or_function_definition]
+			OutFn
+		import DynTaskFns [repeat declaration_or_function_definition]
+		export DynTaskFns
+			DynTaskFns [. OutUnit]
+
+		construct FwdDecl [declaration]
+			'static 'void FnId '( 'void '* ') ';
+		import DynFwdDecls [repeat declaration]
+		export DynFwdDecls
+			DynFwdDecls [. FwdDecl]
+
+		by
+			'dickpt_task_spawn(FnId, '0, '0);
+	end rule
+
+	% taskwait in dynamic mode: ask the master to drain this task's
+	% direct children (running queued tasks inline while blocked).
+	function replaceTaskwaitDyn
+		replace [directives]
+			'#pragma omp taskwait
+		import DynFlag [number]
+		deconstruct DynFlag
+			1
+		by
+			'dickpt_task_wait();
+	end function
+
+	% single region in dynamic mode: master runs the body and ends the
+	% region; workers serve tasks; everyone then syncs on the result.
+	function replaceSingleTaskRegionDyn
+		replace [directives]
+			'#pragma omp single Clauses [repeat single_construct_clauses]
+			CompoundStatement [compound_statement]
+		import DynFlag [number]
+		deconstruct DynFlag
+			1
+		deconstruct CompoundStatement
+			'{
+				Inner [repeat compound_statement_body]
+			'}
+		construct NewDickptTaskRegion [dickpt_task_region_dyn]
+			if ('dickpt_read_node() == 0)
+			'{
+				Inner
+				'dickpt_task_region_end();
+			'}
+			else
+			'{
+				struct 'dickpt_task_desc __dickpt_desc__;
+				while ('dickpt_task_serve(&__dickpt_desc__))
+				'{
+					__dickpt_desc__.fn(__dickpt_desc__.args);
+					'dickpt_task_complete();
+				'}
+			'}
+			'dickpt_broadcast_ckpt();
+			'dickpt_inject_ckpt();
+		by
+			NewDickptTaskRegion
 	end function
 
 	%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%

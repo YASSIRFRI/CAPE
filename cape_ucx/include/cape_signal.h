@@ -28,6 +28,36 @@
 #define CAPE_DEP_OUT   2
 #define CAPE_DEP_INOUT 3
 
+/* ===== Dynamic (nested/recursive) OpenMP tasks =====
+ * Static tasks (S_DISPATCH/RECEIVE_TASK_CHECKPOINT) require every rank to
+ * reach the same lexical dispatch point. Recursive task graphs (e.g. tree
+ * traversal) break that model: only the rank executing a parent task sees
+ * the nested task sites. The dynamic protocol instead makes the master the
+ * single scheduler:
+ *   - Any rank running task code spawns a task with S_TASK_SPAWN
+ *     (rax = &dickpt_task_desc {fn, args_size, args[]}). On the master the
+ *     task is enqueued directly; on a worker the monitor snapshots the
+ *     worker's current delta checkpoint and ships [SUBMIT, desc, ckpt] to
+ *     the master, which merges the delta and enqueues the task.
+ *   - Idle workers sit in S_TASK_SERVE, blocking for a directive:
+ *     RUN (desc + accumulated checkpoint, injected before returning to the
+ *     app, which then calls desc.fn(desc.args)) or SHUTDOWN.
+ *   - S_TASK_COMPLETE sends the finished task's delta checkpoint to the
+ *     master on the control tag (ordered after any SUBMITs from the task).
+ *   - S_TASK_WAIT implements taskwait: master drains its direct children;
+ *     a worker notifies the master and blocks; the master replies DONE
+ *     (+ checkpoint) once the waiter's children finished, or hands it a
+ *     queued task to run inline (avoiding deadlock when all workers wait).
+ *   - S_TASK_REGION_END (master only) drains everything, then broadcasts
+ *     SHUTDOWN so workers fall out of their serve loops. */
+#define S_TASK_SPAWN       37
+#define S_TASK_SERVE       38
+#define S_TASK_WAIT        39
+#define S_TASK_COMPLETE    40
+#define S_TASK_REGION_END  41
+
+#define DICKPT_TASK_ARGS_MAX 256
+
 #define S_INJECT_CHECKPOINT 7
 #define S_INJECT_WORKSHARE_CHECKPOINT 77
 

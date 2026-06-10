@@ -55,6 +55,21 @@ function main
 		0
 	export SectionCounter
 
+	% Dynamic-task mode: set to 1 when any plain function contains a
+	% task construct (recursive task graph). Outlined task functions
+	% and their forward declarations are collected program-wide.
+	construct DynFlag [number]
+		0
+	export DynFlag
+	construct DynTaskFns [repeat declaration_or_function_definition]
+		_
+	export DynTaskFns
+	construct DynFwdDecls [repeat declaration]
+		_
+	export DynFwdDecls
+	construct DynProbe [repeat declaration_or_function_definition]
+		CompilationUnit [setDynFlagIfNested]
+
 	% New includes for DICKPT application.
 	% No MPI needed - monitor handles communication.
 		construct NewIncludes [repeat declaration]
@@ -66,9 +81,17 @@ function main
 	construct NewCProgram [repeat declaration_or_function_definition]
 		_ [changeUnit each CompilationUnit]
 
+	import DynTaskFns
+	import DynFwdDecls
+
+	construct HeaderDecls [repeat declaration]
+		NewIncludes [. each DynFwdDecls]
+	construct ProgramUnits [repeat declaration_or_function_definition]
+		NewCProgram [. each DynTaskFns]
+
 	by
-		NewIncludes
-		NewCProgram
+		HeaderDecls
+		ProgramUnits
 end function
 
 % Function that starts dealing with the global variable declarations,
@@ -115,7 +138,33 @@ function treatGlobalDeclaration
 		GlobalVars [. Decl]
 
 	by
-		Decl
+		Decl [alignGlobalIfDyn]
+end function
+
+% In dynamic-task mode the outlined task functions run outside main and
+% must see the real file-scope globals: page-align them in place.
+function alignGlobalIfDyn
+	replace [declaration]
+		Decl [declaration]
+	import DynFlag [number]
+	deconstruct DynFlag
+		1
+	where not
+		Decl [isTypedefDecl]
+	where not
+		Decl [isExternDecl]
+	by
+		Decl [alignSharedDeclarators]
+end function
+
+function isTypedefDecl
+	match * [sc_specifier]
+		'typedef
+end function
+
+function isExternDecl
+	match * [sc_specifier]
+		'extern
 end function
 
 % Identify the threadprivate declaration and add them
@@ -177,6 +226,7 @@ function treatFunction
 	% C declarations. So we skip [replaceDeclaration] here.
 	construct NewCompilationUnit [function_definition]
 		Function [addGlobalVarsToMain]
+				 [replaceNestedTasksInFunction]
 				 [replaceConstruct]
 				 [replaceEnvRoutine]
 				 [replaceEnvRoutSetNumStatement]
@@ -243,7 +293,7 @@ function addGlobalVarsToMain
     % is untracked. aligned(4096) puts each on its own clean anonymous .bss
     % page so dickpt_register_region's whole-range UFFDIO_REGISTER succeeds.
     construct AlignedGlobalVars [repeat declaration]
-        GlobalVars [alignSharedDeclarators]
+        _ [keepShadowGlobalsIfStatic GlobalVars]
 
     construct NewMainFunction [function_definition]
     	Specifiers MainName
@@ -276,4 +326,16 @@ end rule
 function hasAlignedAttribute
 	match * [attribute_aligned]
 		_ [attribute_aligned]
+end function
+
+% Static-task mode shadows aligned globals into main; dynamic-task mode
+% must not (task functions run outside main, on the file-scope globals).
+function keepShadowGlobalsIfStatic GlobalVars [repeat declaration]
+	replace [repeat declaration]
+		_ [repeat declaration]
+	import DynFlag [number]
+	deconstruct DynFlag
+		0
+	by
+		GlobalVars [alignSharedDeclarators]
 end function

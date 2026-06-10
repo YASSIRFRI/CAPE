@@ -202,6 +202,46 @@ end define
 		'dickpt_inject_ckpt(); [NL]
 	end define
 
+	% ── Dynamic (nested/recursive) tasks ──────────────
+	% Used when the program contains task constructs inside plain
+	% functions (recursive task graphs): only the rank executing the
+	% parent task reaches the nested task site, so the static lockstep
+	% dispatch cannot work. The master is the single scheduler; spawn
+	% ships the outlined function pointer + by-value capture; idle
+	% workers serve tasks from a loop until the region shuts down.
+
+	define dickpt_task_dyn
+		'dickpt_task_spawn([id], [dickpt_spawn_args]); [NL]
+	end define
+
+	define dickpt_spawn_args
+			& [reference_id] ', 'sizeof([reference_id])
+		|	'0 ', '0
+	end define
+
+	define dickpt_taskwait_dyn
+		'dickpt_task_wait(); [NL]
+	end define
+
+	define dickpt_task_region_dyn
+		if ([dickpt_read_node] == 0)
+		'{														[IN] [NL]
+			[repeat compound_statement_body]
+			'dickpt_task_region_end(); [NL]						[EX]
+		'}														[NL]
+		else
+		'{														[IN] [NL]
+			struct 'dickpt_task_desc __dickpt_desc__; [NL]
+			while ('dickpt_task_serve(&__dickpt_desc__))
+			'{													[IN] [NL]
+				__dickpt_desc__.fn(__dickpt_desc__.args); [NL]
+				'dickpt_task_complete(); [NL]					[EX]
+			'}													[NL] [EX]
+		'}														[NL]
+		'dickpt_broadcast_ckpt(); [NL]
+		'dickpt_inject_ckpt(); [NL]
+	end define
+
 	define dickpt_master
 		if ([dickpt_read_node] == 0 )
 			[statement]
@@ -245,6 +285,9 @@ define dickpt_construct
 		|	[dickpt_single]
 		|	[dickpt_task_single]
 		|	[dickpt_task]
+		|	[dickpt_task_dyn]
+		|	[dickpt_taskwait_dyn]
+		|	[dickpt_task_region_dyn]
 		|	[dickpt_taskwait]
 		|	[dickpt_master]
 	|	[dickpt_automic_critical]

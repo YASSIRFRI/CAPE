@@ -571,9 +571,18 @@ static int task_pool_ready;
 static unsigned long task_dispatched_jobs;
 static unsigned long task_completed_jobs;
 static int cape_task_pool_reset(void);
+static void cape_dyn_reset(void);
 
 #define CAPE_TASK_SKIP 0u
 #define CAPE_TASK_RUN  1u
+/* Dynamic-task directives (master -> worker, TAG_CKPT_DATA opcode byte) */
+#define CAPE_TASK_RUN_DYN  2u   /* [fn:8][args_size:8][args][total ckpt] */
+#define CAPE_TASK_DONE     3u   /* taskwait satisfied: [total ckpt]      */
+#define CAPE_TASK_SHUTDOWN 4u   /* task region over: leave serve loop    */
+/* Dynamic-task control ops (worker -> master, TAG_TASK_CTRL opcode byte) */
+#define CAPE_TCTL_SUBMIT   1u   /* [fn:8][args_size:8][args][delta ckpt] */
+#define CAPE_TCTL_WAIT     2u   /* worker entered taskwait               */
+#define CAPE_TCTL_COMPLETE 3u   /* [delta ckpt] of the finished task     */
 
 /* ===== Task dependency DAG (master only) =====
  * The transpiler emits dickpt_task_depend(addr, type) for every depend()
@@ -2022,6 +2031,37 @@ static unsigned char *cape_ucx_recv_probe_alloc_any(size_t *recvlen,
 	return buf;
 }
 
+/* Receive a message already matched by ucp_tag_probe_nb into a fresh
+ * malloc'd buffer. Companion to the non-blocking probe used by the dynamic
+ * task scheduler's event pump. */
+static unsigned char *cape_ucx_recv_matched_alloc(ucp_tag_message_h msg,
+						  const ucp_tag_recv_info_t *info,
+						  size_t *recvlen, int *sender)
+{
+	unsigned char *buf;
+	ucp_request_param_t rp = {
+	    .op_attr_mask = UCP_OP_ATTR_FIELD_CALLBACK
+	                  | UCP_OP_ATTR_FIELD_FLAGS,
+	    .flags        = UCP_OP_ATTR_FLAG_NO_IMM_CMPL,
+	    .cb.recv      = cape_recv_cb
+	};
+
+	buf = malloc(info->length == 0 ? 1 : info->length);
+	if (buf == NULL) {
+		perror("malloc(matched UCX recv)");
+		exit(1);
+	}
+	{
+		void *req = ucp_tag_msg_recv_nbx(ucp_worker, buf, info->length,
+						 msg, &rp);
+		cape_ucx_wait(req, info->length, 1, NULL);
+	}
+	*recvlen = info->length;
+	if (sender != NULL)
+		*sender = cape_ucx_sender_from_tag(info->sender_tag);
+	return buf;
+}
+
 /* Simple blocking send via UCX tag. */
 static void cape_ucx_send(const void *buf, size_t len, int dest, uint32_t token)
 {
@@ -2083,6 +2123,11 @@ static void cape_ucx_recv(void *buf, size_t len, int src, uint32_t token)
 #define TAG_BCAST_DATA    0x04
 #define TAG_SCATTER_SIZE  0x05
 #define TAG_SCATTER_DATA  0x06
+/* Worker -> master control stream for dynamic tasks (SUBMIT/WAIT/COMPLETE).
+ * One tag so messages from the same worker stay FIFO: a task's COMPLETE is
+ * always processed after the SUBMITs it issued, and before the WAIT the
+ * worker sends when it re-enters taskwait. */
+#define TAG_TASK_CTRL     0x07
 #define TAG_ALLREDUCE_BASE 0x100
 
 static const char *cape_ucx_bootstrap_id(void)
@@ -2523,6 +2568,11 @@ int require_send_checkpoint();
 int require_receive_checkpoint();
 int require_dispatch_task_checkpoint();
 int require_receive_task_checkpoint();
+int require_task_spawn(unsigned long desc_addr);
+int require_task_serve(unsigned long desc_addr);
+int require_task_wait(unsigned long desc_addr);
+int require_task_complete(void);
+int require_task_region_end(void);
 int require_inject_checkpoint();
 int require_waitfor_checkpoint();
 int require_broadcast_checkpoint();
@@ -2772,6 +2822,31 @@ int main(int argc, char * argv[]){
 
 						case S_RECEIVE_TASK_CHECKPOINT:
 							rc = require_receive_task_checkpoint();
+							if (rc!=0) exit(1);
+							break;
+
+						case S_TASK_SPAWN:
+							rc = require_task_spawn(regs.rax);
+							if (rc!=0) exit(1);
+							break;
+
+						case S_TASK_SERVE:
+							rc = require_task_serve(regs.rax);
+							if (rc!=0) exit(1);
+							break;
+
+						case S_TASK_WAIT:
+							rc = require_task_wait(regs.rax);
+							if (rc!=0) exit(1);
+							break;
+
+						case S_TASK_COMPLETE:
+							rc = require_task_complete();
+							if (rc!=0) exit(1);
+							break;
+
+						case S_TASK_REGION_END:
+							rc = require_task_region_end();
 							if (rc!=0) exit(1);
 							break;
 
@@ -3450,6 +3525,7 @@ static int cape_task_pool_reset(void)
 	task_dispatched_jobs = 0;
 	task_completed_jobs = 0;
 	cape_task_dag_reset();
+	cape_dyn_reset();
 
 	if (node != 0 || num_nodes <= 1) {
 		task_pool_ready = 1;
@@ -3914,6 +3990,708 @@ int require_receive_task_checkpoint()
 	CAPE_DBG("require_receive_task_checkpoint exit assigned=%lu rc=%d",
 		 assigned, rc);
 	return rc;
+}
+
+/* ==========================================================================
+ * Dynamic (nested/recursive) task scheduler.
+ *
+ * Static tasks need every rank at the same lexical dispatch point; recursive
+ * task graphs break that. Here the master is the single scheduler with a
+ * task queue, per-worker run stacks and taskwait bookkeeping:
+ *   - spawn: master enqueues directly; a worker ships its delta checkpoint
+ *     plus the task descriptor to the master (fire-and-forget).
+ *   - idle workers serve RUN/SHUTDOWN directives; RUN injects the
+ *     accumulated checkpoint, then the app calls desc.fn(desc.args).
+ *   - taskwait: the master replies DONE (+ total ckpt) once the waiter's
+ *     direct children completed, or hands the waiter a queued task to run
+ *     inline — so a tree of waiting parents can never deadlock the pool.
+ * Worker -> master messages share TAG_TASK_CTRL so they stay FIFO per
+ * worker; consistency depends on COMPLETE being seen after the task's
+ * SUBMITs and before the worker's next WAIT.
+ * ==========================================================================
+ */
+static int inject_checkpoint_with_write_access(FILE *stream, size_t *file_size,
+		struct user_regs_struct *regs);
+
+#define CAPE_DYN_DESC_HDR (2 * sizeof(unsigned long))   /* fn + args_size */
+
+struct cape_dyn_task {
+	long id;
+	long parent;                 /* task id, -1 = master (root) */
+	unsigned long fn;
+	unsigned long args_size;
+	unsigned char args[DICKPT_TASK_ARGS_MAX];
+	struct cape_dyn_task *next;
+};
+
+static struct cape_dyn_task *dyn_q_head, *dyn_q_tail;
+static int dyn_q_len;
+static long dyn_next_id;
+static long dyn_root_children;          /* outstanding direct children of root */
+static long *dyn_parent_of;             /* task id -> parent id */
+static long *dyn_kids;                  /* task id -> outstanding direct children */
+static size_t dyn_task_cap;
+static unsigned char *dyn_waiting;      /* worker -> blocked in taskwait, listening */
+static long **dyn_stk;                  /* per-worker run stack (inline nesting) */
+static int *dyn_stk_n, *dyn_stk_cap;
+static int dyn_ready;
+
+static void cape_dyn_reset(void)
+{
+	struct cape_dyn_task *t = dyn_q_head, *next;
+	int w;
+
+	while (t != NULL) {
+		next = t->next;
+		free(t);
+		t = next;
+	}
+	dyn_q_head = dyn_q_tail = NULL;
+	dyn_q_len = 0;
+	dyn_next_id = 0;
+	dyn_root_children = 0;
+	free(dyn_parent_of);
+	free(dyn_kids);
+	dyn_parent_of = NULL;
+	dyn_kids = NULL;
+	dyn_task_cap = 0;
+	free(dyn_waiting);
+	dyn_waiting = NULL;
+	if (dyn_stk != NULL) {
+		for (w = 0; w < num_nodes; ++w)
+			free(dyn_stk[w]);
+	}
+	free(dyn_stk);
+	free(dyn_stk_n);
+	free(dyn_stk_cap);
+	dyn_stk = NULL;
+	dyn_stk_n = NULL;
+	dyn_stk_cap = NULL;
+	dyn_ready = 0;
+}
+
+static int cape_dyn_init(void)
+{
+	if (dyn_ready)
+		return 0;
+	if (!task_pool_ready && cape_task_pool_reset() != 0)
+		return 1;
+	if (num_nodes <= 1) {
+		fprintf(stderr,
+			"Monitor %ld: dynamic OpenMP tasks need at least one worker rank\n",
+			node);
+		return 1;
+	}
+	dyn_waiting = calloc((size_t)num_nodes, 1);
+	dyn_stk = calloc((size_t)num_nodes, sizeof(*dyn_stk));
+	dyn_stk_n = calloc((size_t)num_nodes, sizeof(*dyn_stk_n));
+	dyn_stk_cap = calloc((size_t)num_nodes, sizeof(*dyn_stk_cap));
+	if (dyn_waiting == NULL || dyn_stk == NULL || dyn_stk_n == NULL ||
+	    dyn_stk_cap == NULL)
+		return 1;
+	dyn_ready = 1;
+	return 0;
+}
+
+static void cape_dyn_grow_tasks(long id)
+{
+	if ((size_t)id < dyn_task_cap)
+		return;
+	{
+		size_t ncap = dyn_task_cap ? dyn_task_cap * 2 : 64;
+		long *p, *k;
+		size_t i;
+		while ((size_t)id >= ncap)
+			ncap *= 2;
+		p = realloc(dyn_parent_of, ncap * sizeof(long));
+		k = realloc(dyn_kids, ncap * sizeof(long));
+		if (p == NULL || k == NULL) { perror("realloc(dyn tasks)"); exit(1); }
+		for (i = dyn_task_cap; i < ncap; ++i) { p[i] = -1; k[i] = 0; }
+		dyn_parent_of = p;
+		dyn_kids = k;
+		dyn_task_cap = ncap;
+	}
+}
+
+static long cape_dyn_enqueue(long parent, unsigned long fn,
+			     unsigned long args_size, const unsigned char *args)
+{
+	struct cape_dyn_task *t = malloc(sizeof(*t));
+
+	if (t == NULL) { perror("malloc(dyn_task)"); exit(1); }
+	t->id = dyn_next_id++;
+	t->parent = parent;
+	t->fn = fn;
+	t->args_size = args_size;
+	memcpy(t->args, args, args_size);
+	t->next = NULL;
+	if (dyn_q_tail != NULL)
+		dyn_q_tail->next = t;
+	else
+		dyn_q_head = t;
+	dyn_q_tail = t;
+	dyn_q_len++;
+
+	cape_dyn_grow_tasks(t->id);
+	dyn_parent_of[t->id] = parent;
+	dyn_kids[t->id] = 0;
+	if (parent < 0)
+		dyn_root_children++;
+	else
+		dyn_kids[parent]++;
+	CAPE_DBG("dyn enqueue id=%ld parent=%ld fn=0x%lx qlen=%d",
+		 t->id, parent, fn, dyn_q_len);
+	return t->id;
+}
+
+static struct cape_dyn_task *cape_dyn_dequeue(void)
+{
+	struct cape_dyn_task *t = dyn_q_head;
+	if (t == NULL)
+		return NULL;
+	dyn_q_head = t->next;
+	if (dyn_q_head == NULL)
+		dyn_q_tail = NULL;
+	dyn_q_len--;
+	return t;
+}
+
+static void cape_dyn_push(int w, long id)
+{
+	if (dyn_stk_n[w] == dyn_stk_cap[w]) {
+		int ncap = dyn_stk_cap[w] ? dyn_stk_cap[w] * 2 : 8;
+		long *grown = realloc(dyn_stk[w], (size_t)ncap * sizeof(long));
+		if (grown == NULL) { perror("realloc(dyn stack)"); exit(1); }
+		dyn_stk[w] = grown;
+		dyn_stk_cap[w] = ncap;
+	}
+	dyn_stk[w][dyn_stk_n[w]++] = id;
+}
+
+/* Flush + expose the accumulated checkpoint (may be empty early on). */
+static void cape_dyn_total_view(const unsigned char **p, size_t *n)
+{
+	if (total_ckpt_stream != NULL) {
+		fflush(total_ckpt_stream);
+		cape_total_stream_update_size();
+	}
+	if (total_ckpt != NULL && total_ckpt_size > 0) {
+		*p = total_ckpt;
+		*n = total_ckpt_size;
+	} else {
+		*p = NULL;
+		*n = 0;
+	}
+}
+
+/* Merge a checkpoint byte range into total_ckpt. */
+static int cape_dyn_merge_bytes(unsigned char *data, size_t size)
+{
+	FILE *s;
+	int rc;
+
+	if (size == 0)
+		return 0;
+	s = fmemopen(data, size, "rb");
+	if (s == NULL)
+		return 1;
+	rc = merge_external_checkpoint(s, data, size);
+	fclose(s);
+	return rc;
+}
+
+/* Send a RUN directive (descriptor + accumulated ckpt) and record the task
+ * on the worker's run stack. Caller manages idle/busy transitions. */
+static int cape_dyn_send_run(int worker, struct cape_dyn_task *t)
+{
+	const unsigned char *tot;
+	size_t tn, hdr, mlen;
+	unsigned char *msg;
+
+	cape_dyn_total_view(&tot, &tn);
+	hdr = 1 + CAPE_DYN_DESC_HDR + t->args_size;
+	mlen = hdr + tn;
+	msg = malloc(mlen);
+	if (msg == NULL)
+		return 1;
+	msg[0] = CAPE_TASK_RUN_DYN;
+	memcpy(msg + 1, &t->fn, sizeof(unsigned long));
+	memcpy(msg + 1 + sizeof(unsigned long), &t->args_size,
+	       sizeof(unsigned long));
+	memcpy(msg + 1 + CAPE_DYN_DESC_HDR, t->args, t->args_size);
+	if (tn != 0)
+		memcpy(msg + hdr, tot, tn);
+	CAPE_DBG("dyn run -> worker=%d id=%ld parent=%ld ckpt=%zu",
+		 worker, t->id, t->parent, tn);
+	cape_ucx_send(msg, mlen, worker, TAG_CKPT_DATA);
+	free(msg);
+	cape_dyn_push(worker, t->id);
+	task_dispatched_jobs++;
+	return 0;
+}
+
+static int cape_dyn_send_done(int worker)
+{
+	const unsigned char *tot;
+	size_t tn, mlen;
+	unsigned char *msg;
+
+	cape_dyn_total_view(&tot, &tn);
+	mlen = 1 + tn;
+	msg = malloc(mlen);
+	if (msg == NULL)
+		return 1;
+	msg[0] = CAPE_TASK_DONE;
+	if (tn != 0)
+		memcpy(msg + 1, tot, tn);
+	CAPE_DBG("dyn done -> worker=%d ckpt=%zu", worker, tn);
+	cape_ucx_send(msg, mlen, worker, TAG_CKPT_DATA);
+	free(msg);
+	return 0;
+}
+
+/* Hand queued tasks to idle workers. */
+static int cape_dyn_try_dispatch(void)
+{
+	while (dyn_q_len > 0 && task_idle_count > 0) {
+		int w = task_idle_workers[--task_idle_count];
+		struct cape_dyn_task *t = cape_dyn_dequeue();
+		int rc;
+
+		task_worker_busy[w] = 1;
+		task_active_workers++;
+		rc = cape_dyn_send_run(w, t);
+		free(t);
+		if (rc != 0)
+			return rc;
+	}
+	return 0;
+}
+
+/* Service workers blocked in taskwait: DONE once their children finished,
+ * else hand them a queued task to run inline (deadlock avoidance). */
+static int cape_dyn_release_waiters(void)
+{
+	int w, rc;
+
+	for (w = 1; w < num_nodes; ++w) {
+		long top;
+		if (!dyn_waiting[w])
+			continue;
+		if (dyn_stk_n[w] <= 0) {   /* defensive: waiter with no task */
+			dyn_waiting[w] = 0;
+			rc = cape_dyn_send_done(w);
+			if (rc != 0)
+				return rc;
+			continue;
+		}
+		top = dyn_stk[w][dyn_stk_n[w] - 1];
+		if (dyn_kids[top] == 0) {
+			dyn_waiting[w] = 0;
+			rc = cape_dyn_send_done(w);
+			if (rc != 0)
+				return rc;
+		} else if (dyn_q_len > 0) {
+			struct cape_dyn_task *t = cape_dyn_dequeue();
+			dyn_waiting[w] = 0;
+			rc = cape_dyn_send_run(w, t);
+			free(t);
+			if (rc != 0)
+				return rc;
+		}
+	}
+	return 0;
+}
+
+static int cape_dyn_handle_complete(int worker, unsigned char *payload,
+				    size_t size)
+{
+	long tid, parent;
+	int rc;
+
+	if (worker <= 0 || worker >= num_nodes || dyn_stk_n[worker] <= 0) {
+		fprintf(stderr,
+			"Monitor %ld: dyn completion from unexpected worker %d\n",
+			node, worker);
+		return 1;
+	}
+	rc = cape_dyn_merge_bytes(payload + 1, size - 1);
+	if (rc != 0)
+		return rc;
+
+	tid = dyn_stk[worker][--dyn_stk_n[worker]];
+	parent = dyn_parent_of[tid];
+	if (parent < 0)
+		dyn_root_children--;
+	else
+		dyn_kids[parent]--;
+	task_completed_jobs++;
+	CAPE_DBG("dyn complete worker=%d id=%ld parent=%ld root_left=%ld",
+		 worker, tid, parent, dyn_root_children);
+
+	if (dyn_stk_n[worker] == 0) {
+		task_worker_busy[worker] = 0;
+		task_idle_workers[task_idle_count++] = worker;
+		task_active_workers--;
+	}
+	rc = cape_dyn_try_dispatch();
+	if (rc == 0)
+		rc = cape_dyn_release_waiters();
+	return rc;
+}
+
+static int cape_dyn_handle_submit(int worker, unsigned char *payload,
+				  size_t size)
+{
+	unsigned long fn, args_size;
+	long parent;
+	int rc;
+
+	if (worker <= 0 || worker >= num_nodes || dyn_stk_n[worker] <= 0) {
+		fprintf(stderr,
+			"Monitor %ld: dyn submit from unexpected worker %d\n",
+			node, worker);
+		return 1;
+	}
+	if (size < 1 + CAPE_DYN_DESC_HDR)
+		return 1;
+	memcpy(&fn, payload + 1, sizeof(unsigned long));
+	memcpy(&args_size, payload + 1 + sizeof(unsigned long),
+	       sizeof(unsigned long));
+	if (args_size > DICKPT_TASK_ARGS_MAX ||
+	    size < 1 + CAPE_DYN_DESC_HDR + args_size)
+		return 1;
+
+	/* The submitter's delta carries the parent's writes-so-far: the new
+	 * task's inputs must be in total before it can be dispatched. */
+	rc = cape_dyn_merge_bytes(payload + 1 + CAPE_DYN_DESC_HDR + args_size,
+				  size - 1 - CAPE_DYN_DESC_HDR - args_size);
+	if (rc != 0)
+		return rc;
+
+	parent = dyn_stk[worker][dyn_stk_n[worker] - 1];
+	cape_dyn_enqueue(parent, fn, args_size,
+			 payload + 1 + CAPE_DYN_DESC_HDR);
+	rc = cape_dyn_try_dispatch();
+	if (rc == 0)
+		rc = cape_dyn_release_waiters();
+	return rc;
+}
+
+static int cape_dyn_handle_wait(int worker)
+{
+	if (worker <= 0 || worker >= num_nodes)
+		return 1;
+	CAPE_DBG("dyn wait from worker=%d", worker);
+	dyn_waiting[worker] = 1;
+	return cape_dyn_release_waiters();
+}
+
+/* Master event pump. Processes every pending control message; if block is
+ * set and nothing was pending, waits until at least one message arrives. */
+static int cape_dyn_pump(int block)
+{
+	int handled = 0;
+
+	for (;;) {
+		ucp_tag_recv_info_t info;
+		ucp_tag_message_h msg;
+		int rc = cape_dyn_try_dispatch();
+
+		if (rc != 0)
+			return rc;
+		msg = ucp_tag_probe_nb(ucp_worker,
+				       CAPE_UCX_TAG(0, TAG_TASK_CTRL),
+				       CAPE_UCX_TAG_TOKEN_MASK, 1, &info);
+		if (msg != NULL) {
+			size_t len = 0;
+			int sender = -1;
+			unsigned char *p = cape_ucx_recv_matched_alloc(msg,
+								       &info,
+								       &len,
+								       &sender);
+			if (len < 1) {
+				free(p);
+				return 1;
+			}
+			switch (p[0]) {
+			case CAPE_TCTL_COMPLETE:
+				rc = cape_dyn_handle_complete(sender, p, len);
+				break;
+			case CAPE_TCTL_SUBMIT:
+				rc = cape_dyn_handle_submit(sender, p, len);
+				break;
+			case CAPE_TCTL_WAIT:
+				rc = cape_dyn_handle_wait(sender);
+				break;
+			default:
+				fprintf(stderr,
+					"Monitor %ld: unknown task ctrl op %u\n",
+					node, (unsigned)p[0]);
+				rc = 1;
+			}
+			free(p);
+			if (rc != 0)
+				return rc;
+			handled = 1;
+			continue;
+		}
+		if (!block || handled)
+			return 0;
+		ucp_worker_progress(ucp_worker);
+	}
+}
+
+/* Master: fold the just-generated final_ckpt into total_ckpt. Copy to the
+ * heap first: merge_external_checkpoint would otherwise alias the scratch
+ * buffer that the next generate_checkpoint reuses. */
+static int cape_dyn_fold_final_into_total(void)
+{
+	unsigned char *buf;
+	size_t n;
+	int rc;
+
+	if (final_ckpt_stream != NULL)
+		fflush(final_ckpt_stream);
+	n = final_ckpt_size;
+	if (final_ckpt == NULL || n == 0) {
+		release_final_checkpoint();
+		return 0;
+	}
+	buf = malloc(n);
+	if (buf == NULL)
+		return 1;
+	memcpy(buf, final_ckpt, n);
+	release_final_checkpoint();
+	rc = cape_dyn_merge_bytes(buf, n);
+	free(buf);
+	return rc;
+}
+
+/* Worker: inject a checkpoint byte range into the app. */
+static int cape_dyn_inject_buf(unsigned char *data, size_t size)
+{
+	FILE *s;
+	size_t sz = size;
+
+	if (size == 0)
+		return 0;
+	s = fmemopen(data, size, "rb");
+	if (s == NULL)
+		return 1;
+	return inject_checkpoint_with_write_access(s, &sz, &save_regs);
+}
+
+/* Read the app-side dickpt_task_desc at desc_addr. */
+static int cape_dyn_read_desc(unsigned long desc_addr, unsigned long *fn,
+			      unsigned long *args_size, unsigned char *args)
+{
+	unsigned long hdr[2];
+
+	if (read_remote_memory(child_id, desc_addr, hdr, sizeof(hdr)) != 0)
+		return 1;
+	*fn = hdr[0];
+	*args_size = hdr[1];
+	if (*args_size > DICKPT_TASK_ARGS_MAX)
+		return 1;
+	if (*args_size != 0 &&
+	    read_remote_memory(child_id, desc_addr + sizeof(hdr), args,
+			       *args_size) != 0)
+		return 1;
+	return 0;
+}
+
+/* Worker: block for the next master directive; on RUN inject the shipped
+ * checkpoint and copy the descriptor into the app's buffer at desc_addr.
+ * Replies 1 (run the desc) or 0 (done/shutdown) to the app via rdx. */
+static int cape_dyn_worker_directive(unsigned long desc_addr)
+{
+	unsigned char *p;
+	size_t n = 0;
+	unsigned long reply = 0;
+	int rc = 0;
+
+	p = cape_ucx_recv_probe_alloc(&n, 0, TAG_CKPT_DATA);
+	if (n < 1) {
+		free(p);
+		return 1;
+	}
+	switch (p[0]) {
+	case CAPE_TASK_RUN_DYN: {
+		unsigned long args_size;
+		size_t hdr;
+
+		if (n < 1 + CAPE_DYN_DESC_HDR) { rc = 1; break; }
+		memcpy(&args_size, p + 1 + sizeof(unsigned long),
+		       sizeof(unsigned long));
+		hdr = 1 + CAPE_DYN_DESC_HDR + args_size;
+		if (args_size > DICKPT_TASK_ARGS_MAX || n < hdr) { rc = 1; break; }
+		rc = cape_dyn_inject_buf(p + hdr, n - hdr);
+		if (rc != 0)
+			break;
+		if (write_remote_memory(child_id, p + 1, desc_addr,
+					CAPE_DYN_DESC_HDR + args_size) != 0) {
+			rc = 1;
+			break;
+		}
+		reply = 1;
+		break;
+	}
+	case CAPE_TASK_DONE:
+		rc = cape_dyn_inject_buf(p + 1, n - 1);
+		reply = 0;
+		break;
+	case CAPE_TASK_SHUTDOWN:
+		reply = 0;
+		break;
+	default:
+		fprintf(stderr, "Monitor %ld: unknown dyn directive %u\n",
+			node, (unsigned)p[0]);
+		rc = 1;
+	}
+	free(p);
+	if (rc == 0)
+		rc = send_int_value_to_child((int)reply);
+	CAPE_DBG("dyn directive handled reply=%lu rc=%d", reply, rc);
+	return rc;
+}
+
+int require_task_spawn(unsigned long desc_addr)
+{
+	unsigned long fn = 0, args_size = 0;
+	unsigned char args[DICKPT_TASK_ARGS_MAX];
+	int rc;
+
+	if (cape_dyn_read_desc(desc_addr, &fn, &args_size, args) != 0) {
+		fprintf(stderr, "Monitor %ld: bad task descriptor\n", node);
+		return 1;
+	}
+	CAPE_DBG("task_spawn node=%ld fn=0x%lx args=%lu", node, fn, args_size);
+
+	if (node == 0) {
+		if (cape_dyn_init() != 0)
+			return 1;
+		/* Capture the master's delta so the task observes everything
+		 * written before its spawn point. */
+		rc = require_generate_checkpoint();
+		if (rc == 0)
+			rc = cape_dyn_fold_final_into_total();
+		if (rc != 0)
+			return rc;
+		cape_dyn_enqueue(-1, fn, args_size, args);
+		return cape_dyn_pump(0);
+	}
+
+	/* Worker: snapshot the parent's writes-so-far and submit. */
+	rc = require_generate_checkpoint();
+	if (rc != 0)
+		return rc;
+	if (final_ckpt_stream != NULL)
+		fflush(final_ckpt_stream);
+	{
+		size_t cn = final_ckpt_size;
+		size_t mlen = 1 + CAPE_DYN_DESC_HDR + args_size + cn;
+		unsigned char *msg = malloc(mlen);
+
+		if (msg == NULL)
+			return 1;
+		msg[0] = CAPE_TCTL_SUBMIT;
+		memcpy(msg + 1, &fn, sizeof(unsigned long));
+		memcpy(msg + 1 + sizeof(unsigned long), &args_size,
+		       sizeof(unsigned long));
+		memcpy(msg + 1 + CAPE_DYN_DESC_HDR, args, args_size);
+		if (cn != 0)
+			memcpy(msg + 1 + CAPE_DYN_DESC_HDR + args_size,
+			       final_ckpt, cn);
+		cape_ucx_send(msg, mlen, 0, TAG_TASK_CTRL);
+		free(msg);
+	}
+	release_final_checkpoint();
+	return 0;
+}
+
+int require_task_serve(unsigned long desc_addr)
+{
+	if (node == 0)
+		return send_int_value_to_child(0);
+	return cape_dyn_worker_directive(desc_addr);
+}
+
+int require_task_wait(unsigned long desc_addr)
+{
+	if (node == 0) {
+		int rc = 0;
+		if (!dyn_ready)
+			return send_int_value_to_child(0);
+		while (dyn_root_children > 0) {
+			rc = cape_dyn_pump(1);
+			if (rc != 0)
+				return rc;
+		}
+		/* Make the children's merged outputs visible to the master app
+		 * (taskwait semantics) without releasing the accumulator. */
+		{
+			const unsigned char *tot;
+			size_t tn;
+			cape_dyn_total_view(&tot, &tn);
+			if (tn != 0 &&
+			    cape_dyn_inject_buf((unsigned char *)tot, tn) != 0)
+				return 1;
+		}
+		return send_int_value_to_child(0);
+	}
+	{
+		unsigned char op = CAPE_TCTL_WAIT;
+		cape_ucx_send(&op, sizeof(op), 0, TAG_TASK_CTRL);
+	}
+	return cape_dyn_worker_directive(desc_addr);
+}
+
+int require_task_complete(void)
+{
+	size_t cn, mlen;
+	unsigned char *msg;
+
+	if (node == 0)
+		return 0;
+	if (final_ckpt_stream != NULL)
+		fflush(final_ckpt_stream);
+	cn = (final_ckpt != NULL) ? final_ckpt_size : 0;
+	mlen = 1 + cn;
+	msg = malloc(mlen);
+	if (msg == NULL)
+		return 1;
+	msg[0] = CAPE_TCTL_COMPLETE;
+	if (cn != 0)
+		memcpy(msg + 1, final_ckpt, cn);
+	cape_ucx_send(msg, mlen, 0, TAG_TASK_CTRL);
+	free(msg);
+	release_final_checkpoint();
+	return 0;
+}
+
+int require_task_region_end(void)
+{
+	int w, rc;
+	unsigned char shutdown_msg = CAPE_TASK_SHUTDOWN;
+
+	if (node != 0)
+		return 0;
+	if (cape_dyn_init() != 0)
+		return 1;
+	while (task_active_workers > 0 || dyn_q_len > 0) {
+		rc = cape_dyn_pump(1);
+		if (rc != 0)
+			return rc;
+	}
+	for (w = 1; w < num_nodes; ++w)
+		cape_ucx_send(&shutdown_msg, sizeof(shutdown_msg), w,
+			      TAG_CKPT_DATA);
+	CAPE_DBG("dyn region end: %lu tasks completed", task_completed_jobs);
+	/* Region-local bookkeeping resets; the worker pool stays ready. */
+	dyn_root_children = 0;
+	dyn_next_id = 0;
+	return 0;
 }
 
 	/* ----------------------------------------
