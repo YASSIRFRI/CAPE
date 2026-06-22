@@ -153,7 +153,7 @@ apps: cape_mamult cape_mamult2d cape_matvec cape_gradient cape_memwrite \
 # make-time and point gcc at its `ld` with -B<dir>/.
 # Only run binutils discovery (and print the [dickpt] info lines) when an
 # actual dickpt target is being built. Cape targets don't need this.
-DICKPT_TARGETS := dickpt dickpt_monitor dickpt_bitmap_monitor dickpt_bitmap_master_slave_monitor dickpt_mul_manual dickpt_matvec_manual dickpt_gradient_manual dickpt_memwrite_manual dickpt_write_stress dickpt_bitmap_write_space_manual dickpt_game_of_life_manual dickpt_task_example dickpt_task_manual dickpt_task_depend_manual dickpt_task_nested_manual
+DICKPT_TARGETS := dickpt dickpt_monitor dickpt_bitmap_monitor dickpt_bitmap_master_slave_monitor dickpt_mul_manual dickpt_matvec_manual dickpt_gradient_manual dickpt_memwrite_manual dickpt_write_stress dickpt_bitmap_write_space_manual dickpt_game_of_life_manual dickpt_task_example dickpt_task_manual dickpt_task_depend_manual dickpt_task_nested_manual dickpt_critical_manual dickpt_atomic_manual dickpt_montecarlo_manual dickpt_nbody_manual dickpt_matmul_manual
 ifneq ($(filter $(DICKPT_TARGETS),$(MAKECMDGOALS)),)
 ifneq ($(EBROOTBINUTILS),)
 DICKPT_BINUTILS_BIN := $(EBROOTBINUTILS)/bin
@@ -243,8 +243,33 @@ dickpt_task_nested_manual:
 	@mkdir -p $(EXE_FOLDER)
 	$(DICKPT_COMPILE) $(C_FOLDER)/apps/cape_task_nested_manual.c $(DICKPT_RUNTIME) -o $(EXE_FOLDER)/dickpt_task_nested_manual
 
+# Transpiler-generated critical-section test (txl tests/test_critical_app.c)
+dickpt_critical_manual:
+	@mkdir -p $(EXE_FOLDER)
+	$(DICKPT_COMPILE) $(C_FOLDER)/apps/cape_critical_manual.c $(DICKPT_RUNTIME) -o $(EXE_FOLDER)/dickpt_critical_manual
+
+# Transpiler-generated atomic test (txl tests/test_atomic.c)
+dickpt_atomic_manual:
+	@mkdir -p $(EXE_FOLDER)
+	$(DICKPT_COMPILE) $(C_FOLDER)/apps/cape_atomic_manual.c $(DICKPT_RUNTIME) -o $(EXE_FOLDER)/dickpt_atomic_manual
+
+# Benchmark: Monte Carlo Pi (embarrassingly parallel / reduction)
+dickpt_montecarlo_manual:
+	@mkdir -p $(EXE_FOLDER)
+	$(DICKPT_COMPILE) $(C_FOLDER)/apps/cape_montecarlo_manual.c $(DICKPT_RUNTIME) -o $(EXE_FOLDER)/dickpt_montecarlo_manual -lm
+
+# Benchmark: N-Body particle simulation (all-to-all)
+dickpt_nbody_manual:
+	@mkdir -p $(EXE_FOLDER)
+	$(DICKPT_COMPILE) $(C_FOLDER)/apps/cape_nbody_manual.c $(DICKPT_RUNTIME) -o $(EXE_FOLDER)/dickpt_nbody_manual -lm
+
+# Benchmark: distributed dense matrix multiply (block / compute-bound)
+dickpt_matmul_manual:
+	@mkdir -p $(EXE_FOLDER)
+	$(DICKPT_COMPILE) $(C_FOLDER)/apps/cape_matmul_manual.c $(DICKPT_RUNTIME) -o $(EXE_FOLDER)/dickpt_matmul_manual -lm
+
 # Build monitor + all dickpt apps
-dickpt: dickpt_monitor dickpt_mul_manual dickpt_matvec_manual dickpt_gradient_manual dickpt_memwrite_manual dickpt_write_stress dickpt_reduction_manual dickpt_task_example dickpt_task_manual dickpt_task_depend_manual dickpt_task_nested_manual
+dickpt: dickpt_monitor dickpt_mul_manual dickpt_matvec_manual dickpt_gradient_manual dickpt_memwrite_manual dickpt_write_stress dickpt_reduction_manual dickpt_task_example dickpt_task_manual dickpt_task_depend_manual dickpt_task_nested_manual dickpt_critical_manual dickpt_atomic_manual dickpt_montecarlo_manual dickpt_nbody_manual dickpt_matmul_manual
 
 # ── Clean ─────────────────────────────────────────────────────────────────────
 cleanall:
@@ -254,7 +279,8 @@ cleanall:
         dickpt dickpt_monitor dickpt_bitmap_monitor dickpt_bitmap_master_slave_monitor dickpt_mul_manual \
         dickpt_matvec_manual dickpt_gradient_manual dickpt_memwrite_manual \
         dickpt_bitmap_write_space_manual dickpt_game_of_life_manual \
-        dickpt_write_stress dickpt_reduction_manual dickpt_task_example dickpt_task_manual dickpt_task_depend_manual dickpt_task_nested_manual \
+        dickpt_write_stress dickpt_reduction_manual dickpt_task_example dickpt_task_manual dickpt_task_depend_manual dickpt_task_nested_manual dickpt_critical_manual dickpt_atomic_manual \
+        dickpt_montecarlo_manual dickpt_nbody_manual dickpt_matmul_manual \
         cape_mamult cape_mamult2d cape_matvec cape_gradient cape_memwrite \
         cape_write_stress cape_bitmap_write_stress \
         cape_pi cape_prime cape_prime_number \

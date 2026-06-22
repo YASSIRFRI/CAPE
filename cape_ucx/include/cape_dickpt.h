@@ -172,6 +172,12 @@ static inline void dickpt_task_region_end(void)
     __cape_signal(S_TASK_REGION_END);
 }
 
+/* critical/atomic section: serialized by rank with checkpoint chaining
+ * (see cape_signal.h). Both calls may block; on return from exit every
+ * rank holds the identical post-section shared state. */
+static inline void dickpt_critical_enter(void) { __cape_signal(S_CRITICAL_ENTER); }
+static inline void dickpt_critical_exit(void)  { __cape_signal(S_CRITICAL_EXIT); }
+
 static inline void dickpt_inject_ckpt(void)  { __cape_signal(S_INJECT_CHECKPOINT); }
 static inline void dickpt_inject_workshare_ckpt(void) { __cape_signal(S_INJECT_WORKSHARE_CHECKPOINT); }
 static inline void dickpt_merge_ckpt(void)   { __cape_signal(S_MERGE_CHECKPOINT); }

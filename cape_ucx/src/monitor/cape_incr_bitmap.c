@@ -2128,6 +2128,10 @@ static void cape_ucx_recv(void *buf, size_t len, int src, uint32_t token)
  * always processed after the SUBMITs it issued, and before the WAIT the
  * worker sends when it re-enters taskwait. */
 #define TAG_TASK_CTRL     0x07
+/* critical/atomic checkpoint chain: rank k -> k+1 state hand-off, and the
+ * last rank's broadcast of the final section state to everyone else. */
+#define TAG_CRIT_CHAIN    0x08
+#define TAG_CRIT_FINAL    0x09
 #define TAG_ALLREDUCE_BASE 0x100
 
 static const char *cape_ucx_bootstrap_id(void)
@@ -2573,6 +2577,8 @@ int require_task_serve(unsigned long desc_addr);
 int require_task_wait(unsigned long desc_addr);
 int require_task_complete(void);
 int require_task_region_end(void);
+int require_critical_enter(void);
+int require_critical_exit(void);
 int require_inject_checkpoint();
 int require_waitfor_checkpoint();
 int require_broadcast_checkpoint();
@@ -2847,6 +2853,16 @@ int main(int argc, char * argv[]){
 
 						case S_TASK_REGION_END:
 							rc = require_task_region_end();
+							if (rc!=0) exit(1);
+							break;
+
+						case S_CRITICAL_ENTER:
+							rc = require_critical_enter();
+							if (rc!=0) exit(1);
+							break;
+
+						case S_CRITICAL_EXIT:
+							rc = require_critical_exit();
 							if (rc!=0) exit(1);
 							break;
 
@@ -4691,6 +4707,132 @@ int require_task_region_end(void)
 	/* Region-local bookkeeping resets; the worker pool stays ready. */
 	dyn_root_children = 0;
 	dyn_next_id = 0;
+	return 0;
+}
+
+/* ==========================================================================
+ * critical / atomic: rank-serialized section with checkpoint chaining.
+ * Rank 0 runs first; rank k>0 blocks in ENTER until rank k-1's EXIT ships
+ * the accumulated section state (injected on receipt). EXIT folds this
+ * rank's delta into the state, forwards it down the chain, and the last
+ * rank broadcasts the final state so every rank leaves the section with
+ * identical shared memory.
+ * ==========================================================================
+ */
+static unsigned char *crit_in;        /* predecessor's accumulated state */
+static size_t crit_in_size;
+
+/* Merge two checkpoints into a fresh heap buffer; delta wins conflicts.
+ * Both must share the standard [timespan][regs][BMP section] layout. */
+static unsigned char *cape_merge_ckpt_pair(unsigned char *base, size_t base_n,
+					   unsigned char *delta, size_t delta_n,
+					   size_t *out_n)
+{
+	FILE *out;
+	unsigned char *out_buf = NULL;
+	struct bmp_section_view base_bmp, delta_bmp;
+	size_t payload_pos = sizeof(unsigned long) +
+			     sizeof(struct user_regs_struct);
+	int rc = 1;
+
+	*out_n = 0;
+	if (base_n < payload_pos || delta_n < payload_pos)
+		return NULL;
+	memset(&base_bmp, 0, sizeof(base_bmp));
+	memset(&delta_bmp, 0, sizeof(delta_bmp));
+	out = open_binary_memstream(&out_buf, out_n);
+	if (out == NULL)
+		return NULL;
+	if (parse_bitmap_section(base, base_n, payload_pos, &base_bmp) == 0 &&
+	    parse_bitmap_section(delta, delta_n, payload_pos, &delta_bmp) == 0 &&
+	    fwrite(delta, payload_pos, 1, out) == 1 &&
+	    merge_bitmap_sections(out, &base_bmp, &delta_bmp) == 0)
+		rc = 0;
+	free_bitmap_section(&base_bmp);
+	free_bitmap_section(&delta_bmp);
+	fclose(out);
+	if (rc != 0) {
+		free(out_buf);
+		return NULL;
+	}
+	return out_buf;
+}
+
+int require_critical_enter(void)
+{
+	if (num_nodes <= 1 || node == 0)
+		return 0;
+	free(crit_in);
+	crit_in = NULL;
+	crit_in_size = 0;
+	crit_in = cape_ucx_recv_probe_alloc(&crit_in_size, (int)node - 1,
+					    TAG_CRIT_CHAIN);
+	CAPE_DBG("critical_enter got state size=%zu", crit_in_size);
+	if (crit_in_size == 0) {
+		free(crit_in);
+		crit_in = NULL;
+		return 1;
+	}
+	return cape_dyn_inject_buf(crit_in, crit_in_size);
+}
+
+int require_critical_exit(void)
+{
+	unsigned char *state = NULL;
+	size_t state_n = 0;
+	int rc;
+
+	if (num_nodes <= 1)
+		return 0;
+
+	/* This rank's section delta. */
+	rc = require_generate_checkpoint();
+	if (rc != 0)
+		return rc;
+	if (final_ckpt_stream != NULL)
+		fflush(final_ckpt_stream);
+	if (final_ckpt == NULL || final_ckpt_size == 0) {
+		release_final_checkpoint();
+		return 1;
+	}
+
+	if (crit_in != NULL) {
+		state = cape_merge_ckpt_pair(crit_in, crit_in_size,
+					     final_ckpt, final_ckpt_size,
+					     &state_n);
+		free(crit_in);
+		crit_in = NULL;
+		crit_in_size = 0;
+	} else {
+		state = malloc(final_ckpt_size);
+		if (state != NULL) {
+			memcpy(state, final_ckpt, final_ckpt_size);
+			state_n = final_ckpt_size;
+		}
+	}
+	release_final_checkpoint();
+	if (state == NULL)
+		return 1;
+	CAPE_DBG("critical_exit state size=%zu", state_n);
+
+	if ((int)node < num_nodes - 1) {
+		cape_ucx_send(state, state_n, (int)node + 1, TAG_CRIT_CHAIN);
+		free(state);
+		/* Adopt the final section state from the last rank. */
+		state = cape_ucx_recv_probe_alloc(&state_n, num_nodes - 1,
+						  TAG_CRIT_FINAL);
+		rc = cape_dyn_inject_buf(state, state_n);
+		free(state);
+		return rc;
+	}
+
+	/* Last rank already holds the final state in memory: publish it. */
+	{
+		int i;
+		for (i = 0; i < num_nodes - 1; ++i)
+			cape_ucx_send(state, state_n, i, TAG_CRIT_FINAL);
+	}
+	free(state);
 	return 0;
 }
 

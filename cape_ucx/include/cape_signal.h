@@ -50,6 +50,17 @@
  *     queued task to run inline (avoiding deadlock when all workers wait).
  *   - S_TASK_REGION_END (master only) drains everything, then broadcasts
  *     SHUTDOWN so workers fall out of their serve loops. */
+/* ===== critical / atomic =====
+ * Serialized cross-rank section with checkpoint chaining. Ranks run the
+ * body in rank order: rank k>0 blocks in ENTER until rank k-1's EXIT ships
+ * it the accumulated section state (injected on receipt). EXIT generates
+ * this rank's delta, merges it into the accumulated state, forwards it to
+ * rank k+1, and blocks until the last rank broadcasts the final state,
+ * which every other rank injects — so all ranks leave the section with
+ * identical shared state. Single-rank runs are a no-op. */
+#define S_CRITICAL_ENTER   42
+#define S_CRITICAL_EXIT    43
+
 #define S_TASK_SPAWN       37
 #define S_TASK_SERVE       38
 #define S_TASK_WAIT        39

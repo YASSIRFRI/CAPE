@@ -313,10 +313,14 @@ end function
 % declarator so it lands on its own anonymous page (see addGlobalVarsToMain).
 rule alignSharedDeclarators
 	replace [init_declarator]
+		ID [init_declarator]
+	% the attribute can parse into the declarator or the trailing
+	% attribute list depending on position: search the whole thing
+	where not
+		ID [hasAlignedAttribute]
+	deconstruct ID
 		Dtor [declarator] Init [opt initialization]
 		Attrs [repeat attributes_or_asm]
-	where not
-		Attrs [hasAlignedAttribute]
 	construct PageAlign [attributes_or_asm]
 		'__attribute__ '(( 'aligned '( 4096 ') '))
 	by

@@ -12,6 +12,7 @@
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 keys
+	atomic
 	automic
 	barrier
 	critical
@@ -74,6 +75,7 @@ define omp_construct
 		|	[critical_construct]
 	|	[barrier_construct]
 	|	[automic_construct] 
+	|	[atomic_construct]
 	|	[flush_construct]
 	|	ordered
 end define
@@ -147,6 +149,13 @@ end define
 define automic_construct
 		automic [NL]
 		[compound_statement]
+end define
+
+% Real OpenMP spelling: atomic applies to the following expression
+% statement (optionally a compound, treated like a critical section).
+define atomic_construct
+		atomic [NL]
+		[statement]
 end define
 
 define flush_construct

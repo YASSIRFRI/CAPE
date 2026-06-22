@@ -48,6 +48,7 @@ rule replaceConstruct
 						[replaceCritical]
 					[replaceBarrier]
 					[replaceAutomic]
+					[replaceAtomic]
 					[replaceFlush]
 	where not
 		NewConstruct [= Construct]
@@ -848,25 +849,19 @@ end function
 %			CRITICAL CONSTRUCT REPLACEMENT 			  	%
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-% Critical: serialize execution across nodes using barriers.
+% Critical: rank-serialized section with checkpoint chaining. enter
+% blocks until the predecessor rank's accumulated section state arrives
+% (injected by the monitor); exit generates this rank's delta, merges and
+% forwards the state, and syncs the final state to every rank.
 function replaceCritical
 	replace [directives]
 		'#pragma omp critical
 		CompoundStatement [compound_statement]
 
-	construct DickptBarrier [dickpt_barrier]
-		'dickpt_waitfor_ckpt();
-
-	construct NewDickptCritical [dickpt_automic_critical]
-		{
-			'unsigned 'long __i__;
-			for (__i__ = 0 '; __i__ < 'dickpt_read_num_nodes'(') '; __i__ ++)
-			{
-				if (__i__ == 'dickpt_read_node'('))
-					CompoundStatement
-				DickptBarrier
-			}
-		}
+	construct NewDickptCritical [dickpt_critical]
+		'dickpt_critical_enter();
+		CompoundStatement
+		'dickpt_critical_exit();
 	by
 		NewDickptCritical
 end function
@@ -875,48 +870,61 @@ end function
 %			BARRIER CONSTRUCT REPLACEMENT 			  	%
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
+% Barrier: generate + allreduce = collective merge/inject on every rank.
 function replaceBarrier
 	replace [directives]
 		'#pragma omp barrier
+	construct NewBarrier [dickpt_barrier]
+		'dickpt_generate_ckpt();
+		'dickpt_allreduce_ckpt();
 	by
-		'dickpt_waitfor_ckpt();
+		NewBarrier
 end function
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %			AUTOMIC CONSTRUCT REPLACEMENT 			  	%
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
+% atomic = a one-statement critical section: same checkpoint chain.
+% (Legacy 'automic' spelling with a compound body is kept working.)
 function replaceAutomic
 	replace [directives]
 		'#pragma omp automic
 		CompoundStatement [compound_statement]
 
-	construct DickptBarrier [dickpt_barrier]
-		'dickpt_waitfor_ckpt();
-
-	construct NewDickptAutomic [dickpt_automic_critical]
-		{
-			'unsigned 'long __i__;
-			for (__i__ = 0 '; __i__ < 'dickpt_read_num_nodes'(') '; __i__ ++)
-			{
-				if (__i__ == 'dickpt_read_node'('))
-					CompoundStatement
-				DickptBarrier
-			}
-		}
+	construct NewDickptAutomic [dickpt_critical]
+		'dickpt_critical_enter();
+		CompoundStatement
+		'dickpt_critical_exit();
 	by
 		NewDickptAutomic
+end function
+
+function replaceAtomic
+	replace [directives]
+		'#pragma omp atomic
+		Statement [statement]
+
+	construct NewDickptAtomic [dickpt_critical]
+		'dickpt_critical_enter();
+		Statement
+		'dickpt_critical_exit();
+	by
+		NewDickptAtomic
 end function
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %			FLUSH CONSTRUCT REPLACEMENT 			  	%
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-% Flush = generate a checkpoint at this PC so dirty pages
-% become visible. The PC identifies this synchronization point.
+% Flush: no-op (see dickpt_flush in CAPE_DICKPT.Grm). Dirty pages stay
+% tracked until the next collective sync; generating here would strand
+% the delta, and flush must not block (it is not collective).
 function replaceFlush
 	replace [directives]
 		'#pragma omp FlushConstruct [flush_construct]
+	construct NewFlush [dickpt_flush]
+		';
 	by
-		'dickpt_generate_ckpt();
+		NewFlush
 end function

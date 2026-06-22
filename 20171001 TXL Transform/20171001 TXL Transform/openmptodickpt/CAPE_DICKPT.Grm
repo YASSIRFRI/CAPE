@@ -249,6 +249,15 @@ end define
 
 % ── Synchronization (inside parallel) ────────────────
 
+% critical/atomic: rank-serialized with checkpoint chaining. enter blocks
+% until the predecessor rank's section state arrives (and injects it);
+% exit forwards this rank's merged state and syncs the final state to all.
+define dickpt_critical
+	'dickpt_critical_enter(); [NL]
+	[statement]
+	'dickpt_critical_exit(); [NL]
+end define
+
 define dickpt_automic_critical
 	{											[IN] [NL]
 		'unsigned 'long __i__;					[NL]
@@ -261,14 +270,23 @@ define dickpt_automic_critical
 	}											[EX] [NL]
 end define
 
+% Barrier: symmetric collective sync. Every rank generates its delta and
+% allreduces it (ring/hypercube merge + inject), so all ranks block here
+% and leave with identical shared state. The old bare waitfor deadlocked:
+% the master waited for checkpoints the workers never sent.
 define dickpt_barrier
-	'dickpt_waitfor_ckpt(); [NL]
+	'dickpt_generate_ckpt(); [NL]
+	'dickpt_allreduce_ckpt(); [NL]
 end define
 
-% Flush = generate a checkpoint so dirty pages become
-% visible to the monitor. The PC identifies this point.
+% Flush: intentionally a no-op. Dirty pages stay on the monitor's fault
+% list until the next collective sync (barrier/allreduce/region end), so
+% nothing is lost. Generating here would strand the delta: the next
+% generate overwrites the final-ckpt scratch and the flushed writes
+% would never reach a merge. Flush is also not collective in OpenMP, so
+% it must not block.
 define dickpt_flush
-	'dickpt_generate_ckpt(); [NL]
+	'; [NL]
 end define
 
 define dickpt_allreduce
@@ -290,6 +308,7 @@ define dickpt_construct
 		|	[dickpt_task_region_dyn]
 		|	[dickpt_taskwait]
 		|	[dickpt_master]
+	|	[dickpt_critical]
 	|	[dickpt_automic_critical]
 	|	[dickpt_flush]
 	|	[dickpt_barrier]

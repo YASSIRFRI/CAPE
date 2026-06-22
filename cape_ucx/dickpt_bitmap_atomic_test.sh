@@ -1,11 +1,11 @@
 #!/bin/bash
-#SBATCH --job-name=dickpt_bitmap_task_nested_test
+#SBATCH --job-name=dickpt_bitmap_atomic_test
 #SBATCH --nodes=4
 #SBATCH --ntasks=4
 #SBATCH --ntasks-per-node=1
 #SBATCH --time=00:30:00
-#SBATCH --output=dickpt_bitmap_task_nested_test_%j.out
-#SBATCH --error=dickpt_bitmap_task_nested_test_%j.err
+#SBATCH --output=dickpt_bitmap_atomic_test_%j.out
+#SBATCH --error=dickpt_bitmap_atomic_test_%j.err
 #SBATCH --partition=compute
 
 set -euo pipefail
@@ -16,15 +16,15 @@ PROJECT_DIR="${PROJECT_DIR:-${SLURM_SUBMIT_DIR:-${SCRIPT_DIR}}}"
 cd "${PROJECT_DIR}"
 
 JOB_TAG="${SLURM_JOB_ID:-local_$$}"
-RESULTS_DIR="${RESULTS_DIR:-${SLURM_SUBMIT_DIR:-${PROJECT_DIR}}/results/dickpt_bitmap_task_nested_test_${JOB_TAG}}"
+RESULTS_DIR="${RESULTS_DIR:-${SLURM_SUBMIT_DIR:-${PROJECT_DIR}}/results/dickpt_bitmap_atomic_test_${JOB_TAG}}"
 mkdir -p "${RESULTS_DIR}" 2>/dev/null || {
-    RESULTS_DIR="/tmp/${USER}/dickpt_bitmap_task_nested_test_${JOB_TAG}"
+    RESULTS_DIR="/tmp/${USER}/dickpt_bitmap_atomic_test_${JOB_TAG}"
     mkdir -p "${RESULTS_DIR}"
 }
 
-BUILD_DIR="${BUILD_DIR:-${SLURM_SUBMIT_DIR:-/tmp/${USER}}/cape_build_dickpt_bitmap_task_nested_${JOB_TAG}}"
+BUILD_DIR="${BUILD_DIR:-${SLURM_SUBMIT_DIR:-/tmp/${USER}}/cape_build_dickpt_bitmap_atomic_${JOB_TAG}}"
 mkdir -p "${BUILD_DIR}/bin" "${BUILD_DIR}/obj" "${BUILD_DIR}/lib" 2>/dev/null || {
-    BUILD_DIR="/tmp/${USER}/cape_build_dickpt_bitmap_task_nested_${JOB_TAG}"
+    BUILD_DIR="/tmp/${USER}/cape_build_dickpt_bitmap_atomic_${JOB_TAG}"
     mkdir -p "${BUILD_DIR}/bin" "${BUILD_DIR}/obj" "${BUILD_DIR}/lib"
 }
 
@@ -77,21 +77,21 @@ MAKE_ARGS=(
 
 make -C "${PROJECT_DIR}" cleanall \
     EXE_FOLDER="${BUILD_DIR}/bin" O_FOLDER="${BUILD_DIR}/obj" L_FOLDER="${BUILD_DIR}/lib" 2>/dev/null || true
-make -C "${PROJECT_DIR}" dickpt_bitmap_monitor dickpt_task_nested_manual PROFILE="${PROFILE}" "${MAKE_ARGS[@]}"
+make -C "${PROJECT_DIR}" dickpt_bitmap_monitor dickpt_atomic_manual PROFILE="${PROFILE}" "${MAKE_ARGS[@]}"
 
 MONITOR="${BUILD_DIR}/bin/cape_dickpt_bitmap_monitor"
-BIN="${BUILD_DIR}/bin/dickpt_task_nested_manual"
-TOTAL_NODES="${SLURM_JOB_NUM_NODES:-4}"✶ Hyperspacing… (4m 37s · ↓ 16.1k tokens · thinking some more with low effort)
+BIN="${BUILD_DIR}/bin/dickpt_atomic_manual"
+TOTAL_NODES="${SLURM_JOB_NUM_NODES:-4}"
 
-echo "Testing DICKPT bitmap dynamic (nested/recursive) OpenMP task scheduling"
-echo "DICKPT:  src/apps/cape_task_nested_manual.c -> ${BIN}"
+echo "Testing DICKPT bitmap OpenMP atomic (checkpoint-chained)"
+echo "DICKPT:  src/apps/cape_atomic_manual.c -> ${BIN}"
 echo "Monitor: src/monitor/cape_incr_bitmap.c -> ${MONITOR}"
 echo "Nodes: ${NODES_LIST[*]}  Reps: ${REPS}  MPI mode: ${SRUN_MPI_MODE}"
 echo "Results dir: ${RESULTS_DIR}"
 
 run_one() {
     local nn="$1"
-    local tag="dickpt_bitmap_task_nested_nodes${nn}_reps${REPS}"
+    local tag="dickpt_bitmap_atomic_nodes${nn}_reps${REPS}"
     local log="${RESULTS_DIR}/${tag}.log"
     local bid="${JOB_TAG}_${tag}"
     local bdir="${BOOTSTRAP_ROOT}/${bid}"
@@ -116,8 +116,8 @@ run_one() {
         echo "[fail] ${tag} rc=${rc} log=${log}" >&2
         return "${rc}"
     fi
-    if ! grep -q "TASK_NESTED_RESULT" "${log}"; then
-        echo "[fail] ${tag}: missing TASK_NESTED_RESULT in ${log}" >&2
+    if ! grep -q "ATOMIC_RESULT" "${log}"; then
+        echo "[fail] ${tag}: missing ATOMIC_RESULT in ${log}" >&2
         return 1
     fi
 

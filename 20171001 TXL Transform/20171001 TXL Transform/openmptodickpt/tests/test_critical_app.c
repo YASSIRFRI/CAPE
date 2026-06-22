@@ -42,8 +42,21 @@ int main(int argc, char **argv) {
         }
     }
 
-    for (j = 0; j < D; j++)
-        printf("total[%d] = %lld\n", j, total[j]);
+    {
+        long long expected[D];
+        int ok = 1;
 
-    return 0;
+        for (j = 0; j < D; j++)
+            expected[j] = 0;
+        for (i = 0; i < N; i++)
+            for (j = 0; j < D; j++)
+                expected[j] += x[i][j];
+        for (j = 0; j < D; j++) {
+            if (total[j] != expected[j])
+                ok = 0;
+            printf("total[%d] = %lld expected %lld\n", j, total[j], expected[j]);
+        }
+        printf("CRITICAL_RESULT ok=%d\n", ok);
+        return ok ? 0 : 1;
+    }
 }

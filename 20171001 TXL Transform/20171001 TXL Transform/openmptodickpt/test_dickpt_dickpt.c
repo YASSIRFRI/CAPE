@@ -27,7 +27,9 @@ int main (int argc, char * * argv) {
             printf ("Fib(%lld): %lld\n", n, fib (n));
         }
         dickpt_generate_ckpt ();
+        dickpt_allreduce_ckpt ();
         dickpt_stop_ckpt ();
+        dickpt_unregister_level (1);
     }
     return 0;
 }
