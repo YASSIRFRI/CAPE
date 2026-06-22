@@ -1476,11 +1476,18 @@ static size_t ucx_scratch_total_in_cap;
 static size_t ucx_scratch_initial_cap;
 static int total_ckpt_uses_scratch;
 
+/* Verbose per-event tracing. Off by default — it does an fprintf+fflush on
+ * every SIGTRAP and every UCX wait, which dominates the runtime and serialises
+ * the monitor. Build with -DCAPE_DEBUG to re-enable for debugging. */
+#ifdef CAPE_DEBUG
 #define CAPE_DBG(fmt, args...) do { \
 	fprintf(stderr, "CAPE_DBG rank=%ld pid=%d: " fmt "\n", \
 		node, getpid(), ## args); \
 	fflush(stderr); \
 } while (0)
+#else
+#define CAPE_DBG(fmt, args...) do { } while (0)
+#endif
 
 /* Per-request state allocated by UCX in the request headroom */
 typedef struct {

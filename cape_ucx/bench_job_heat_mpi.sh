@@ -16,8 +16,8 @@ set -euo pipefail
 APP="heat"
 SRC_NAME="mpi_heat.c"
 BIN_NAME="mpi_heat"
-N_DIM="${N_DIM:-4096}"
-N_ITERS="${N_ITERS:-200}"
+N_DIM="${N_DIM:-2048}"
+N_ITERS="${N_ITERS:-50}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="${PROJECT_DIR:-${SLURM_SUBMIT_DIR:-${SCRIPT_DIR}}}"

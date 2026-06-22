@@ -16,9 +16,9 @@ set -euo pipefail
 APP="heat"
 TARGET="dickpt_heat_manual"
 BIN_NAME="dickpt_heat_manual"
-# Grid dimension N (square, <= MAX_N=4096 in the app) and Jacobi iterations.
-N_DIM="${N_DIM:-4096}"
-N_ITERS="${N_ITERS:-200}"
+# Grid dimension N (square, <= MAX_N=8192 in the app) and Jacobi iterations.
+N_DIM="${N_DIM:-2048}"
+N_ITERS="${N_ITERS:-50}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="${PROJECT_DIR:-${SLURM_SUBMIT_DIR:-${SCRIPT_DIR}}}"
