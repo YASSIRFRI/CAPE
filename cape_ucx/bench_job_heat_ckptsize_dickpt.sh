@@ -50,7 +50,7 @@ mkdir -p "${BUILD_DIR}/bin" "${BUILD_DIR}/obj" "${BUILD_DIR}/lib" 2>/dev/null ||
 BOOTSTRAP_ROOT="${BOOTSTRAP_ROOT:-${BUILD_DIR}/ucx_bootstrap}"
 mkdir -p "${BOOTSTRAP_ROOT}"
 
-NODES_LIST=(${NODES_LIST:-64})
+NODES_LIST=(${NODES_LIST:-32})
 # One run per node count is enough to characterise the size curve.
 REPS=1
 PROFILE="${PROFILE:-0}"
