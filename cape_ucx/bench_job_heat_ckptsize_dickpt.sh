@@ -30,7 +30,9 @@ BIN_NAME="dickpt_heat_manual"
 # Grid dimension N (square, <= MAX_N=8192) and number of Jacobi iterations.
 # Use enough iterations to watch the dirty front sweep across the grid.
 N_DIM="${N_DIM:-1024}"
-N_ITERS="${N_ITERS:-1000}"
+# The dirty front advances ~1 row/iter, so to saturate the last stripe we need
+# a bit more than N iterations (last interior row ~N-2) plus margin to plateau.
+N_ITERS="${N_ITERS:-1300}"
 # Log every iteration (stride 1) — we want the full saturation curve, not timing.
 export CAPE_CKPT_SIZE_STRIDE="${CAPE_CKPT_SIZE_STRIDE:-1}"
 
