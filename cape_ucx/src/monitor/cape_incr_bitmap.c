@@ -636,6 +636,23 @@ size_t mbefore_ckpt_size=0;
 
 int task_ckpt_size=0; //size of a workshare checkpoint
 
+/* Opt-in per-iteration checkpoint-size logging. Enabled by setting the env
+ * var CAPE_CKPT_SIZE_LOG=1 (the dedicated benchmark job does this). When on,
+ * every app dickpt_generate_ckpt() emits one CKPT_SIZE line with the bytes
+ * this rank's delta occupies, so we can watch the dirty set grow as the
+ * (e.g. heat-diffusion) front propagates. Off by default — zero overhead. */
+static int cape_ckpt_size_log = -1;       /* -1 = not yet resolved */
+static long cape_ckpt_size_seq = 0;       /* per-rank generate counter */
+
+static int cape_ckpt_size_log_enabled(void)
+{
+	if (cape_ckpt_size_log < 0) {
+		const char *e = getenv("CAPE_CKPT_SIZE_LOG");
+		cape_ckpt_size_log = (e != NULL && e[0] != '\0' && e[0] != '0');
+	}
+	return cape_ckpt_size_log;
+}
+
 //receive buffer
 unsigned char *before_buffer;
 
@@ -2790,9 +2807,16 @@ int main(int argc, char * argv[]){
 						}
 						break;		
 									
-					case S_GENERATE_CHECKPOINT: 
-						rc = require_generate_checkpoint();						
-						if(rc != 0)	exit(1);		
+					case S_GENERATE_CHECKPOINT:
+						rc = require_generate_checkpoint();
+						if(rc != 0)	exit(1);
+						if (cape_ckpt_size_log_enabled()) {
+							/* One record per app generate = one per iteration. */
+							printf("CKPT_SIZE rank=%ld iter=%ld bytes=%zu\n",
+							       node, ++cape_ckpt_size_seq,
+							       final_ckpt_size);
+							fflush(stdout);
+						}
 						break;
 						
 					case S_SEND_CHECKPOINT:	
