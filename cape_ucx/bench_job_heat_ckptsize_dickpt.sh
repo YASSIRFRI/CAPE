@@ -14,8 +14,9 @@
 # the incremental checkpoint (the dirty delta DICKPT actually ships) should be
 # TINY in the first iterations and grow as the front propagates across the
 # grid. This job runs the heat solver with the monitor's per-iteration size
-# logging on (CAPE_CKPT_SIZE_LOG=1), REPS=1 so iter maps 1:1, at 8/16/32/64
-# nodes, and writes one CSV: impl,app,nodes,rank,iter,kind,bytes,job_id
+# logging on (CAPE_CKPT_SIZE_LOG=1), REPS=1 so iter maps 1:1, on 64 nodes
+# (N=1024, 1000 iters so the dirty front traverses the whole grid), and
+# writes one CSV: impl,app,nodes,rank,iter,kind,bytes,job_id
 # (kind=local: per-rank delta; kind=merged: global union shipped, rank 0).
 # Iterations are sampled (dense for the first 16, then every
 # CAPE_CKPT_SIZE_STRIDE=10) so long runs stay readable while still showing
@@ -29,7 +30,7 @@ BIN_NAME="dickpt_heat_manual"
 # Grid dimension N (square, <= MAX_N=8192) and number of Jacobi iterations.
 # Use enough iterations to watch the dirty front sweep across the grid.
 N_DIM="${N_DIM:-1024}"
-N_ITERS="${N_ITERS:-200}"
+N_ITERS="${N_ITERS:-1000}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="${PROJECT_DIR:-${SLURM_SUBMIT_DIR:-${SCRIPT_DIR}}}"
@@ -45,7 +46,7 @@ mkdir -p "${BUILD_DIR}/bin" "${BUILD_DIR}/obj" "${BUILD_DIR}/lib" 2>/dev/null ||
 BOOTSTRAP_ROOT="${BOOTSTRAP_ROOT:-${BUILD_DIR}/ucx_bootstrap}"
 mkdir -p "${BOOTSTRAP_ROOT}"
 
-NODES_LIST=(${NODES_LIST:-8 16 32 64})
+NODES_LIST=(${NODES_LIST:-64})
 # One run per node count is enough to characterise the size curve.
 REPS=1
 PROFILE="${PROFILE:-0}"
