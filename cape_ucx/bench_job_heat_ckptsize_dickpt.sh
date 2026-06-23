@@ -15,7 +15,11 @@
 # TINY in the first iterations and grow as the front propagates across the
 # grid. This job runs the heat solver with the monitor's per-iteration size
 # logging on (CAPE_CKPT_SIZE_LOG=1), REPS=1 so iter maps 1:1, at 8/16/32/64
-# nodes, and writes one CSV: impl,app,nodes,rank,iter,bytes,job_id
+# nodes, and writes one CSV: impl,app,nodes,rank,iter,kind,bytes,job_id
+# (kind=local: per-rank delta; kind=merged: global union shipped, rank 0).
+# Iterations are sampled (dense for the first 16, then every
+# CAPE_CKPT_SIZE_STRIDE=10) so long runs stay readable while still showing
+# the full evolution.
 
 set -euo pipefail
 
@@ -93,7 +97,9 @@ BIN="${BUILD_DIR}/bin/${BIN_NAME}"
 TOTAL_NODES="${SLURM_JOB_NUM_NODES:-64}"
 
 CSV="${RESULTS_DIR}/bench_${APP}_ckptsize_${JOB_TAG}.csv"
-echo "impl,app,nodes,rank,iter,bytes,job_id" > "${CSV}"
+# kind=local : this rank's per-iteration delta. kind=merged : global union
+# (total bytes shipped), reported once by rank 0.
+echo "impl,app,nodes,rank,iter,kind,bytes,job_id" > "${CSV}"
 
 echo "Per-iteration DICKPT checkpoint size for ${APP}"
 echo "App:     src/apps/cape_${APP}_manual.c -> ${BIN}"
@@ -124,9 +130,9 @@ run_one() {
 
     awk -v impl="dickpt" -v app="${APP}" -v nn="${nn}" -v job="${JOB_TAG}" '
         /^CKPT_SIZE / {
-            rank=""; iter=""; bytes="";
-            for (i=1;i<=NF;i++) { split($i,kv,"="); if(kv[1]=="rank")rank=kv[2]; if(kv[1]=="iter")iter=kv[2]; if(kv[1]=="bytes")bytes=kv[2]; }
-            if (rank!="" && iter!="" && bytes!="") printf "%s,%s,%s,%s,%s,%s,%s\n", impl,app,nn,rank,iter,bytes,job;
+            rank=""; iter=""; kind=""; bytes="";
+            for (i=1;i<=NF;i++) { split($i,kv,"="); if(kv[1]=="rank")rank=kv[2]; if(kv[1]=="iter")iter=kv[2]; if(kv[1]=="kind")kind=kv[2]; if(kv[1]=="bytes")bytes=kv[2]; }
+            if (rank!="" && iter!="" && bytes!="") printf "%s,%s,%s,%s,%s,%s,%s,%s\n", impl,app,nn,rank,iter,kind,bytes,job;
         }' "${log}" >> "${CSV}"
     echo "[done]   ${tag}"
 }

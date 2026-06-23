@@ -638,10 +638,17 @@ int task_ckpt_size=0; //size of a workshare checkpoint
 
 /* Opt-in per-iteration checkpoint-size logging. Enabled by setting the env
  * var CAPE_CKPT_SIZE_LOG=1 (the dedicated benchmark job does this). When on,
- * every app dickpt_generate_ckpt() emits one CKPT_SIZE line with the bytes
- * this rank's delta occupies, so we can watch the dirty set grow as the
- * (e.g. heat-diffusion) front propagates. Off by default — zero overhead. */
+ * every app dickpt_generate_ckpt() emits a CKPT_SIZE line with kind=local
+ * (this rank's delta) and, after the allreduce, rank 0 emits kind=merged
+ * (the global union actually shipped). We can then watch the dirty set grow
+ * as the (e.g. heat-diffusion) front propagates. Off by default — zero
+ * overhead.
+ *
+ * To keep long runs readable, iterations are sampled: the first 16 are always
+ * logged (so the small early ramp is dense), then every CAPE_CKPT_SIZE_STRIDE
+ * (default 10) thereafter. Set the stride to 1 to log every iteration. */
 static int cape_ckpt_size_log = -1;       /* -1 = not yet resolved */
+static long cape_ckpt_size_stride = 0;    /* 0 = not yet resolved */
 static long cape_ckpt_size_seq = 0;       /* per-rank generate counter */
 
 static int cape_ckpt_size_log_enabled(void)
@@ -651,6 +658,21 @@ static int cape_ckpt_size_log_enabled(void)
 		cape_ckpt_size_log = (e != NULL && e[0] != '\0' && e[0] != '0');
 	}
 	return cape_ckpt_size_log;
+}
+
+/* True if this iteration should be recorded (dense early, strided later). */
+static int cape_ckpt_size_sampled(long iter)
+{
+	if (cape_ckpt_size_stride == 0) {
+		const char *e = getenv("CAPE_CKPT_SIZE_STRIDE");
+		cape_ckpt_size_stride = (e != NULL && e[0] != '\0')
+					? strtol(e, NULL, 10) : 10;
+		if (cape_ckpt_size_stride < 1)
+			cape_ckpt_size_stride = 1;
+	}
+	if (iter <= 16)
+		return 1;
+	return (iter % cape_ckpt_size_stride) == 0;
 }
 
 //receive buffer
@@ -2812,10 +2834,12 @@ int main(int argc, char * argv[]){
 						if(rc != 0)	exit(1);
 						if (cape_ckpt_size_log_enabled()) {
 							/* One record per app generate = one per iteration. */
-							printf("CKPT_SIZE rank=%ld iter=%ld bytes=%zu\n",
-							       node, ++cape_ckpt_size_seq,
-							       final_ckpt_size);
-							fflush(stdout);
+							long it = ++cape_ckpt_size_seq;
+							if (cape_ckpt_size_sampled(it)) {
+								printf("CKPT_SIZE rank=%ld iter=%ld kind=local bytes=%zu\n",
+								       node, it, final_ckpt_size);
+								fflush(stdout);
+							}
 						}
 						break;
 						
@@ -5527,6 +5551,16 @@ int require_allreduce_checkpoint(){
 		return 1;
 	}
 	cape_profile_record_merged_ckpt(total_ckpt_size);
+
+	/* The merged union is identical on every rank; rank 0 reports it once.
+	 * cape_ckpt_size_seq is the current iteration (just bumped by the
+	 * generate that precedes this allreduce). */
+	if (node == 0 && cape_ckpt_size_log_enabled() &&
+	    cape_ckpt_size_sampled(cape_ckpt_size_seq)) {
+		printf("CKPT_SIZE rank=0 iter=%ld kind=merged bytes=%zu\n",
+		       cape_ckpt_size_seq, total_ckpt_size);
+		fflush(stdout);
+	}
 
 	if (total_ckpt_stream != NULL) {
 		fclose(total_ckpt_stream);
