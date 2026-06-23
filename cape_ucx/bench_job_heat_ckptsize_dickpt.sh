@@ -31,6 +31,8 @@ BIN_NAME="dickpt_heat_manual"
 # Use enough iterations to watch the dirty front sweep across the grid.
 N_DIM="${N_DIM:-1024}"
 N_ITERS="${N_ITERS:-1000}"
+# Log every iteration (stride 1) — we want the full saturation curve, not timing.
+export CAPE_CKPT_SIZE_STRIDE="${CAPE_CKPT_SIZE_STRIDE:-1}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="${PROJECT_DIR:-${SLURM_SUBMIT_DIR:-${SCRIPT_DIR}}}"
