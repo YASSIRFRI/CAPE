@@ -1,5 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=bench_heat3d_mpi
+#SBATCH --qos=large-cpu
 #SBATCH --nodes=128
 #SBATCH --ntasks=128
 #SBATCH --ntasks-per-node=1

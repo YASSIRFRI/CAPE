@@ -1,5 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=bench_montecarlo_mpi
+#SBATCH --qos=large-cpu
 #SBATCH --nodes=128
 #SBATCH --ntasks=128
 #SBATCH --ntasks-per-node=1
