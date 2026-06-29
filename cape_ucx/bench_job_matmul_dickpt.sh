@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=bench_matmul_dickpt
-#SBATCH --qos=large-cpu
+#SBATCH --qos=himem-cpu
 #SBATCH --nodes=128
 #SBATCH --ntasks=128
 #SBATCH --ntasks-per-node=1
