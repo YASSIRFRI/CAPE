@@ -1,23 +1,24 @@
 #!/bin/bash
-#SBATCH --job-name=bench_nbody_mpi
+#SBATCH --job-name=bench_heat3d_mpi
 #SBATCH --nodes=128
 #SBATCH --ntasks=128
 #SBATCH --ntasks-per-node=1
 #SBATCH --time=04:00:00
-#SBATCH --output=bench_nbody_mpi_%j.out
-#SBATCH --error=bench_nbody_mpi_%j.err
+#SBATCH --output=bench_heat3d_mpi_%j.out
+#SBATCH --error=bench_heat3d_mpi_%j.err
 #SBATCH --partition=compute
 
-# N-Body particle simulation (all-to-all) — pure MPI.
+# 3D diffusion / Jacobi 7-point stencil (thermal/fluid diffusion) — pure MPI.
 # Sweeps nodes = 8,16,32,64,128, REPS runs each. CSV: impl,app,n,d,nodes,rep,app_ms,job_id
 
 set -euo pipefail
 
-APP="nbody"
-SRC_NAME="mpi_nbody.c"
-BIN_NAME="mpi_nbody"
-N_PARTICLES="${N_PARTICLES:-8192}"
-N_STEPS="${N_STEPS:-20}"
+APP="heat3d"
+SRC_NAME="mpi_heat3d.c"
+BIN_NAME="mpi_heat3d"
+# Cube dimension N (N x N x N) and number of Jacobi iterations.
+N_DIM="${N_DIM:-128}"
+N_ITERS="${N_ITERS:-50}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="${PROJECT_DIR:-${SLURM_SUBMIT_DIR:-${SCRIPT_DIR}}}"
@@ -56,7 +57,7 @@ echo "impl,app,n,d,nodes,rep,app_ms,job_id" > "${CSV}"
 
 echo "Benchmarking MPI ${APP}"
 echo "App: ${SRC_DIR}/${SRC_NAME} -> ${BIN}"
-echo "Nodes: ${NODES_LIST[*]}  Reps: ${REPS}  particles=${N_PARTICLES} steps=${N_STEPS}"
+echo "Nodes: ${NODES_LIST[*]}  Reps: ${REPS}  N=${N_DIM} iters=${N_ITERS}"
 echo "CSV: ${CSV}"
 
 run_one() {
@@ -72,7 +73,7 @@ run_one() {
 
     echo "[launch] ${tag}"
     srun --exclusive --mpi="${SRUN_MPI_MODE}" --nodes="${nn}" --ntasks="${nn}" --ntasks-per-node=1 \
-         "${BIN}" "${N_PARTICLES}" "${N_STEPS}" "${REPS}" >>"${log}" 2>&1 || rc=$?
+         "${BIN}" "${N_DIM}" "${N_ITERS}" "${REPS}" >>"${log}" 2>&1 || rc=$?
     if [ "${rc}" -ne 0 ]; then echo "[fail] ${tag} rc=${rc} log=${log}" >&2; return 0; fi
 
     awk -v impl="mpi" -v app="${APP}" -v nn="${nn}" -v job="${JOB_TAG}" '

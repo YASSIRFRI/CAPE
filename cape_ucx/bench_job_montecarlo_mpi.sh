@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=bench_montecarlo_mpi
-#SBATCH --nodes=64
-#SBATCH --ntasks=64
+#SBATCH --nodes=128
+#SBATCH --ntasks=128
 #SBATCH --ntasks-per-node=1
 #SBATCH --time=04:00:00
 #SBATCH --output=bench_montecarlo_mpi_%j.out
@@ -9,7 +9,7 @@
 #SBATCH --partition=compute
 
 # Monte Carlo Pi (embarrassingly parallel / reduction) — pure MPI.
-# Sweeps nodes = 8,16,32,64, REPS runs each. CSV: impl,app,n,d,nodes,rep,app_ms,job_id
+# Sweeps nodes = 8,16,32,64,128, REPS runs each. CSV: impl,app,n,d,nodes,rep,app_ms,job_id
 
 set -euo pipefail
 
@@ -29,7 +29,7 @@ mkdir -p "${RESULTS_DIR}" 2>/dev/null || { RESULTS_DIR="/tmp/${USER}/bench_${APP
 BUILD_DIR="${BUILD_DIR:-${SLURM_SUBMIT_DIR:-/tmp/${USER}}/cape_build_${APP}_mpi_${JOB_TAG}}"
 mkdir -p "${BUILD_DIR}/bin" 2>/dev/null || { BUILD_DIR="/tmp/${USER}/cape_build_${APP}_mpi_${JOB_TAG}"; mkdir -p "${BUILD_DIR}/bin"; }
 
-NODES_LIST=(${NODES_LIST:-8 16 32 64})
+NODES_LIST=(${NODES_LIST:-8 16 32 64 128})
 REPS="${REPS:-10}"
 
 module purge
@@ -48,7 +48,7 @@ echo "Building MPI ${APP}"
 mpicc -O2 -Wall -o "${BUILD_DIR}/bin/${BIN_NAME}" "${SRC_DIR}/${SRC_NAME}" -lm
 
 BIN="${BUILD_DIR}/bin/${BIN_NAME}"
-TOTAL_NODES="${SLURM_JOB_NUM_NODES:-64}"
+TOTAL_NODES="${SLURM_JOB_NUM_NODES:-128}"
 
 CSV="${RESULTS_DIR}/bench_${APP}_mpi_${JOB_TAG}.csv"
 echo "impl,app,n,d,nodes,rep,app_ms,job_id" > "${CSV}"

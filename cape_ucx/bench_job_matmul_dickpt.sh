@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=bench_matmul_dickpt
-#SBATCH --nodes=64
-#SBATCH --ntasks=64
+#SBATCH --nodes=128
+#SBATCH --ntasks=128
 #SBATCH --ntasks-per-node=1
 #SBATCH --time=04:00:00
 #SBATCH --output=bench_matmul_dickpt_%j.out
@@ -9,7 +9,7 @@
 #SBATCH --partition=compute
 
 # Distributed dense matrix multiply (block / compute-bound) — DICKPT.
-# Sweeps nodes = 8,16,32,64, REPS runs each. CSV: impl,app,n,d,nodes,rep,app_ms,job_id
+# Sweeps nodes = 8,16,32,64,128, REPS runs each. CSV: impl,app,n,d,nodes,rep,app_ms,job_id
 
 set -euo pipefail
 
@@ -33,7 +33,7 @@ mkdir -p "${BUILD_DIR}/bin" "${BUILD_DIR}/obj" "${BUILD_DIR}/lib" 2>/dev/null ||
 BOOTSTRAP_ROOT="${BOOTSTRAP_ROOT:-${BUILD_DIR}/ucx_bootstrap}"
 mkdir -p "${BOOTSTRAP_ROOT}"
 
-NODES_LIST=(${NODES_LIST:-8 16 32 64})
+NODES_LIST=(${NODES_LIST:-8 16 32 64 128})
 REPS="${REPS:-10}"
 PROFILE="${PROFILE:-0}"
 
@@ -81,7 +81,7 @@ make -C "${PROJECT_DIR}" dickpt_bitmap_monitor "${TARGET}" PROFILE="${PROFILE}" 
 
 MONITOR="${BUILD_DIR}/bin/cape_dickpt_bitmap_monitor"
 BIN="${BUILD_DIR}/bin/${BIN_NAME}"
-TOTAL_NODES="${SLURM_JOB_NUM_NODES:-64}"
+TOTAL_NODES="${SLURM_JOB_NUM_NODES:-128}"
 
 CSV="${RESULTS_DIR}/bench_${APP}_dickpt_${JOB_TAG}.csv"
 echo "impl,app,n,d,nodes,rep,app_ms,job_id" > "${CSV}"
