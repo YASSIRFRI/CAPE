@@ -145,11 +145,21 @@ int main(int argc, char *argv[])
 							 U(i, j - 1, k) + U(i, j + 1, k) +
 							 U(i, j, k - 1) + U(i, j, k + 1));
 
-			/* Commit our slab into the shared cube (the dirty set). */
+			/* Commit our slab into the shared cube (the dirty set).
+			 * Write back ONLY cells whose value actually changed. Ahead
+			 * of the diffusion front the field is still exactly COLD and
+			 * the Jacobi average of all-COLD neighbours is exactly COLD
+			 * (IEEE: 0+0+...=0), so those cells are skipped and their
+			 * pages are never faulted/dirtied. This is what makes the
+			 * incremental checkpoint start tiny and grow ~1 plane/iter as
+			 * the front sweeps through the cube — the whole premise of the
+			 * benchmark. An unconditional write would dirty the entire
+			 * slab every iteration and erase DICKPT's advantage. */
 			for (i = i_lo; i < i_hi; i++)
 				for (j = 1; j < n - 1; j++)
 					for (k = 1; k < n - 1; k++)
-						U(i, j, k) = UNEW(i, j, k);
+						if (UNEW(i, j, k) != U(i, j, k))
+							U(i, j, k) = UNEW(i, j, k);
 
 			dickpt_generate_ckpt();
 			dickpt_allreduce_ckpt();
