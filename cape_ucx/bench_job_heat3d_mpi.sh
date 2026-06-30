@@ -17,8 +17,12 @@ APP="heat3d"
 SRC_NAME="mpi_heat3d.c"
 BIN_NAME="mpi_heat3d"
 # Cube dimension N (N x N x N) and number of Jacobi iterations.
-N_DIM="${N_DIM:-128}"
-N_ITERS="${N_ITERS:-50}"
+# At N=128 the per-iter work (~2M cells) is so small the run finishes in
+# timer noise (~tens of ms total); N=512 is 64x the cells/iter so the timing
+# region is well above noise and the strong-scaling sweep is meaningful.
+# Kept in sync with bench_job_heat3d_dickpt.sh so both impls run the same size.
+N_DIM="${N_DIM:-512}"
+N_ITERS="${N_ITERS:-200}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="${PROJECT_DIR:-${SLURM_SUBMIT_DIR:-${SCRIPT_DIR}}}"
@@ -31,7 +35,7 @@ mkdir -p "${RESULTS_DIR}" 2>/dev/null || { RESULTS_DIR="/tmp/${USER}/bench_${APP
 BUILD_DIR="${BUILD_DIR:-${SLURM_SUBMIT_DIR:-/tmp/${USER}}/cape_build_${APP}_mpi_${JOB_TAG}}"
 mkdir -p "${BUILD_DIR}/bin" 2>/dev/null || { BUILD_DIR="/tmp/${USER}/cape_build_${APP}_mpi_${JOB_TAG}"; mkdir -p "${BUILD_DIR}/bin"; }
 
-NODES_LIST=(${NODES_LIST:-8 16 32 64 128})
+NODES_LIST=(${NODES_LIST:-32 64})
 REPS="${REPS:-10}"
 
 module purge
