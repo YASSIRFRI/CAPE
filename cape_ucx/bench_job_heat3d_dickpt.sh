@@ -30,12 +30,16 @@ APP="heat3d"
 TARGET="dickpt_heat3d_manual"
 BIN_NAME="dickpt_heat3d_manual"
 # Cube dimension N (N x N x N, <= MAX_N=512 in the app).
-N_DIM="${N_DIM:-128}"
-# Timing phase: a handful of iterations is enough for a per-iter cost.
-N_ITERS="${N_ITERS:-50}"
+# At N=128 the per-iter work (~2M cells) is so small the run finishes in
+# timer noise (~tens of ms total); N=512 is 64x the cells/iter so the timing
+# region is well above noise and the strong-scaling sweep is meaningful.
+N_DIM="${N_DIM:-512}"
+# Timing phase: enough iterations to dominate startup/noise and give a
+# stable per-iter cost.
+N_ITERS="${N_ITERS:-200}"
 # Size phase: run long enough for the dirty front to traverse the cube.
 # The front advances ~1 plane/iter, so a bit more than N planes saturates it.
-N_ITERS_SIZE="${N_ITERS_SIZE:-160}"
+N_ITERS_SIZE="${N_ITERS_SIZE:-560}"
 # Log every iteration so we get the full saturation curve.
 export CAPE_CKPT_SIZE_STRIDE="${CAPE_CKPT_SIZE_STRIDE:-1}"
 
