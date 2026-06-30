@@ -1,8 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=bench_heat3d_dickpt
-#SBATCH --qos=himem-cpu
-#SBATCH --nodes=128
-#SBATCH --ntasks=128
+#SBATCH --nodes=64
+#SBATCH --ntasks=64
 #SBATCH --ntasks-per-node=1
 #SBATCH --time=06:00:00
 #SBATCH --output=bench_heat3d_dickpt_%j.out
