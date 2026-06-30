@@ -15,9 +15,14 @@
  * block of i-planes plus two ghost planes, and trades boundary planes with its
  * up/down neighbours via MPI_Sendrecv every iteration.
  *
- * Compare cape_heat3d_manual.c: the DICKPT version writes its slab into a
- * shared cube and lets the monitor ship only the dirty delta — no ghost-plane
- * buffers and no hand-written halo exchange.
+ * Full-domain replication for a fair DICKPT comparison: the DICKPT version
+ * (cape_heat3d_manual.c) runs dickpt_allreduce_ckpt() every iteration, which
+ * ships each rank's accumulated region to ALL ranks (a union allreduce). To
+ * compare like with like — not "halo exchange" vs "full replication" — this
+ * reference performs the equivalent every iteration: an MPI_Allgatherv that
+ * collects every rank's owned i-planes into a globally replicated cube. The
+ * nearest-neighbour halo Sendrecv is still required for stencil correctness;
+ * the Allgatherv is the added all-to-all data movement that matches DICKPT.
  */
 #include <mpi.h>
 #include <stdio.h>
@@ -89,6 +94,28 @@ int main(int argc, char *argv[])
 		MPI_Abort(MPI_COMM_WORLD, 1);
 		return 1;
 	}
+
+	/* Full-domain replication buffer + gather layout (matches DICKPT's
+	 * per-iteration union allreduce). Every rank receives the whole cube:
+	 * recvcounts[r]/displs[r] are this rank r's owned i-planes, in doubles.
+	 * The decomposition is deterministic, so we derive the layout locally. */
+	double *gcube = malloc((size_t)n * plane * sizeof(double));
+	int *recvcounts = malloc((size_t)num_ranks * sizeof(int));
+	int *displs = malloc((size_t)num_ranks * sizeof(int));
+	if (gcube == NULL || recvcounts == NULL || displs == NULL) {
+		fprintf(stderr, "rank %d: gather-buffer allocation failed\n", rank);
+		MPI_Abort(MPI_COMM_WORLD, 1);
+		return 1;
+	}
+	{
+		int r;
+		for (r = 0; r < num_ranks; r++) {
+			int rs = (int)(((long)n * r) / num_ranks);
+			int re = (int)(((long)n * (r + 1)) / num_ranks);
+			recvcounts[r] = (int)((size_t)(re - rs) * plane);
+			displs[r] = (int)((size_t)rs * plane);
+		}
+	}
 #define U(li, j, k)    u[((size_t)(li) * plane) + ((size_t)(j) * n) + (k)]
 #define UNEW(li, j, k) unew[((size_t)(li) * plane) + ((size_t)(j) * n) + (k)]
 
@@ -137,6 +164,16 @@ int main(int argc, char *argv[])
 					for (k = 1; k < n - 1; k++)
 						U(li, j, k) = UNEW(li, j, k);
 			}
+
+			/* Replicate every rank's owned planes to all ranks — the
+			 * MPI analogue of DICKPT's per-iteration union allreduce.
+			 * Send our interior planes (skip the 2 ghosts at U(0,*) and
+			 * U(local_planes+1,*)); gcube ends up holding the full cube
+			 * on every rank. */
+			MPI_Allgatherv(&U(1, 0, 0),
+				       (int)((size_t)local_planes * plane), MPI_DOUBLE,
+				       gcube, recvcounts, displs, MPI_DOUBLE,
+				       MPI_COMM_WORLD);
 		}
 
 		t1 = get_ms_of_day();
@@ -179,6 +216,9 @@ int main(int argc, char *argv[])
 #undef UNEW
 	free(u);
 	free(unew);
+	free(gcube);
+	free(recvcounts);
+	free(displs);
 	MPI_Finalize();
 	return 0;
 }
