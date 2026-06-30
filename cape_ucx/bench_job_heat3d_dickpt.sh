@@ -42,6 +42,9 @@ N_ITERS="${N_ITERS:-200}"
 N_ITERS_SIZE="${N_ITERS_SIZE:-560}"
 # Log every iteration so we get the full saturation curve.
 export CAPE_CKPT_SIZE_STRIDE="${CAPE_CKPT_SIZE_STRIDE:-1}"
+# Monitor scratch buffer: a merged checkpoint at N=512 needs ~260 MB, above the
+# 256 MB default, so bump the cap to 512 MB (overridable).
+export CAPE_UCX_SCRATCH_BYTES="${CAPE_UCX_SCRATCH_BYTES:-536870912}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="${PROJECT_DIR:-${SLURM_SUBMIT_DIR:-${SCRIPT_DIR}}}"
