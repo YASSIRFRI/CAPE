@@ -15,10 +15,11 @@
 #                        timing only. CSV: impl,app,n,d,nodes,rep,app_ms,job_id
 #   PHASE 2 (ckpt size): a SINGLE run at 128 nodes with the monitor's
 #                        per-iteration size logging on (CAPE_CKPT_SIZE_LOG=1,
-#                        REPS=1 so iter maps 1:1). For diffusion from a hot face
-#                        only the planes near the front move early on, so the
-#                        incremental checkpoint starts tiny and grows as the
-#                        front sweeps through the cube.
+#                        REPS=1 so iter maps 1:1). The heat source is a small
+#                        hot patch at the centre of the i==0 face, so early on
+#                        only a few cells near the source move; the incremental
+#                        checkpoint starts tiny and grows as the warm hemisphere
+#                        expands into the cube.
 #                        CSV: impl,app,nodes,rank,iter,kind,bytes,job_id
 #                        (kind=local: per-rank delta; kind=merged: global union).
 #
@@ -197,5 +198,5 @@ echo "Done. DICKPT ${APP}"
 echo "Timing CSV: ${TIME_CSV}"
 echo "Size CSV:   ${SIZE_CSV}"
 echo "Per-node logs in: ${RESULTS_DIR}"
-echo "Tip: rank 0 owns the hot i==0 face, so its early-iteration bytes start"
+echo "Tip: rank 0 owns the i==0 face with the hot patch, so its early-iteration bytes start"
 echo "     smallest and grow as the diffusion front spreads through the cube."

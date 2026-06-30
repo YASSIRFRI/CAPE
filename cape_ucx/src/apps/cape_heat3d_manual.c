@@ -9,7 +9,9 @@
  *                         + u[i][j-1][k] + u[i][j+1][k]
  *                         + u[i][j][k-1] + u[i][j][k+1] )
  *
- * Dirichlet boundaries: the i==0 face is held HOT, everything else COLD.
+ * Dirichlet boundaries: a small HOT square patch at the centre of the i==0 face,
+ * everything else (the rest of that face and all other faces) COLD. The heat
+ * source is therefore spatially LOCAL and spreads as a growing hemisphere.
  *
  * Why this captures the power of DICKPT
  * -------------------------------------
@@ -22,9 +24,9 @@
  * Here the application is written as if it were plain shared-memory OpenMP: it
  * writes its planes of the shared cube and lets the DICKPT monitor figure out
  * what changed. Per iteration only the dirty slab is captured and merged
- * (incremental checkpoint + union allreduce). For diffusion from a hot face the
- * delta starts TINY (only the planes near the front move) and grows as the
- * front sweeps through the cube — which is exactly what the checkpoint-size job
+ * (incremental checkpoint + union allreduce). For diffusion from a small hot
+ * patch the delta starts TINY (only the few cells near the source move) and
+ * grows as the warm hemisphere expands — which is exactly what the checkpoint-size job
  * logs.
  *
  * Implementation notes (mirroring cape_heat_manual.c):
@@ -113,14 +115,30 @@ int main(int argc, char *argv[])
 		unsigned long t0, t1;
 		int it;
 
-		/* Identical initial/boundary condition on every rank: hot i==0 face. */
-		for (i = 0; i < n; i++)
+		/* Identical initial/boundary condition on every rank: the cube
+		 * starts COLD and the heat source is a SMALL square patch at the
+		 * centre of the i==0 face (held HOT, Dirichlet). The perturbation
+		 * is therefore spatially local at t=0 and spreads as a growing
+		 * hemisphere into the cube. This is what makes the dirty set —
+		 * and hence each incremental checkpoint — start tiny and grow
+		 * with the diffusion radius (the physics), instead of dirtying a
+		 * full cross-section plane from iteration 1 (which a hot full face
+		 * would do). hot_r is the patch half-width. */
+		{
+			int cj = n / 2, ck = n / 2;
+			int hot_r = n / 32;
+			if (hot_r < 1)
+				hot_r = 1;
+			for (i = 0; i < n; i++)
+				for (j = 0; j < n; j++)
+					for (k = 0; k < n; k++)
+						U(i, j, k) = COLD;
 			for (j = 0; j < n; j++)
 				for (k = 0; k < n; k++)
-					U(i, j, k) = COLD;
-		for (j = 0; j < n; j++)
-			for (k = 0; k < n; k++)
-				U(0, j, k) = HOT;
+					U(0, j, k) = (abs(j - cj) <= hot_r &&
+						      abs(k - ck) <= hot_r)
+							     ? HOT : COLD;
+		}
 
 		t0 = get_ms_of_day();
 

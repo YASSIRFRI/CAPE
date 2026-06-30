@@ -123,12 +123,24 @@ int main(int argc, char *argv[])
 		unsigned long t0, t1;
 		int it;
 
-		/* Initialise local slab (+ghosts) with the global IC: hot i==0 face. */
-		for (li = 0; li < local_planes + 2; li++) {
-			int gi = r_start + li - 1;   /* global i-plane of li */
-			for (j = 0; j < n; j++)
-				for (k = 0; k < n; k++)
-					U(li, j, k) = (gi == 0) ? HOT : COLD;
+		/* Initialise local slab (+ghosts) with the global IC: a small HOT
+		 * square patch at the centre of the i==0 face, everything else
+		 * COLD. Must match cape_heat3d_manual.c exactly so both solvers
+		 * run identical physics (same VERIFY averages). */
+		{
+			int cj = n / 2, ck = n / 2;
+			int hot_r = n / 32;
+			if (hot_r < 1)
+				hot_r = 1;
+			for (li = 0; li < local_planes + 2; li++) {
+				int gi = r_start + li - 1;   /* global i-plane of li */
+				for (j = 0; j < n; j++)
+					for (k = 0; k < n; k++)
+						U(li, j, k) = (gi == 0 &&
+							       abs(j - cj) <= hot_r &&
+							       abs(k - ck) <= hot_r)
+								      ? HOT : COLD;
+			}
 		}
 
 		MPI_Barrier(MPI_COMM_WORLD);
