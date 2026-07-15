@@ -65,15 +65,20 @@ SIZE_NODES="${SIZE_NODES:-64}"
 REPS="${REPS:-10}"
 PROFILE="${PROFILE:-0}"
 
-# ── Hybrid: multiple DICKPT ranks per node ─────────────────────────────────────
-# Each rank is one SLURM task (monitor + traced child). RANKS_PER_NODE>1 saturates
-# a node with several processes instead of one. CPUS_PER_RANK cores are given to
-# each task; the monitor pins core 0 of its slice, the child gets the rest
-# (cape_default_rank_cpuset splits by SLURM_LOCALID). The monitor's hierarchical
-# allreduce keys off SLURM_LOCALID / CAPE_RANKS_PER_NODE and needs the block
-# distribution so a node's ranks are a contiguous global-rank range.
-RANKS_PER_NODE="${RANKS_PER_NODE:-1}"
-CPUS_PER_RANK="${CPUS_PER_RANK:-2}"
+# ── Multithreaded monitor: multiple DICKPT ranks per node via clone() ──────────
+# One SLURM task per node; the multithreaded monitor clone()s WORKERS_PER_NODE
+# independent DICKPT ranks inside that task (see cape_incr_bitmap_multithreaded.c).
+# Each clone is a full monitor+traced-child rank with global rank
+# SLURM_PROCID*W + worker_index and size SLURM_NTASKS*W. cape_default_rank_cpuset
+# carves the node's cores into W equal slices; the monitor pins the first core of
+# its slice, the child gets the rest. The hierarchical allreduce keeps inter-node
+# traffic at one message per node. W=1 reproduces the old single-rank behavior.
+WORKERS_PER_NODE="${WORKERS_PER_NODE:-8}"
+
+# Lmod's bash init dereferences LD_LIBRARY_PATH; under `set -u` an unset value
+# aborts `module load`, silently leaving EBROOT*/UCX_INC empty and breaking the
+# build (an empty -I swallows the .c source -> "gcc: no input files"). Seed it.
+export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}"
 
 module purge
 module load GCCcore/14.2.0
@@ -115,9 +120,9 @@ fi
 
 make -C "${PROJECT_DIR}" cleanall \
     EXE_FOLDER="${BUILD_DIR}/bin" O_FOLDER="${BUILD_DIR}/obj" L_FOLDER="${BUILD_DIR}/lib" 2>/dev/null || true
-make -C "${PROJECT_DIR}" dickpt_bitmap_monitor "${TARGET}" PROFILE="${PROFILE}" "${MAKE_ARGS[@]}"
+make -C "${PROJECT_DIR}" dickpt_bitmap_multithreaded_monitor "${TARGET}" PROFILE="${PROFILE}" "${MAKE_ARGS[@]}"
 
-MONITOR="${BUILD_DIR}/bin/cape_dickpt_bitmap_monitor"
+MONITOR="${BUILD_DIR}/bin/cape_dickpt_bitmap_multithreaded_monitor"
 BIN="${BUILD_DIR}/bin/${BIN_NAME}"
 TOTAL_NODES="${SLURM_JOB_NUM_NODES:-128}"
 
@@ -128,7 +133,7 @@ echo "impl,app,nodes,rank,iter,kind,bytes,job_id" > "${SIZE_CSV}"
 
 echo "Benchmarking DICKPT ${APP} (3D diffusion)"
 echo "App:     src/apps/cape_${APP}_manual.c -> ${BIN}"
-echo "Monitor: src/monitor/cape_incr_bitmap.c -> ${MONITOR}"
+echo "Monitor: src/monitor/cape_incr_bitmap_multithreaded.c -> ${MONITOR}"
 echo "Nodes: ${NODES_LIST[*]}  Reps: ${REPS}  N=${N_DIM} iters=${N_ITERS}  MPI mode: ${SRUN_MPI_MODE}"
 echo "Timing CSV: ${TIME_CSV}"
 echo "Size CSV:   ${SIZE_CSV}  (single run at ${SIZE_NODES} nodes, iters=${N_ITERS_SIZE})"
@@ -147,12 +152,11 @@ run_time() {
     fi
     rm -rf "${bdir}"; mkdir -p "${bdir}"; : > "${log}"
 
-    local ntasks=$((nn * RANKS_PER_NODE))
-    echo "[launch] ${tag}  (ranks/node=${RANKS_PER_NODE} tasks=${ntasks} cpus/rank=${CPUS_PER_RANK})"
-    CAPE_RANKS_PER_NODE="${RANKS_PER_NODE}" \
+    echo "[launch] ${tag}  (workers/node=${WORKERS_PER_NODE} ranks=$((nn * WORKERS_PER_NODE)))"
+    CAPE_WORKERS_PER_NODE="${WORKERS_PER_NODE}" \
     CAPE_UCX_BOOTSTRAP_ID="${bid}" CAPE_UCX_BOOTSTRAP_DIR="${bdir}" \
-    srun --exclusive --mpi="${SRUN_MPI_MODE}" --nodes="${nn}" --ntasks="${ntasks}" \
-         --ntasks-per-node="${RANKS_PER_NODE}" --cpus-per-task="${CPUS_PER_RANK}" \
+    srun --exclusive --mpi="${SRUN_MPI_MODE}" --nodes="${nn}" --ntasks="${nn}" \
+         --ntasks-per-node=1 \
          --distribution=block:block \
          "${MONITOR}" "${BIN}" "${N_DIM}" "${N_ITERS}" "${REPS}" >>"${log}" 2>&1 || rc=$?
     rm -rf "${bdir}"
@@ -185,12 +189,11 @@ run_size() {
     fi
     rm -rf "${bdir}"; mkdir -p "${bdir}"; : > "${log}"
 
-    local ntasks=$((nn * RANKS_PER_NODE))
-    echo "[launch] ${tag}  (CAPE_CKPT_SIZE_LOG=1, REPS=1, iters=${N_ITERS_SIZE}, ranks/node=${RANKS_PER_NODE})"
-    CAPE_CKPT_SIZE_LOG=1 CAPE_RANKS_PER_NODE="${RANKS_PER_NODE}" \
+    echo "[launch] ${tag}  (CAPE_CKPT_SIZE_LOG=1, REPS=1, iters=${N_ITERS_SIZE}, workers/node=${WORKERS_PER_NODE})"
+    CAPE_CKPT_SIZE_LOG=1 CAPE_WORKERS_PER_NODE="${WORKERS_PER_NODE}" \
     CAPE_UCX_BOOTSTRAP_ID="${bid}" CAPE_UCX_BOOTSTRAP_DIR="${bdir}" \
-    srun --exclusive --export=ALL --mpi="${SRUN_MPI_MODE}" --nodes="${nn}" --ntasks="${ntasks}" \
-         --ntasks-per-node="${RANKS_PER_NODE}" --cpus-per-task="${CPUS_PER_RANK}" \
+    srun --exclusive --export=ALL --mpi="${SRUN_MPI_MODE}" --nodes="${nn}" --ntasks="${nn}" \
+         --ntasks-per-node=1 \
          --distribution=block:block \
          "${MONITOR}" "${BIN}" "${N_DIM}" "${N_ITERS_SIZE}" 1 >>"${log}" 2>&1 || rc=$?
     rm -rf "${bdir}"
