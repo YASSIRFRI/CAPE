@@ -1,8 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=bench_heat3d_dickpt
 #SBATCH --nodes=64
-#SBATCH --ntasks=64
-#SBATCH --ntasks-per-node=1
+#SBATCH --exclusive
 #SBATCH --time=06:00:00
 #SBATCH --output=bench_heat3d_dickpt_%j.out
 #SBATCH --error=bench_heat3d_dickpt_%j.err
@@ -65,6 +64,16 @@ NODES_LIST=(${NODES_LIST:-32 64})
 SIZE_NODES="${SIZE_NODES:-64}"
 REPS="${REPS:-10}"
 PROFILE="${PROFILE:-0}"
+
+# ── Hybrid: multiple DICKPT ranks per node ─────────────────────────────────────
+# Each rank is one SLURM task (monitor + traced child). RANKS_PER_NODE>1 saturates
+# a node with several processes instead of one. CPUS_PER_RANK cores are given to
+# each task; the monitor pins core 0 of its slice, the child gets the rest
+# (cape_default_rank_cpuset splits by SLURM_LOCALID). The monitor's hierarchical
+# allreduce keys off SLURM_LOCALID / CAPE_RANKS_PER_NODE and needs the block
+# distribution so a node's ranks are a contiguous global-rank range.
+RANKS_PER_NODE="${RANKS_PER_NODE:-1}"
+CPUS_PER_RANK="${CPUS_PER_RANK:-2}"
 
 module purge
 module load GCCcore/14.2.0
@@ -138,9 +147,13 @@ run_time() {
     fi
     rm -rf "${bdir}"; mkdir -p "${bdir}"; : > "${log}"
 
-    echo "[launch] ${tag}"
+    local ntasks=$((nn * RANKS_PER_NODE))
+    echo "[launch] ${tag}  (ranks/node=${RANKS_PER_NODE} tasks=${ntasks} cpus/rank=${CPUS_PER_RANK})"
+    CAPE_RANKS_PER_NODE="${RANKS_PER_NODE}" \
     CAPE_UCX_BOOTSTRAP_ID="${bid}" CAPE_UCX_BOOTSTRAP_DIR="${bdir}" \
-    srun --exclusive --mpi="${SRUN_MPI_MODE}" --nodes="${nn}" --ntasks="${nn}" --ntasks-per-node=1 \
+    srun --exclusive --mpi="${SRUN_MPI_MODE}" --nodes="${nn}" --ntasks="${ntasks}" \
+         --ntasks-per-node="${RANKS_PER_NODE}" --cpus-per-task="${CPUS_PER_RANK}" \
+         --distribution=block:block \
          "${MONITOR}" "${BIN}" "${N_DIM}" "${N_ITERS}" "${REPS}" >>"${log}" 2>&1 || rc=$?
     rm -rf "${bdir}"
     if [ "${rc}" -ne 0 ]; then echo "[fail] ${tag} rc=${rc} log=${log}" >&2; return 0; fi
@@ -172,10 +185,13 @@ run_size() {
     fi
     rm -rf "${bdir}"; mkdir -p "${bdir}"; : > "${log}"
 
-    echo "[launch] ${tag}  (CAPE_CKPT_SIZE_LOG=1, REPS=1, iters=${N_ITERS_SIZE})"
-    CAPE_CKPT_SIZE_LOG=1 \
+    local ntasks=$((nn * RANKS_PER_NODE))
+    echo "[launch] ${tag}  (CAPE_CKPT_SIZE_LOG=1, REPS=1, iters=${N_ITERS_SIZE}, ranks/node=${RANKS_PER_NODE})"
+    CAPE_CKPT_SIZE_LOG=1 CAPE_RANKS_PER_NODE="${RANKS_PER_NODE}" \
     CAPE_UCX_BOOTSTRAP_ID="${bid}" CAPE_UCX_BOOTSTRAP_DIR="${bdir}" \
-    srun --exclusive --export=ALL --mpi="${SRUN_MPI_MODE}" --nodes="${nn}" --ntasks="${nn}" --ntasks-per-node=1 \
+    srun --exclusive --export=ALL --mpi="${SRUN_MPI_MODE}" --nodes="${nn}" --ntasks="${ntasks}" \
+         --ntasks-per-node="${RANKS_PER_NODE}" --cpus-per-task="${CPUS_PER_RANK}" \
+         --distribution=block:block \
          "${MONITOR}" "${BIN}" "${N_DIM}" "${N_ITERS_SIZE}" 1 >>"${log}" 2>&1 || rc=$?
     rm -rf "${bdir}"
     if [ "${rc}" -ne 0 ]; then echo "[fail] ${tag} rc=${rc} log=${log}" >&2; return 0; fi

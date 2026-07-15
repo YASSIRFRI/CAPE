@@ -1,8 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=bench_heat_ckptsize_dickpt
 #SBATCH --nodes=64
-#SBATCH --ntasks=64
-#SBATCH --ntasks-per-node=1
+#SBATCH --exclusive
 #SBATCH --time=04:00:00
 #SBATCH --output=bench_heat_ckptsize_dickpt_%j.out
 #SBATCH --error=bench_heat_ckptsize_dickpt_%j.err
@@ -54,6 +53,13 @@ NODES_LIST=(${NODES_LIST:-32})
 # One run per node count is enough to characterise the size curve.
 REPS=1
 PROFILE="${PROFILE:-0}"
+
+# Hybrid: multiple DICKPT ranks per node (see bench_job_heat3d_dickpt.sh).
+# RANKS_PER_NODE>1 launches several monitor+child processes per node;
+# CPUS_PER_RANK cores per task; block distribution keeps a node's ranks a
+# contiguous global-rank range for the monitor's hierarchical allreduce.
+RANKS_PER_NODE="${RANKS_PER_NODE:-1}"
+CPUS_PER_RANK="${CPUS_PER_RANK:-2}"
 
 module purge
 module load GCCcore/14.2.0
@@ -127,8 +133,12 @@ run_one() {
 
     echo "[launch] ${tag}"
     CAPE_CKPT_SIZE_LOG=1 \
+    local ntasks=$((nn * RANKS_PER_NODE))
     CAPE_UCX_BOOTSTRAP_ID="${bid}" CAPE_UCX_BOOTSTRAP_DIR="${bdir}" \
-    srun --exclusive --export=ALL --mpi="${SRUN_MPI_MODE}" --nodes="${nn}" --ntasks="${nn}" --ntasks-per-node=1 \
+    CAPE_RANKS_PER_NODE="${RANKS_PER_NODE}" \
+    srun --exclusive --export=ALL --mpi="${SRUN_MPI_MODE}" --nodes="${nn}" --ntasks="${ntasks}" \
+         --ntasks-per-node="${RANKS_PER_NODE}" --cpus-per-task="${CPUS_PER_RANK}" \
+         --distribution=block:block \
          "${MONITOR}" "${BIN}" "${N_DIM}" "${N_ITERS}" "${REPS}" >>"${log}" 2>&1 || rc=$?
     rm -rf "${bdir}"
     if [ "${rc}" -ne 0 ]; then echo "[fail] ${tag} rc=${rc} log=${log}" >&2; return 0; fi
