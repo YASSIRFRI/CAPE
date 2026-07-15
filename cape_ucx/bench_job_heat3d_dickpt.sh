@@ -75,16 +75,22 @@ PROFILE="${PROFILE:-0}"
 # traffic at one message per node. W=1 reproduces the old single-rank behavior.
 WORKERS_PER_NODE="${WORKERS_PER_NODE:-8}"
 
-# Lmod's bash init dereferences LD_LIBRARY_PATH; under `set -u` an unset value
-# aborts `module load`, silently leaving EBROOT*/UCX_INC empty and breaking the
-# build (an empty -I swallows the .c source -> "gcc: no input files"). Seed it.
+# Lmod's bash init dereferences LD_LIBRARY_PATH / LD_PRELOAD (and friends);
+# under `set -u` an unset value aborts `module load`, silently leaving
+# EBROOT*/UCX_INC empty and breaking the build (an empty -I swallows the .c
+# source -> "gcc: no input files"). Seed them, or relax -u around module ops.
 export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}"
+export LD_PRELOAD="${LD_PRELOAD:-}"
+export MANPATH="${MANPATH:-}"
+export MODULEPATH="${MODULEPATH:-}"
 
+set +u
 module purge
 module load GCCcore/14.2.0
 module load UCX/1.18.0-GCCcore-14.2.0
 module load UCC/1.3.0-GCCcore-14.2.0 2>/dev/null || module load UCC 2>/dev/null || true
 module load PMIx/5.0.6-GCCcore-14.2.0 2>/dev/null || module load PMIx 2>/dev/null || true
+set -u
 
 if [ -n "${EBROOTUCX:-}" ]; then
     UCX_INC="${EBROOTUCX}/include"; UCX_LIB="${EBROOTUCX}/lib"
