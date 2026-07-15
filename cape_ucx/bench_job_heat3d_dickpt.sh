@@ -65,15 +65,14 @@ SIZE_NODES="${SIZE_NODES:-64}"
 REPS="${REPS:-10}"
 PROFILE="${PROFILE:-0}"
 
-# ── Multithreaded monitor: multiple DICKPT ranks per node via clone() ──────────
-# One SLURM task per node; the multithreaded monitor clone()s WORKERS_PER_NODE
-# independent DICKPT ranks inside that task (see cape_incr_bitmap_multithreaded.c).
-# Each clone is a full monitor+traced-child rank with global rank
-# SLURM_PROCID*W + worker_index and size SLURM_NTASKS*W. cape_default_rank_cpuset
-# carves the node's cores into W equal slices; the monitor pins the first core of
-# its slice, the child gets the rest. The hierarchical allreduce keeps inter-node
-# traffic at one message per node. W=1 reproduces the old single-rank behavior.
-WORKERS_PER_NODE="${WORKERS_PER_NODE:-8}"
+# ── Multithreaded compute: one monitor/rank/checkpoint per node ────────────────
+# Still ONE SLURM task = ONE monitor + ONE traced app per node (one address
+# space, one uffd, one checkpoint per node — memory does NOT scale with cores).
+# The app itself splits the Jacobi sweep + write-back over clone(CLONE_VM)
+# compute threads (see cape_heat3d_manual.c). Thread count: CAPE_COMPUTE_THREADS
+# if set, else one per CPU in the app's affinity mask (= node cores minus the
+# monitor's pinned core). --cpus-per-task must hand the task the whole node.
+CPUS_PER_TASK="${CPUS_PER_TASK:-${SLURM_CPUS_ON_NODE:-16}}"
 
 # Lmod's bash init dereferences LD_LIBRARY_PATH / LD_PRELOAD (and friends);
 # under `set -u` an unset value aborts `module load`, silently leaving
@@ -158,11 +157,10 @@ run_time() {
     fi
     rm -rf "${bdir}"; mkdir -p "${bdir}"; : > "${log}"
 
-    echo "[launch] ${tag}  (workers/node=${WORKERS_PER_NODE} ranks=$((nn * WORKERS_PER_NODE)))"
-    CAPE_WORKERS_PER_NODE="${WORKERS_PER_NODE}" \
+    echo "[launch] ${tag}  (1 rank/node, cpus/task=${CPUS_PER_TASK}, compute threads=${CAPE_COMPUTE_THREADS:-auto})"
     CAPE_UCX_BOOTSTRAP_ID="${bid}" CAPE_UCX_BOOTSTRAP_DIR="${bdir}" \
     srun --exclusive --mpi="${SRUN_MPI_MODE}" --nodes="${nn}" --ntasks="${nn}" \
-         --ntasks-per-node=1 \
+         --ntasks-per-node=1 --cpus-per-task="${CPUS_PER_TASK}" \
          --distribution=block:block \
          "${MONITOR}" "${BIN}" "${N_DIM}" "${N_ITERS}" "${REPS}" >>"${log}" 2>&1 || rc=$?
     rm -rf "${bdir}"
@@ -195,11 +193,11 @@ run_size() {
     fi
     rm -rf "${bdir}"; mkdir -p "${bdir}"; : > "${log}"
 
-    echo "[launch] ${tag}  (CAPE_CKPT_SIZE_LOG=1, REPS=1, iters=${N_ITERS_SIZE}, workers/node=${WORKERS_PER_NODE})"
-    CAPE_CKPT_SIZE_LOG=1 CAPE_WORKERS_PER_NODE="${WORKERS_PER_NODE}" \
+    echo "[launch] ${tag}  (CAPE_CKPT_SIZE_LOG=1, REPS=1, iters=${N_ITERS_SIZE}, cpus/task=${CPUS_PER_TASK})"
+    CAPE_CKPT_SIZE_LOG=1 \
     CAPE_UCX_BOOTSTRAP_ID="${bid}" CAPE_UCX_BOOTSTRAP_DIR="${bdir}" \
     srun --exclusive --export=ALL --mpi="${SRUN_MPI_MODE}" --nodes="${nn}" --ntasks="${nn}" \
-         --ntasks-per-node=1 \
+         --ntasks-per-node=1 --cpus-per-task="${CPUS_PER_TASK}" \
          --distribution=block:block \
          "${MONITOR}" "${BIN}" "${N_DIM}" "${N_ITERS_SIZE}" 1 >>"${log}" 2>&1 || rc=$?
     rm -rf "${bdir}"

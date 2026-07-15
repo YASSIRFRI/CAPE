@@ -583,42 +583,6 @@ int cape_n_leaders  = 1;   /* number of physical nodes = num_nodes/local_size */
 int cape_leader_id  = 0;   /* this node's index among leaders (0..n_leaders-1) */
 static int cape_topology_ready = 0;
 
-/* ------------------------------------------------------------------
- * Multi-worker (cloned monitor ranks) mode.
- *
- * The historical launch runs ONE monitor + ONE traced app process per
- * SLURM task, so on a 1-task-per-node layout all remaining cores idle.
- * With CAPE_WORKERS_PER_NODE=W > 1, main() clone()s W copies of the
- * whole monitor before any other state is created; each clone becomes a
- * full, independent DICKPT rank (its own forked+ptraced app child, own
- * userfaultfd, own UCX worker) with global rank
- *     node = task_rank * W + worker_index,   num_nodes = ntasks * W.
- * Same-node peers talk through UCX's shm transport, and the existing
- * hierarchical allreduce (cape_local_*) keeps inter-node traffic at one
- * message per physical node.
- *
- * We use clone(2) directly — NOT pthreads — with SIGCHLD as the only
- * flag, i.e. every sharing flag deliberately OFF:
- *   - no CLONE_VM: this file's state is a large set of process-global
- *     variables (ckpt memstreams, page/shared-data lists, UCX worker
- *     created with UCS_THREAD_MODE_SINGLE, profile counters...). Sharing
- *     the address space would race all of them; copy-on-write gives each
- *     worker a private copy for free.
- *   - no CLONE_FILES: control_fd, userfault_fd, epoll_fd and the ckpt
- *     memstream FILE* cookies must be per-rank; a shared fd table would
- *     cross-wire the uffd/socketpair plumbing.
- *   - no CLONE_THREAD/CLONE_SIGHAND: ptrace attaches tracee->tracer at
- *     task level and SIGCHLD from the traced app must be waitpid()able
- *     by exactly its own monitor; threads sharing a signal handler
- *     table would steal each other's child-stop notifications.
- *   - no CLONE_FS: bootstrap files use absolute dirs anyway; keep cwd
- *     changes (if any) isolated.
- * The only intentionally shared resources are the inherited stdout /
- * stderr descriptors and the bootstrap directory on disk.
- */
-int cape_worker_count = 1;   /* W = clones per launched task */
-int cape_worker_index = 0;   /* 0..W-1, set in the clone child */
-
 static void cape_resolve_topology(void); /* defined after CAPE_DBG/cape_env_int */
 
 /* Master-side dynamic task pool for the legacy DICKPT workshare protocol.
@@ -1087,30 +1051,6 @@ static void cape_default_rank_cpuset(const cpu_set_t *allowed, cpu_set_t *out)
 
 	if (cape_cpuset_count(out) == 0)
 		*out = *allowed;
-
-	/* Multi-worker mode: the set computed above is the launched task's
-	 * share of the node; carve it into cape_worker_count equal slices and
-	 * keep only this worker's slice. If there are fewer cores than
-	 * workers (oversubscribed), leave the whole set and let the scheduler
-	 * time-share. */
-	if (cape_worker_count > 1) {
-		cpu_set_t slice;
-		int total = cape_cpuset_count(out);
-		int per = total / cape_worker_count;
-
-		if (per > 0) {
-			int i;
-			CPU_ZERO(&slice);
-			for (i = 0; i < per; ++i) {
-				int cpu = cape_cpuset_nth(out,
-					cape_worker_index * per + i);
-				if (cpu >= 0)
-					CPU_SET(cpu, &slice);
-			}
-			if (cape_cpuset_count(&slice) > 0)
-				*out = slice;
-		}
-	}
 }
 
 static int cape_apply_affinity(int monitor_process)
@@ -1139,13 +1079,7 @@ static int cape_apply_affinity(int monitor_process)
 				monitor_env);
 			return 1;
 		}
-		/* With several workers per task an env-pinned monitor core
-		 * would collide; spread workers round-robin over the list. */
-		if (cape_worker_count > 1 && cape_cpuset_count(&parsed) > 0)
-			monitor_cpu = cape_cpuset_nth(&parsed,
-				cape_worker_index % cape_cpuset_count(&parsed));
-		else
-			monitor_cpu = cape_cpuset_first(&parsed);
+		monitor_cpu = cape_cpuset_first(&parsed);
 	} else {
 		monitor_cpu = cape_cpuset_first(&rank_set);
 	}
@@ -2314,8 +2248,7 @@ static const char *cape_ucx_bootstrap_dir(void)
     return sharedir;
 }
 
-/* fs bootstrap is compiled unconditionally: even USE_PMIX builds fall back
- * to it in multi-worker mode, where PMIx cannot name W ranks per task. */
+#ifndef USE_PMIX
 /* NFS-safe publish: after creating a file under `dir`, fsync the parent
  * directory's fd so the new entry is committed to the NFS server and its
  * mtime bumps — this lets other clients' cache revalidation detect the
@@ -2459,9 +2392,6 @@ static void ucx_exchange_addresses_via_fs(const char *dir, const char *jobid,
         }
     }
 }
-
-#ifdef USE_PMIX
-static int cape_pmix_inited;
 #endif
 
 /* Initialize UCX context, worker, and endpoints */
@@ -2469,28 +2399,6 @@ static void cape_ucx_init(void)
 {
     CAPE_DBG("cape_ucx_init enter");
     /* 1. Get rank and size */
-    if (cape_worker_count > 1) {
-        /* Multi-worker mode: identity comes from the SLURM/OMPI env,
-         * expanded by the worker index. PMIx is skipped entirely — it can
-         * only name one rank per launched task, and W cloned processes
-         * calling PMIx_Init under the same task identity is undefined. */
-        const char *rank_str = getenv("SLURM_PROCID");
-        const char *size_str = getenv("SLURM_NTASKS");
-        if (!rank_str) rank_str = getenv("OMPI_COMM_WORLD_RANK");
-        if (!size_str) size_str = getenv("OMPI_COMM_WORLD_SIZE");
-        if (!rank_str || !size_str) {
-            fprintf(stderr, "CAPE UCX: multi-worker mode cannot determine "
-                    "task rank/size. Run via srun (sets SLURM_PROCID/"
-                    "SLURM_NTASKS).\n");
-            exit(1);
-        }
-        node      = (unsigned long)(atoi(rank_str) * cape_worker_count
-                                    + cape_worker_index);
-        num_nodes = atoi(size_str) * cape_worker_count;
-        CAPE_DBG("multi-worker rank/size: task=%s worker=%d/%d -> rank=%ld size=%d",
-                 rank_str, cape_worker_index, cape_worker_count,
-                 node, num_nodes);
-    } else {
 #ifdef USE_PMIX
     CAPE_DBG("PMIx_Init begin");
     PMIX_PROC_CONSTRUCT(&pmix_myproc);
@@ -2500,7 +2408,6 @@ static void cape_ucx_init(void)
                 PMIx_Error_string(pst));
         exit(1);
     }
-    cape_pmix_inited = 1;
     node = (unsigned long)pmix_myproc.rank;
     CAPE_DBG("PMIx_Init done nspace=%s rank=%ld", pmix_myproc.nspace, node);
 
@@ -2545,23 +2452,20 @@ static void cape_ucx_init(void)
         exit(1);
     }
 #else
-    {
-        const char *rank_str = getenv("SLURM_PROCID");
-        const char *size_str = getenv("SLURM_NTASKS");
-        if (!rank_str) rank_str = getenv("OMPI_COMM_WORLD_RANK");
-        if (!size_str) size_str = getenv("OMPI_COMM_WORLD_SIZE");
-        if (!rank_str || !size_str) {
-            fprintf(stderr, "CAPE UCX: cannot determine rank/size. "
-                    "Run via srun (sets SLURM_PROCID/SLURM_NTASKS) "
-                    "or compile with -DUSE_PMIX.\n");
-            exit(1);
-        }
-        node      = (unsigned long)atoi(rank_str);
-        num_nodes = atoi(size_str);
-        CAPE_DBG("rank/size resolved via env num_nodes=%d", num_nodes);
+    const char *rank_str = getenv("SLURM_PROCID");
+    const char *size_str = getenv("SLURM_NTASKS");
+    if (!rank_str) rank_str = getenv("OMPI_COMM_WORLD_RANK");
+    if (!size_str) size_str = getenv("OMPI_COMM_WORLD_SIZE");
+    if (!rank_str || !size_str) {
+        fprintf(stderr, "CAPE UCX: cannot determine rank/size. "
+                "Run via srun (sets SLURM_PROCID/SLURM_NTASKS) "
+                "or compile with -DUSE_PMIX.\n");
+        exit(1);
     }
+    node      = (unsigned long)atoi(rank_str);
+    num_nodes = atoi(size_str);
+    CAPE_DBG("rank/size resolved via env num_nodes=%d", num_nodes);
 #endif
-    }
 
     /* 2. Initialise UCX context */
     CAPE_DBG("ucp_init begin");
@@ -2614,9 +2518,6 @@ static void cape_ucx_init(void)
     CAPE_DBG("ucp_worker_get_address done len=%zu", local_addr_len);
 
 #ifdef USE_PMIX
-    /* Multi-worker mode never inited PMIx; use the fs exchange below. */
-    if (cape_worker_count == 1) {
-    pmix_status_t pst;
     char pmix_key[64];
     snprintf(pmix_key, sizeof(pmix_key), "cape_ucx_addr_%ld", node);
 
@@ -2687,16 +2588,13 @@ static void cape_ucx_init(void)
         }
         CAPE_DBG("ucp_ep_create done peer=%d", i);
     }
-    } else
+#else
+    const char *jobid    = cape_ucx_bootstrap_id();
+    const char *sharedir = cape_ucx_bootstrap_dir();
+    CAPE_DBG("fs bootstrap begin dir=%s id=%s", sharedir, jobid);
+    ucx_exchange_addresses_via_fs(sharedir, jobid, local_addr, local_addr_len);
+    CAPE_DBG("fs bootstrap done");
 #endif
-    {
-        const char *jobid    = cape_ucx_bootstrap_id();
-        const char *sharedir = cape_ucx_bootstrap_dir();
-        CAPE_DBG("fs bootstrap begin dir=%s id=%s", sharedir, jobid);
-        ucx_exchange_addresses_via_fs(sharedir, jobid, local_addr,
-                                      local_addr_len);
-        CAPE_DBG("fs bootstrap done");
-    }
 
     ucp_worker_release_address(ucp_worker, local_addr);
     CAPE_DBG("cape_ucx_init done");
@@ -2727,8 +2625,7 @@ static void cape_ucx_finalize(void)
     ucp_cleanup(ucp_context);
 
 #ifdef USE_PMIX
-    if (cape_pmix_inited)
-        PMIx_Finalize(NULL, 0);
+    PMIx_Finalize(NULL, 0);
 #endif
     /* Non-PMIx bootstrap files are cleaned up by the launch script
        (rm -rf bootstrap_dir).  Do NOT unlink them here — other
@@ -2782,10 +2679,8 @@ int cape_drain_userfaultfd(void);
  * 	If SIGTRAP (Debug signal): do the job that are required by CAPE program
  * ==========================================================================
  */
-/* One full DICKPT rank: fork+trace the app child, init UCX, run the
- * monitor loop. In multi-worker mode this runs once per cloned worker. */
-static int cape_monitor_rank_main(int argc, char * argv[]){
-	char * exec_file;
+int main(int argc, char * argv[]){
+	char * exec_file; 
 	int status, rc;
 	struct user u ;
 	struct user_regs_struct regs;
@@ -3251,83 +3146,6 @@ static int cape_monitor_rank_main(int argc, char * argv[]){
 	cape_ucx_finalize();
 	cape_profile_report();
 	return 0;
-}
-
-/* Multi-worker launcher. With CAPE_WORKERS_PER_NODE=W > 1 it clone()s W
- * independent monitor ranks (see the comment at cape_worker_count for the
- * clone-flag rationale) and then only supervises: wait for all workers,
- * kill the survivors if one fails, propagate the exit status. With W == 1
- * it degenerates to the original single-rank monitor with zero overhead.
- *
- * The clone happens BEFORE any monitor state exists (no fds, no UCX, no
- * traced child), so the copy-on-write duplication has no side effects to
- * worry about: each worker builds its whole world from scratch. */
-int main(int argc, char * argv[]){
-	int nworkers = cape_env_int("CAPE_WORKERS_PER_NODE", 1);
-	pid_t *worker_pids;
-	int spawned = 0, failures = 0;
-	int i;
-
-	if (nworkers < 1)
-		nworkers = 1;
-	cape_worker_count = nworkers;
-	if (nworkers == 1)
-		return cape_monitor_rank_main(argc, argv);
-
-	worker_pids = calloc(nworkers, sizeof(*worker_pids));
-	if (worker_pids == NULL) {
-		perror("calloc(worker_pids)");
-		return 1;
-	}
-
-	for (i = 0; i < nworkers; i++) {
-		/* Raw clone, fork-style (no CLONE_* sharing flags, child
-		 * continues on a CoW copy of the parent's stack). SIGCHLD is
-		 * the termination signal so wait() below sees the workers.
-		 * x86_64 arg order: flags, stack, parent_tid, child_tid, tls. */
-		long pid = syscall(SYS_clone, (unsigned long)SIGCHLD,
-				   NULL, NULL, NULL, 0UL);
-		if (pid == 0) {
-			cape_worker_index = i;
-			free(worker_pids);
-			exit(cape_monitor_rank_main(argc, argv));
-		}
-		if (pid < 0) {
-			perror("clone(worker)");
-			failures++;
-			break;
-		}
-		worker_pids[i] = (pid_t)pid;
-		spawned++;
-	}
-
-	while (spawned > 0) {
-		int status;
-		pid_t p = wait(&status);
-		if (p < 0) {
-			if (errno == EINTR)
-				continue;
-			perror("wait(worker)");
-			break;
-		}
-		spawned--;
-		if ((WIFEXITED(status) && WEXITSTATUS(status) != 0) ||
-		    WIFSIGNALED(status)) {
-			fprintf(stderr,
-				"CAPE monitor: worker pid=%d failed (status=0x%x); "
-				"stopping remaining workers\n", (int)p, status);
-			if (failures++ == 0) {
-				for (i = 0; i < nworkers; i++) {
-					if (worker_pids[i] != 0 &&
-					    worker_pids[i] != p)
-						kill(worker_pids[i], SIGTERM);
-				}
-			}
-		}
-	}
-
-	free(worker_pids);
-	return failures != 0 ? 1 : 0;
 }
 
 /* ----------------------------------------------------------------
@@ -5755,18 +5573,6 @@ static void cape_resolve_topology(void)
 	ls = cape_env_int("CAPE_RANKS_PER_NODE", -1);
 	if (ls <= 0)
 		ls = cape_env_int("SLURM_NTASKS_PER_NODE", -1);
-	if (cape_worker_count > 1) {
-		/* Cloned workers multiply the per-node rank count. lr/ls above
-		 * describe launched tasks; expand them to worker granularity.
-		 * If the task env is missing, assume one task per node — the
-		 * normal launch for multi-worker mode. */
-		if (lr < 0 || ls <= 0) {
-			lr = 0;
-			ls = 1;
-		}
-		lr = lr * cape_worker_count + cape_worker_index;
-		ls = ls * cape_worker_count;
-	}
 	if (lr < 0 || ls <= 1)
 		return;                 /* nothing co-located */
 	if (num_nodes % ls != 0 || lr >= ls)

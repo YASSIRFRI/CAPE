@@ -37,12 +37,30 @@
  *     when the monitor write-protects them; otherwise a first write to a
  *     not-yet-resident page would not fault and the delta would be missed.
  *   - The double-buffer scratch (unew) is ordinary heap memory: never shipped.
+ *   - Compute threads: the Jacobi sweep and the conditional write-back are
+ *     split over CAPE_COMPUTE_THREADS threads (default: one per CPU in the
+ *     process affinity mask). Threads are raw clone(2) with
+ *     CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD — NOT fork-like
+ *     copies — so there is exactly ONE cube, ONE address space, ONE uffd
+ *     dirty-tracking domain, and therefore still one checkpoint per node.
+ *     Only the DICKPT-oblivious number crunching runs in the threads; every
+ *     dickpt_* signal is issued by the main thread while the workers are
+ *     joined, so the monitor's ptrace view is unchanged. Thread stacks are
+ *     private mmaps, never part of the tracked region.
  */
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <sched.h>
+#include <errno.h>
+#include <stdint.h>
+#include <unistd.h>
 #include <sys/time.h>
+#include <sys/mman.h>
+#include <sys/syscall.h>
+#include <linux/futex.h>
 #include "../../include/cape_dickpt.h"
 
 #define DEFAULT_N 128
@@ -57,6 +75,128 @@ static unsigned long get_ms_of_day(void)
 	struct timeval tv;
 	gettimeofday(&tv, NULL);
 	return (unsigned long)(tv.tv_sec * 1000UL + tv.tv_usec / 1000UL);
+}
+
+/* ── clone(2)-based compute threads ──────────────────────────────────────
+ * Minimal thread pool substitute: per phase we clone one worker per plane
+ * sub-slab, each runs the phase kernel on its planes and exits; the parent
+ * joins on the CLONE_CHILD_CLEARTID futex the kernel clears at thread exit.
+ * All VM-sharing flags ON (threads, not processes): one cube, one uffd. */
+
+#define HB_STACK_BYTES (1u << 20)
+
+enum hb_phase { HB_SWEEP, HB_WRITEBACK };
+
+struct hb_task {
+	enum hb_phase phase;
+	int i_lo, i_hi;              /* this worker's plane range */
+	int n;
+	size_t plane;
+	double *u, *unew;
+	int32_t join_futex;          /* nonzero while thread alive */
+	char *stack;                 /* private mmap, reused every phase */
+};
+
+static void hb_kernel(const struct hb_task *t)
+{
+	int n = t->n, i, j, k;
+	size_t plane = t->plane;
+	double *u = t->u, *unew = t->unew;
+
+#define TU(i, j, k)    u[((size_t)(i) * plane) + ((size_t)(j) * n) + (k)]
+#define TUNEW(i, j, k) unew[((size_t)(i) * plane) + ((size_t)(j) * n) + (k)]
+	if (t->phase == HB_SWEEP) {
+		for (i = t->i_lo; i < t->i_hi; i++)
+			for (j = 1; j < n - 1; j++)
+				for (k = 1; k < n - 1; k++)
+					TUNEW(i, j, k) = (1.0 / 6.0) *
+						(TU(i - 1, j, k) + TU(i + 1, j, k) +
+						 TU(i, j - 1, k) + TU(i, j + 1, k) +
+						 TU(i, j, k - 1) + TU(i, j, k + 1));
+	} else {
+		/* Conditional write-back: see the comment at the call site —
+		 * skipping unchanged cells is what keeps checkpoints tiny. */
+		for (i = t->i_lo; i < t->i_hi; i++)
+			for (j = 1; j < n - 1; j++)
+				for (k = 1; k < n - 1; k++)
+					if (TUNEW(i, j, k) != TU(i, j, k))
+						TU(i, j, k) = TUNEW(i, j, k);
+	}
+#undef TU
+#undef TUNEW
+}
+
+static int hb_worker(void *arg)
+{
+	hb_kernel((const struct hb_task *)arg);
+	return 0;
+}
+
+static int hb_thread_count(void)
+{
+	const char *e = getenv("CAPE_COMPUTE_THREADS");
+	cpu_set_t set;
+	int nt = 0;
+
+	if (e != NULL && e[0] != '\0')
+		nt = atoi(e);
+	if (nt <= 0 && sched_getaffinity(0, sizeof(set), &set) == 0)
+		nt = CPU_COUNT(&set);
+	if (nt <= 0)
+		nt = 1;
+	return nt;
+}
+
+/* Run one phase over [i_lo, i_hi) with nt workers (main thread runs slab 0
+ * itself, so nt==1 degenerates to the original serial loop with no clone). */
+static int hb_run_phase(struct hb_task *tasks, int nt, enum hb_phase phase,
+			int i_lo, int i_hi)
+{
+	int planes = i_hi - i_lo;
+	int t, spawned;
+
+	if (planes <= 0)
+		return 0;
+	if (nt > planes)
+		nt = planes;
+
+	for (t = 0; t < nt; t++) {
+		tasks[t].phase = phase;
+		tasks[t].i_lo = i_lo + (int)(((long)planes * t) / nt);
+		tasks[t].i_hi = i_lo + (int)(((long)planes * (t + 1)) / nt);
+	}
+
+	spawned = 0;
+	for (t = 1; t < nt; t++) {
+		struct hb_task *w = &tasks[t];
+		int flags = CLONE_VM | CLONE_FS | CLONE_FILES |
+			    CLONE_SIGHAND | CLONE_THREAD |
+			    CLONE_CHILD_CLEARTID;
+		w->join_futex = 1;
+		if (clone(hb_worker, w->stack + HB_STACK_BYTES, flags, w,
+			  NULL, NULL, &w->join_futex) == -1) {
+			/* Can't spawn: fold the remaining slabs into the main
+			 * thread's share by running them inline below. */
+			w->join_futex = 0;
+			fprintf(stderr, "heat3d: clone failed (%s); "
+				"running slab %d inline\n", strerror(errno), t);
+			hb_kernel(w);
+			continue;
+		}
+		spawned++;
+	}
+
+	hb_kernel(&tasks[0]);
+
+	for (t = 1; t < nt; t++) {
+		struct hb_task *w = &tasks[t];
+		int32_t v;
+		while ((v = __atomic_load_n(&w->join_futex,
+					    __ATOMIC_ACQUIRE)) != 0)
+			syscall(SYS_futex, &w->join_futex, FUTEX_WAIT,
+				v, NULL, NULL, 0);
+	}
+	return spawned;
 }
 
 int main(int argc, char *argv[])
@@ -106,6 +246,42 @@ int main(int argc, char *argv[])
 			node, bytes);
 		return 1;
 	}
+
+	/* Compute-thread pool: shared task descriptors + private stacks.
+	 * Allocated before tracking starts; both live outside the tracked
+	 * region so thread-private state is never shipped in a checkpoint. */
+	int nthreads = hb_thread_count();
+	struct hb_task *tasks = calloc(nthreads, sizeof(*tasks));
+	if (tasks == NULL) {
+		fprintf(stderr, "node %lu: task alloc failed\n", node);
+		return 1;
+	}
+	{
+		int t;
+		for (t = 0; t < nthreads; t++) {
+			tasks[t].n = n;
+			tasks[t].plane = plane;
+			tasks[t].u = u;
+			tasks[t].unew = unew;
+			if (t == 0)
+				continue;   /* main thread needs no stack */
+			tasks[t].stack = mmap(NULL, HB_STACK_BYTES,
+					      PROT_READ | PROT_WRITE,
+					      MAP_PRIVATE | MAP_ANONYMOUS |
+					      MAP_STACK, -1, 0);
+			if (tasks[t].stack == MAP_FAILED) {
+				fprintf(stderr,
+					"node %lu: stack mmap failed (%s); "
+					"using %d threads\n",
+					node, strerror(errno), t);
+				nthreads = t;
+				break;
+			}
+		}
+	}
+	if (node == 0)
+		printf("heat3d: %d compute thread(s) per node\n", nthreads);
+
 	dickpt_send_num_jobs((unsigned long)n);
 
 #define U(i, j, k)    u[((size_t)(i) * plane) + ((size_t)(j) * n) + (k)]
@@ -153,31 +329,28 @@ int main(int argc, char *argv[])
 
 			dickpt_start_ckpt();
 
-			/* Jacobi sweep over this rank's interior planes. Reads the
-			 * neighbours' halo planes produced by the previous merge. */
-			for (i = i_lo; i < i_hi; i++)
-				for (j = 1; j < n - 1; j++)
-					for (k = 1; k < n - 1; k++)
-						UNEW(i, j, k) = (1.0 / 6.0) *
-							(U(i - 1, j, k) + U(i + 1, j, k) +
-							 U(i, j - 1, k) + U(i, j + 1, k) +
-							 U(i, j, k - 1) + U(i, j, k + 1));
+			/* Jacobi sweep over this rank's interior planes, split
+			 * over the compute threads by sub-slab. Reads the
+			 * neighbours' halo planes produced by the previous
+			 * merge; UNEW is written on disjoint planes per thread,
+			 * so no synchronization is needed inside the phase. */
+			hb_run_phase(tasks, nthreads, HB_SWEEP, i_lo, i_hi);
 
-			/* Commit our slab into the shared cube (the dirty set).
-			 * Write back ONLY cells whose value actually changed. Ahead
-			 * of the diffusion front the field is still exactly COLD and
-			 * the Jacobi average of all-COLD neighbours is exactly COLD
-			 * (IEEE: 0+0+...=0), so those cells are skipped and their
-			 * pages are never faulted/dirtied. This is what makes the
-			 * incremental checkpoint start tiny and grow ~1 plane/iter as
-			 * the front sweeps through the cube — the whole premise of the
-			 * benchmark. An unconditional write would dirty the entire
-			 * slab every iteration and erase DICKPT's advantage. */
-			for (i = i_lo; i < i_hi; i++)
-				for (j = 1; j < n - 1; j++)
-					for (k = 1; k < n - 1; k++)
-						if (UNEW(i, j, k) != U(i, j, k))
-							U(i, j, k) = UNEW(i, j, k);
+			/* Commit our slab into the shared cube (the dirty set),
+			 * same sub-slab split. Write back ONLY cells whose value
+			 * actually changed. Ahead of the diffusion front the
+			 * field is still exactly COLD and the Jacobi average of
+			 * all-COLD neighbours is exactly COLD (IEEE: 0+0+...=0),
+			 * so those cells are skipped and their pages are never
+			 * faulted/dirtied. This is what makes the incremental
+			 * checkpoint start tiny and grow ~1 plane/iter as the
+			 * front sweeps through the cube — the whole premise of
+			 * the benchmark. An unconditional write would dirty the
+			 * entire slab every iteration and erase DICKPT's
+			 * advantage. The write-back MUST be a separate phase
+			 * after the sweep completes: it mutates U planes that
+			 * neighbouring sub-slabs' sweeps read. */
+			hb_run_phase(tasks, nthreads, HB_WRITEBACK, i_lo, i_hi);
 
 			dickpt_generate_ckpt();
 			dickpt_allreduce_ckpt();
