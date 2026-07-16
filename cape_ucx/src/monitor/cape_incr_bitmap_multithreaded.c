@@ -31,6 +31,7 @@
 #include <linux/sched.h>
 #include <sched.h>
 #include <linux/userfaultfd.h>
+#include <linux/futex.h>
 #include <dirent.h>
 #include <sys/personality.h>
 #include <sys/prctl.h>
@@ -93,6 +94,60 @@ int child_id;
 int control_fd = -1;
 int userfault_fd = -1;
 static int epoll_fd = -1;
+
+/* ── Multithreaded fault handling ────────────────────────────────────────
+ * With a multithreaded app, WP faults arrive in bursts: while the single
+ * monitor thread snapshots one page (4 KiB process_vm_readv + 2 ioctls),
+ * every other app thread that hits a protected page sits blocked in the
+ * kernel. A small pool of clone(2) fault-handler threads (CLONE_VM — real
+ * threads inside the monitor) serves the shared userfaultfd concurrently:
+ * reads of uffd messages are kernel-atomic, the page-list insert is the
+ * only shared mutation and goes under a futex lock, and the pre-image
+ * snapshot is race-free because every writer to that page stays blocked
+ * until the handler clears WP *after* capturing.
+ *
+ * Quiescence rule: two app threads faulting the same page produce TWO uffd
+ * events. The second is a harmless duplicate — unless it is still queued
+ * when the app reaches S_GENERATE and the next iteration re-protects the
+ * ranges: handling it then would clear WP on a live page and lose its
+ * dirty bit. (This race predates the pool — a lone monitor thread can also
+ * pick the stale event up late.) cape_fault_quiesce() therefore drains the
+ * queue AND waits for in-flight handlers before every generate.
+ *
+ * Pool size: CAPE_MONITOR_FAULT_THREADS (default 4, 0 = serial fallback).
+ * Handlers run on the pre-pin affinity mask (the whole node share), not the
+ * monitor's single pinned core: a handler only executes while the faulting
+ * app thread is blocked, so it borrows exactly the core that went idle. */
+#define CAPE_FAULT_THREADS_MAX 16
+#define CAPE_FAULT_STACK_BYTES (256u * 1024u)
+static int cape_fault_pool_size;                 /* running handler count */
+static volatile int cape_fault_pool_run;
+static volatile int cape_fault_pool_err;
+static int cape_fault_inflight;                  /* atomic: events being handled */
+static int32_t cape_fault_join[CAPE_FAULT_THREADS_MAX];
+static char *cape_fault_stack[CAPE_FAULT_THREADS_MAX];
+static cpu_set_t cape_prepin_affinity;           /* mask before monitor self-pin */
+static int cape_prepin_affinity_valid;
+static int32_t cape_pagelist_lock_word;
+
+static void cape_pagelist_lock(void)
+{
+	int32_t zero = 0;
+	while (!__atomic_compare_exchange_n(&cape_pagelist_lock_word, &zero, 1,
+					    0, __ATOMIC_ACQUIRE,
+					    __ATOMIC_RELAXED)) {
+		syscall(SYS_futex, &cape_pagelist_lock_word, FUTEX_WAIT,
+			1, NULL, NULL, 0);
+		zero = 0;
+	}
+}
+
+static void cape_pagelist_unlock(void)
+{
+	__atomic_store_n(&cape_pagelist_lock_word, 0, __ATOMIC_RELEASE);
+	syscall(SYS_futex, &cape_pagelist_lock_word, FUTEX_WAKE,
+		1, NULL, NULL, 0);
+}
 
 struct cape_dickpt_range *tracked_ranges = NULL;
 size_t tracked_range_count = 0;
@@ -1208,12 +1263,14 @@ static int cape_capture_dirty_page(unsigned int pid, unsigned long fault_addr)
 	CAPE_PROFILE_NS_START(start_ns);
 
 	aligned_addr = fault_addr & ~(PAGE_SIZE - 1);
-	temp_node = list_head;
-	while (temp_node != NULL && temp_node->addr < aligned_addr)
-		temp_node = temp_node->next;
-	if (temp_node != NULL && temp_node->addr == aligned_addr)
-		return 0;
 
+	/* Snapshot BEFORE taking the lock and before the caller clears WP:
+	 * every writer to this page is still blocked in the fault, so the
+	 * pre-image cannot change under us. A concurrent handler for a
+	 * duplicate fault on the same page reads the same bytes; the loser
+	 * of the insert race below just frees its copy. The list itself is
+	 * only walked/mutated under cape_pagelist_lock — concurrent inserts
+	 * rewire next/before pointers. */
 	current_node = malloc(sizeof(struct page_node));
 	if (current_node == NULL)
 		return 1;
@@ -1226,36 +1283,35 @@ static int cape_capture_dirty_page(unsigned int pid, unsigned long fault_addr)
 
 	current_node->addr = aligned_addr;
 
+	cape_pagelist_lock();
+	temp_node = list_head;
+	while (temp_node != NULL && temp_node->addr < aligned_addr)
+		temp_node = temp_node->next;
+	if (temp_node != NULL && temp_node->addr == aligned_addr) {
+		cape_pagelist_unlock();
+		free(current_node);
+		return 0;
+	}
+
 	if (list_head == NULL) {
 		list_head = current_node;
 		list_end = current_node;
-		CAPE_PROFILE_ADD_NS(dirty_capture_ns, start_ns);
-		CAPE_PROFILE_INC(dirty_pages_captured);
-		return 0;
-	}
-
-	if (aligned_addr > list_end->addr) {
+	} else if (aligned_addr > list_end->addr) {
 		current_node->before = list_end;
 		list_end->next = current_node;
 		list_end = current_node;
-		CAPE_PROFILE_ADD_NS(dirty_capture_ns, start_ns);
-		CAPE_PROFILE_INC(dirty_pages_captured);
-		return 0;
-	}
-
-	if (aligned_addr < list_head->addr) {
+	} else if (aligned_addr < list_head->addr) {
 		current_node->next = list_head;
 		list_head->before = current_node;
 		list_head = current_node;
-		CAPE_PROFILE_ADD_NS(dirty_capture_ns, start_ns);
-		CAPE_PROFILE_INC(dirty_pages_captured);
-		return 0;
+	} else {
+		current_node->next = temp_node;
+		current_node->before = temp_node->before;
+		temp_node->before->next = current_node;
+		temp_node->before = current_node;
 	}
+	cape_pagelist_unlock();
 
-	current_node->next = temp_node;
-	current_node->before = temp_node->before;
-	temp_node->before->next = current_node;
-	temp_node->before = current_node;
 	CAPE_PROFILE_ADD_NS(dirty_capture_ns, start_ns);
 	CAPE_PROFILE_INC(dirty_pages_captured);
 	return 0;
@@ -1301,6 +1357,136 @@ static int cape_handle_userfault_event(void)
 	return 0;
 }
 
+/* ── Fault-handler pool ─────────────────────────────────────────────────── */
+
+static int cape_fault_worker(void *arg)
+{
+	(void)arg;
+	if (cape_prepin_affinity_valid)
+		sched_setaffinity(0, sizeof(cape_prepin_affinity),
+				  &cape_prepin_affinity);
+
+	while (cape_fault_pool_run) {
+		struct epoll_event ev;
+		int n = epoll_wait(epoll_fd, &ev, 1, 100);
+
+		if (n < 0) {
+			if (errno == EINTR)
+				continue;
+			break;
+		}
+		if (n == 0 || (ev.events & EPOLLIN) == 0)
+			continue;
+
+		/* Claim before reading so quiesce never observes an event that
+		 * is neither queued nor accounted for. The read inside
+		 * cape_handle_userfault_event is kernel-atomic per message;
+		 * EAGAIN (another handler won) is a clean no-op. */
+		__atomic_add_fetch(&cape_fault_inflight, 1, __ATOMIC_ACQ_REL);
+		if (cape_handle_userfault_event() != 0)
+			cape_fault_pool_err = 1;
+		__atomic_sub_fetch(&cape_fault_inflight, 1, __ATOMIC_ACQ_REL);
+	}
+	return 0;
+}
+
+static void cape_fault_pool_start(void)
+{
+	int want = cape_env_int("CAPE_MONITOR_FAULT_THREADS", 4);
+	int t;
+
+	if (want > CAPE_FAULT_THREADS_MAX)
+		want = CAPE_FAULT_THREADS_MAX;
+	if (want <= 0 || cape_fault_pool_size > 0)
+		return;
+
+	cape_fault_pool_run = 1;
+	for (t = 0; t < want; t++) {
+		int flags = CLONE_VM | CLONE_FS | CLONE_FILES |
+			    CLONE_SIGHAND | CLONE_THREAD |
+			    CLONE_CHILD_CLEARTID;
+
+		cape_fault_stack[t] = mmap(NULL, CAPE_FAULT_STACK_BYTES,
+					   PROT_READ | PROT_WRITE,
+					   MAP_PRIVATE | MAP_ANONYMOUS |
+					   MAP_STACK, -1, 0);
+		if (cape_fault_stack[t] == MAP_FAILED) {
+			cape_fault_stack[t] = NULL;
+			break;
+		}
+		cape_fault_join[t] = 1;
+		if (clone(cape_fault_worker,
+			  cape_fault_stack[t] + CAPE_FAULT_STACK_BYTES,
+			  flags, NULL, NULL, NULL,
+			  &cape_fault_join[t]) == -1) {
+			munmap(cape_fault_stack[t], CAPE_FAULT_STACK_BYTES);
+			cape_fault_stack[t] = NULL;
+			cape_fault_join[t] = 0;
+			break;
+		}
+		cape_fault_pool_size++;
+	}
+	if (cape_fault_pool_size < want)
+		fprintf(stderr,
+			"Monitor %ld: fault pool degraded to %d/%d threads\n",
+			node, cape_fault_pool_size, want);
+	dprintf("Monitor %ld: fault pool started threads=%d\n",
+		node, cape_fault_pool_size);
+}
+
+static void cape_fault_pool_stop(void)
+{
+	int t;
+
+	if (cape_fault_pool_size == 0)
+		return;
+	cape_fault_pool_run = 0;
+	for (t = 0; t < cape_fault_pool_size; t++) {
+		int32_t v;
+		while ((v = __atomic_load_n(&cape_fault_join[t],
+					    __ATOMIC_ACQUIRE)) != 0)
+			syscall(SYS_futex, &cape_fault_join[t], FUTEX_WAIT,
+				v, NULL, NULL, 0);
+		munmap(cape_fault_stack[t], CAPE_FAULT_STACK_BYTES);
+		cape_fault_stack[t] = NULL;
+	}
+	cape_fault_pool_size = 0;
+}
+
+/* Drain the uffd queue and wait out in-flight handlers. MUST run before
+ * every checkpoint generation: a stale duplicate-fault event handled after
+ * the next write-protect cycle would clear WP on a live page and silently
+ * drop its delta. (Needed even with the pool off — see the pool comment.) */
+static int cape_fault_quiesce(void)
+{
+	if (userfault_fd < 0 || !tracking_is_enabled)
+		return 0;
+
+	for (;;) {
+		struct epoll_event ev;
+
+		if (cape_fault_pool_err)
+			return -1;
+		if (cape_fault_pool_size == 0) {
+			/* Serial mode: this thread owns the queue. */
+			if (cape_drain_userfaultfd() != 0)
+				return -1;
+			break;
+		}
+		if (__atomic_load_n(&cape_fault_inflight,
+				    __ATOMIC_ACQUIRE) == 0 &&
+		    epoll_wait(epoll_fd, &ev, 1, 0) == 0)
+			break;
+		sched_yield();
+	}
+
+	/* Pair with the handlers' unlock: everything they linked into the
+	 * page list happens-before our walk in generate_checkpoint. */
+	cape_pagelist_lock();
+	cape_pagelist_unlock();
+	return 0;
+}
+
 int cape_drain_userfaultfd(void)
 {
 	struct epoll_event ev;
@@ -1323,7 +1509,9 @@ int cape_wait_for_child_event(pid_t pid, int *status)
 	CAPE_PROFILE_NS_VAR(total_start_ns);
 	CAPE_PROFILE_NS_START(total_start_ns);
 
-	if (userfault_fd < 0 || !tracking_is_enabled)
+	/* With the fault pool running, uffd service is off this thread
+	 * entirely — plain blocking waitpid, no 1ms poll loop. */
+	if (userfault_fd < 0 || !tracking_is_enabled || cape_fault_pool_size > 0)
 	{
 		CAPE_PROFILE_NS_VAR(wait_start_ns);
 		pid_t rc;
@@ -1497,6 +1685,8 @@ int cape_receive_userfaultfd_setup(void)
 		perror("epoll_ctl(userfault_fd)");
 		return 1;
 	}
+
+	cape_fault_pool_start();
 
 	return 0;
 }
@@ -2772,6 +2962,13 @@ int main(int argc, char * argv[]){
 			control_fd = control_pair[0];
 			close(control_pair[1]);
 			CAPE_DBG("parent after fork child_pid=%d", child_id);
+			/* Remember the full task mask before self-pinning: the
+			 * fault-handler threads run on it, not on the monitor's
+			 * single core (they execute while faulting app threads
+			 * are blocked, i.e. on cores that just went idle). */
+			if (sched_getaffinity(0, sizeof(cape_prepin_affinity),
+					      &cape_prepin_affinity) == 0)
+				cape_prepin_affinity_valid = 1;
 			if (cape_apply_affinity(1) != 0)
 				return 1;
 			CAPE_DBG("parent before cape_ucx_init");
@@ -3138,6 +3335,7 @@ int main(int argc, char * argv[]){
 		}
 		ptrace(PTRACE_CONT, child_id, NULL, NULL);
 	}
+	cape_fault_pool_stop();
 	if (userfault_fd >= 0)
 		close(userfault_fd);
 	if (control_fd >= 0)
@@ -3483,7 +3681,9 @@ int require_generate_checkpoint(){
 	int rc=0;
 
 	CAPE_DBG("require_generate_checkpoint enter");
-	rc = cape_drain_userfaultfd();
+	/* Quiesce, don't just drain: waits for in-flight pool handlers too,
+	 * and publishes their page-list inserts to this thread. */
+	rc = cape_fault_quiesce();
 	if (rc != 0)
 		return rc;
 
