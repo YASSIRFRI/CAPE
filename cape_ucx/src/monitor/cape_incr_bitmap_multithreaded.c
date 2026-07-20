@@ -1264,13 +1264,27 @@ static int cape_capture_dirty_page(unsigned int pid, unsigned long fault_addr)
 
 	aligned_addr = fault_addr & ~(PAGE_SIZE - 1);
 
-	/* Snapshot BEFORE taking the lock and before the caller clears WP:
-	 * every writer to this page is still blocked in the fault, so the
-	 * pre-image cannot change under us. A concurrent handler for a
-	 * duplicate fault on the same page reads the same bytes; the loser
-	 * of the insert race below just frees its copy. The list itself is
-	 * only walked/mutated under cape_pagelist_lock — concurrent inserts
-	 * rewire next/before pointers. */
+	/* Duplicate fault (second thread hit the same protected page): the
+	 * pre-image is already captured, so skip the 4 KiB snapshot entirely
+	 * and let the caller just clear WP. Checked under the lock so a
+	 * fully-linked node is either seen here or raced below. */
+	cape_pagelist_lock();
+	temp_node = list_head;
+	while (temp_node != NULL && temp_node->addr < aligned_addr)
+		temp_node = temp_node->next;
+	if (temp_node != NULL && temp_node->addr == aligned_addr) {
+		cape_pagelist_unlock();
+		return 0;
+	}
+	cape_pagelist_unlock();
+
+	/* Snapshot before the caller clears WP: every writer to this page is
+	 * still blocked in the fault, so the pre-image cannot change under
+	 * us. Two handlers can still both pass the check above for the same
+	 * page; both read the same bytes and the loser of the insert race
+	 * below just frees its copy. The list itself is only walked/mutated
+	 * under cape_pagelist_lock — concurrent inserts rewire next/before
+	 * pointers. */
 	current_node = malloc(sizeof(struct page_node));
 	if (current_node == NULL)
 		return 1;
