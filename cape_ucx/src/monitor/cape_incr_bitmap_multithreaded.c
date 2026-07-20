@@ -153,6 +153,148 @@ struct cape_dickpt_range *tracked_ranges = NULL;
 size_t tracked_range_count = 0;
 int tracking_is_enabled = 0;
 
+/* ── O(1) duplicate-fault rejection ──────────────────────────────────────
+ * With W app compute threads writing, one protected page produces up to W
+ * uffd events: every thread that touches the page before the handler clears
+ * WP faults separately. Only the first needs a pre-image; the rest must
+ * merely be let through. Testing "already captured" by walking the sorted
+ * page list costs O(pages) *under the global lock*, so the duplicates alone
+ * burned O(W x pages^2) serialized pointer-chases per checkpoint — which is
+ * why the threaded monitor lost to the serial one as the dirty set grew.
+ *
+ * Instead each tracked page gets a stable index (ranges sorted by start,
+ * cumulative page bases) and a bit in cape_captured_bmp. The first faulter
+ * wins an atomic fetch_or and does the snapshot; duplicates see the bit set
+ * and return immediately — no lock, no malloc, no 4 KiB read. Pages outside
+ * any tracked range, and the whole path if index allocation fails, fall back
+ * to the locked list walk, which stays correct just slower. */
+struct cape_page_index_entry {
+	unsigned long start;     /* page-aligned range start */
+	unsigned long n_pages;
+	unsigned long base;      /* global index of this range's first page */
+};
+static struct cape_page_index_entry *cape_page_index;
+static size_t cape_page_index_count;
+static unsigned long cape_page_index_total;
+static uint8_t *cape_captured_bmp;
+
+static int cape_range_cmp(const void *a, const void *b)
+{
+	unsigned long sa = ((const struct cape_dickpt_range *)a)->start;
+	unsigned long sb = ((const struct cape_dickpt_range *)b)->start;
+
+	return (sa > sb) - (sa < sb);
+}
+
+/* Rebuild the page index. Called from the monitor thread only, at points
+ * where no handler can be mid-fault (tracking start, range registration,
+ * post-generate reset). */
+static void cape_page_index_rebuild(void)
+{
+	struct cape_dickpt_range *sorted = NULL;
+	unsigned long total = 0;
+	size_t i;
+
+	free(cape_page_index);
+	free(cape_captured_bmp);
+	cape_page_index = NULL;
+	cape_captured_bmp = NULL;
+	cape_page_index_count = 0;
+	cape_page_index_total = 0;
+
+	if (tracked_range_count == 0)
+		return;
+
+	sorted = malloc(tracked_range_count * sizeof(*sorted));
+	if (sorted == NULL)
+		return;
+	memcpy(sorted, tracked_ranges, tracked_range_count * sizeof(*sorted));
+	qsort(sorted, tracked_range_count, sizeof(*sorted), cape_range_cmp);
+
+	cape_page_index = malloc(tracked_range_count * sizeof(*cape_page_index));
+	if (cape_page_index == NULL) {
+		free(sorted);
+		return;
+	}
+
+	for (i = 0; i < tracked_range_count; ++i) {
+		unsigned long start = sorted[i].start & ~(PAGE_SIZE - 1);
+		unsigned long end = (sorted[i].start + sorted[i].len
+				     + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+
+		cape_page_index[i].start = start;
+		cape_page_index[i].n_pages = (end - start) / PAGE_SIZE;
+		cape_page_index[i].base = total;
+		total += cape_page_index[i].n_pages;
+	}
+	free(sorted);
+
+	cape_captured_bmp = calloc((total + 7) / 8, 1);
+	if (cape_captured_bmp == NULL) {
+		free(cape_page_index);
+		cape_page_index = NULL;
+		return;
+	}
+	cape_page_index_count = tracked_range_count;
+	cape_page_index_total = total;
+}
+
+static void cape_captured_reset(void)
+{
+	if (cape_captured_bmp != NULL)
+		memset(cape_captured_bmp, 0, (cape_page_index_total + 7) / 8);
+}
+
+/* Global page index of a page-aligned address, or -1 if untracked. */
+static long cape_page_index_of(unsigned long page_addr)
+{
+	size_t lo = 0, hi = cape_page_index_count;
+
+	if (cape_page_index == NULL)
+		return -1;
+	while (lo < hi) {
+		size_t mid = lo + (hi - lo) / 2;
+		const struct cape_page_index_entry *e = &cape_page_index[mid];
+
+		if (page_addr < e->start)
+			hi = mid;
+		else if (page_addr >= e->start + e->n_pages * PAGE_SIZE)
+			lo = mid + 1;
+		else
+			return (long)(e->base +
+				      (page_addr - e->start) / PAGE_SIZE);
+	}
+	return -1;
+}
+
+/* 1 if this caller is the first to claim the page this checkpoint round. */
+static int cape_captured_claim(long idx)
+{
+	uint8_t bit = (uint8_t)(1u << (idx & 7));
+	uint8_t old = __atomic_fetch_or(&cape_captured_bmp[idx >> 3], bit,
+					__ATOMIC_ACQ_REL);
+
+	return (old & bit) == 0;
+}
+
+/* Re-mark every page already holding a pre-image. A rebuild renumbers the
+ * index, so without this a page captured earlier this round could be claimed
+ * again and its pre-image overwritten with post-write bytes — the diff in
+ * generate_checkpoint would then miss the delta. */
+static void cape_captured_rebuild_from_list(void)
+{
+	const struct page_node *p;
+
+	if (cape_captured_bmp == NULL)
+		return;
+	for (p = list_head; p != NULL; p = p->next) {
+		long idx = cape_page_index_of(p->addr);
+
+		if (idx >= 0)
+			cape_captured_claim(idx);
+	}
+}
+
 /* ===== bitmap S-section format =====
  *   [BMP_S:8] [n_dirty_pages:4]
  *   [page_addr_0:8] ... [page_addr_{n-1}:8]            // sorted ascending
@@ -1259,32 +1401,26 @@ static int cape_capture_dirty_page(unsigned int pid, unsigned long fault_addr)
 {
 	unsigned long aligned_addr;
 	struct page_node *temp_node, *current_node;
+	long page_idx;
 	CAPE_PROFILE_NS_VAR(start_ns);
 	CAPE_PROFILE_NS_START(start_ns);
 
 	aligned_addr = fault_addr & ~(PAGE_SIZE - 1);
 
-	/* Duplicate fault (second thread hit the same protected page): the
-	 * pre-image is already captured, so skip the 4 KiB snapshot entirely
-	 * and let the caller just clear WP. Checked under the lock so a
-	 * fully-linked node is either seen here or raced below. */
-	cape_pagelist_lock();
-	temp_node = list_head;
-	while (temp_node != NULL && temp_node->addr < aligned_addr)
-		temp_node = temp_node->next;
-	if (temp_node != NULL && temp_node->addr == aligned_addr) {
-		cape_pagelist_unlock();
+	/* Duplicate fault: another thread already captured this page's
+	 * pre-image, so there is nothing to do but let the caller clear WP.
+	 * Lock-free and O(1) — this is the common case once the app has more
+	 * compute threads than the page has distinct first-writers. */
+	page_idx = cape_page_index_of(aligned_addr);
+	if (page_idx >= 0 && !cape_captured_claim(page_idx))
 		return 0;
-	}
-	cape_pagelist_unlock();
 
 	/* Snapshot before the caller clears WP: every writer to this page is
 	 * still blocked in the fault, so the pre-image cannot change under
-	 * us. Two handlers can still both pass the check above for the same
-	 * page; both read the same bytes and the loser of the insert race
-	 * below just frees its copy. The list itself is only walked/mutated
-	 * under cape_pagelist_lock — concurrent inserts rewire next/before
-	 * pointers. */
+	 * us. Untracked pages (page_idx < 0) skip the claim and rely on the
+	 * duplicate check inside the locked insert below. The list is only
+	 * walked/mutated under cape_pagelist_lock — concurrent inserts rewire
+	 * next/before pointers. */
 	current_node = malloc(sizeof(struct page_node));
 	if (current_node == NULL)
 		return 1;
@@ -3222,6 +3358,17 @@ int main(int argc, char * argv[]){
 						tracked_ranges[tracked_range_count].start = addr_v;
 						tracked_ranges[tracked_range_count].len = len_v;
 						tracked_range_count++;
+						/* Drain handlers before swapping the index out
+						 * from under them; the child is stopped here so
+						 * no new faults can arrive. Pages already
+						 * claimed keep their bits: the rebuild renumbers
+						 * indices, so re-claiming is the safe reset. */
+						if (cape_fault_quiesce() != 0) {
+							fprintf(stderr, "Monitor %ld: quiesce failed on range add\n", node);
+							exit(1);
+						}
+						cape_page_index_rebuild();
+						cape_captured_rebuild_from_list();
 						if (tracking_is_enabled &&
 						    cape_userfault_writeprotect(addr_v, len_v, 1) == -1) {
 							perror("ioctl(UFFDIO_WRITEPROTECT add)");
@@ -3367,10 +3514,14 @@ int main(int argc, char * argv[]){
  * ----------------------------------------------------------------
  */
 int clear_list(struct page_node *list){
-	
+
+	/* New checkpoint round: every page may be captured again. Reset
+	 * before the early return so an empty list still clears the claims. */
+	cape_captured_reset();
+
 	if(list == NULL) return 0;
-	
-	struct page_node * temp_node, * current_node;	
+
+	struct page_node * temp_node, * current_node;
 	current_node = list;
 	while(current_node){
 		temp_node = current_node;
@@ -3457,6 +3608,7 @@ void tracer_wait ( pid_t pid, int * status, int options, struct user * u ){
 int lock_process_memory(unsigned int pid){
 	if (cape_receive_userfaultfd_setup() != 0)
 		return 1;
+	cape_page_index_rebuild();
 	tracking_is_enabled = 1;
 	return cape_writeprotect_tracked_ranges(1);
 }
