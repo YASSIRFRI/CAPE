@@ -1373,6 +1373,8 @@ static int cape_handle_userfault_event(void)
 
 /* ── Fault-handler pool ─────────────────────────────────────────────────── */
 
+int cape_drain_userfaultfd(void);
+
 static int cape_fault_worker(void *arg)
 {
 	(void)arg;
