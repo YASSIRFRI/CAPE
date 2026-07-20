@@ -118,6 +118,9 @@ static int epoll_fd = -1;
  * Handlers run on the pre-pin affinity mask (the whole node share), not the
  * monitor's single pinned core: a handler only executes while the faulting
  * app thread is blocked, so it borrows exactly the core that went idle. */
+#ifndef EPOLLEXCLUSIVE
+#define EPOLLEXCLUSIVE (1u << 28)
+#endif
 #define CAPE_FAULT_THREADS_MAX 16
 #define CAPE_FAULT_STACK_BYTES (256u * 1024u)
 static int cape_fault_pool_size;                 /* running handler count */
@@ -1467,6 +1470,10 @@ static int cape_capture_dirty_page(unsigned int pid, unsigned long fault_addr)
 	return 0;
 }
 
+/* Read and service ONE uffd message. Returns 1 if a message was consumed
+ * (caller should keep draining), 0 if the queue is empty (EAGAIN/EINTR),
+ * -1 on error. A consumed-but-uninteresting message (non-pagefault or a
+ * non-WP fault) still returns 1 so the drain loop keeps going. */
 static int cape_handle_userfault_event(void)
 {
 	struct uffd_msg msg;
@@ -1487,9 +1494,9 @@ static int cape_handle_userfault_event(void)
 	if ((size_t)nread < sizeof(msg))
 		return -1;
 	if (msg.event != UFFD_EVENT_PAGEFAULT)
-		return 0;
+		return 1;
 	if ((msg.arg.pagefault.flags & UFFD_PAGEFAULT_FLAG_WP) == 0)
-		return 0;
+		return 1;
 
 	CAPE_PROFILE_INC(userfault_events);
 	page_addr = msg.arg.pagefault.address & ~(PAGE_SIZE - 1);
@@ -1504,7 +1511,7 @@ static int cape_handle_userfault_event(void)
 	}
 
 	CAPE_PROFILE_ADD_NS(userfault_handle_ns, start_ns);
-	return 0;
+	return 1;
 }
 
 /* ── Fault-handler pool ─────────────────────────────────────────────────── */
@@ -1530,14 +1537,30 @@ static int cape_fault_worker(void *arg)
 		if (n == 0 || (ev.events & EPOLLIN) == 0)
 			continue;
 
-		/* Claim before reading so quiesce never observes an event that
-		 * is neither queued nor accounted for. The read inside
-		 * cape_handle_userfault_event is kernel-atomic per message;
-		 * EAGAIN (another handler won) is a clean no-op. */
-		__atomic_add_fetch(&cape_fault_inflight, 1, __ATOMIC_ACQ_REL);
-		if (cape_handle_userfault_event() != 0)
-			cape_fault_pool_err = 1;
-		__atomic_sub_fetch(&cape_fault_inflight, 1, __ATOMIC_ACQ_REL);
+		/* One wakeup, drain the whole burst: the uffd is level-
+		 * triggered and non-blocking, so read until EAGAIN instead of
+		 * paying an epoll_wait syscall per fault. Under a several-
+		 * hundred-page burst this collapses O(pages) epoll round-trips
+		 * to one. inflight is held per message so quiesce never sees an
+		 * event that is neither queued nor accounted for; reads are
+		 * kernel-atomic, so multiple workers draining the same fd just
+		 * take disjoint messages (the loser gets EAGAIN -> r==0). */
+		for (;;) {
+			int r;
+
+			__atomic_add_fetch(&cape_fault_inflight, 1,
+					   __ATOMIC_ACQ_REL);
+			r = cape_handle_userfault_event();
+			__atomic_sub_fetch(&cape_fault_inflight, 1,
+					   __ATOMIC_ACQ_REL);
+
+			if (r < 0) {
+				cape_fault_pool_err = 1;
+				break;
+			}
+			if (r == 0)
+				break;
+		}
 	}
 	return 0;
 }
@@ -1641,19 +1664,19 @@ static int cape_fault_quiesce(void)
 
 int cape_drain_userfaultfd(void)
 {
-	struct epoll_event ev;
-
 	if (userfault_fd < 0 || !tracking_is_enabled)
 		return 0;
 
-	while (epoll_wait(epoll_fd, &ev, 1, 0) > 0) {
-		if ((ev.events & EPOLLIN) == 0)
-			break;
-		if (cape_handle_userfault_event() != 0)
-			return -1;
-	}
+	/* Serial-mode drain: read until the queue empties. No epoll_wait per
+	 * message — the fd is non-blocking, so EAGAIN (r==0) is the terminator. */
+	for (;;) {
+		int r = cape_handle_userfault_event();
 
-	return 0;
+		if (r < 0)
+			return -1;
+		if (r == 0)
+			return 0;
+	}
 }
 
 int cape_wait_for_child_event(pid_t pid, int *status)
@@ -1737,7 +1760,7 @@ int cape_wait_for_child_event(pid_t pid, int *status)
 			for (i = 0; i < nfds; i++) {
 				if (evs[i].data.fd == userfault_fd &&
 				    (evs[i].events & EPOLLIN) != 0) {
-					if (cape_handle_userfault_event() != 0)
+					if (cape_drain_userfaultfd() != 0)
 						return -1;
 				}
 			}
@@ -1831,12 +1854,25 @@ int cape_receive_userfaultfd_setup(void)
 		return 1;
 	}
 	struct epoll_event ev;
-	ev.events = EPOLLIN;
+	/* EPOLLEXCLUSIVE: with the fault pool, several workers wait on this one
+	 * epoll fd. Without it every fault wakes ALL of them (thundering herd)
+	 * and all but one immediately re-block — wasted syscalls on the hot
+	 * path. EPOLLEXCLUSIVE tells the kernel to wake one waiter per event.
+	 * Harmless when the pool is off (single waiter). Fall back to plain
+	 * EPOLLIN if the kernel is too old to know the flag. */
+	ev.events = EPOLLIN | EPOLLEXCLUSIVE;
 	ev.data.fd = userfault_fd;
 	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, userfault_fd, &ev) < 0) {
+		if (errno == EINVAL) {
+			ev.events = EPOLLIN;
+			if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, userfault_fd,
+				      &ev) == 0)
+				goto epoll_added;
+		}
 		perror("epoll_ctl(userfault_fd)");
 		return 1;
 	}
+epoll_added:;
 
 	cape_fault_pool_start();
 
