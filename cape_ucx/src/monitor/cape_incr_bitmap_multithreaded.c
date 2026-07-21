@@ -128,6 +128,8 @@ static volatile int cape_fault_pool_run;
 static volatile int cape_fault_pool_err;
 static int cape_fault_inflight;                  /* atomic: events being handled */
 static int cape_fault_inflight_peak;             /* atomic: max concurrent handlers */
+static int cape_fault_pool_want;                 /* threads requested */
+static int cape_fault_pool_started;              /* threads that ran (survives stop) */
 static int32_t cape_fault_join[CAPE_FAULT_THREADS_MAX];
 static char *cape_fault_stack[CAPE_FAULT_THREADS_MAX];
 
@@ -1100,11 +1102,11 @@ static void cape_profile_report(void)
 		int w;
 		unsigned long total_ev = 0;
 
-		fprintf(stderr, "  %-30s : %d\n", "fault_pool_size",
-			cape_fault_pool_size);
+		fprintf(stderr, "  %-30s : %d (want %d)\n", "fault_pool_started",
+			cape_fault_pool_started, cape_fault_pool_want);
 		fprintf(stderr, "  %-30s : %d\n", "fault_inflight_peak",
 			cape_fault_inflight_peak);
-		for (w = 0; w < cape_fault_pool_size; ++w) {
+		for (w = 0; w < cape_fault_pool_started; ++w) {
 			fprintf(stderr,
 				"    worker[%d]  events=%-10lu wakeups=%-8lu last_cpu=%d\n",
 				w, cape_worker_stats[w].events,
@@ -1675,8 +1677,14 @@ static void cape_fault_pool_start(void)
 
 	if (want > CAPE_FAULT_THREADS_MAX)
 		want = CAPE_FAULT_THREADS_MAX;
-	if (want <= 0 || cape_fault_pool_size > 0)
+	cape_fault_pool_want = want;
+	if (want <= 0 || cape_fault_pool_size > 0) {
+		fprintf(stderr,
+			"Monitor %ld: fault pool NOT started (want=%d, already=%d)\n",
+			node, want, cape_fault_pool_size);
+		fflush(stderr);
 		return;
+	}
 
 	cape_fault_pool_run = 1;
 	for (t = 0; t < want; t++) {
@@ -1689,6 +1697,9 @@ static void cape_fault_pool_start(void)
 					   MAP_PRIVATE | MAP_ANONYMOUS |
 					   MAP_STACK, -1, 0);
 		if (cape_fault_stack[t] == MAP_FAILED) {
+			fprintf(stderr,
+				"Monitor %ld: fault pool mmap stack %d failed: %s\n",
+				node, t, strerror(errno));
 			cape_fault_stack[t] = NULL;
 			break;
 		}
@@ -1698,6 +1709,9 @@ static void cape_fault_pool_start(void)
 			  cape_fault_stack[t] + CAPE_FAULT_STACK_BYTES,
 			  flags, (void *)(long)t, NULL, NULL,
 			  &cape_fault_join[t]) == -1) {
+			fprintf(stderr,
+				"Monitor %ld: fault pool clone %d failed: %s\n",
+				node, t, strerror(errno));
 			munmap(cape_fault_stack[t], CAPE_FAULT_STACK_BYTES);
 			cape_fault_stack[t] = NULL;
 			cape_fault_join[t] = 0;
@@ -1705,12 +1719,10 @@ static void cape_fault_pool_start(void)
 		}
 		cape_fault_pool_size++;
 	}
-	if (cape_fault_pool_size < want)
-		fprintf(stderr,
-			"Monitor %ld: fault pool degraded to %d/%d threads\n",
-			node, cape_fault_pool_size, want);
-	dprintf("Monitor %ld: fault pool started threads=%d\n",
-		node, cape_fault_pool_size);
+	cape_fault_pool_started = cape_fault_pool_size;
+	fprintf(stderr, "Monitor %ld: fault pool started %d/%d threads\n",
+		node, cape_fault_pool_size, want);
+	fflush(stderr);
 }
 
 static void cape_fault_pool_stop(void)
