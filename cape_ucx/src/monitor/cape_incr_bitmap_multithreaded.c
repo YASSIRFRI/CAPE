@@ -196,6 +196,15 @@ static size_t cape_page_index_count;
 static unsigned long cape_page_index_total;
 static uint8_t *cape_captured_bmp;
 
+/* O(1) dirty-page capture. Each tracked page has a fixed slot indexed by its
+ * page index (assigned in ascending address order). A fault drops its
+ * pre-image node straight into cape_page_slot[idx] — no sorted linked-list
+ * walk (the old path was O(dirty) per page, ~110s of pointer-chasing at
+ * ~3200 dirty pages/iter). The list generate_checkpoint consumes is rebuilt
+ * from the slots in index order — which IS address order — at generate time,
+ * O(dirty) once. */
+static struct page_node **cape_page_slot;
+
 static int cape_range_cmp(const void *a, const void *b)
 {
 	unsigned long sa = ((const struct cape_dickpt_range *)a)->start;
@@ -215,8 +224,10 @@ static void cape_page_index_rebuild(void)
 
 	free(cape_page_index);
 	free(cape_captured_bmp);
+	free(cape_page_slot);
 	cape_page_index = NULL;
 	cape_captured_bmp = NULL;
+	cape_page_slot = NULL;
 	cape_page_index_count = 0;
 	cape_page_index_total = 0;
 
@@ -248,9 +259,14 @@ static void cape_page_index_rebuild(void)
 	free(sorted);
 
 	cape_captured_bmp = calloc((total + 7) / 8, 1);
-	if (cape_captured_bmp == NULL) {
+	cape_page_slot = calloc(total, sizeof(*cape_page_slot));
+	if (cape_captured_bmp == NULL || cape_page_slot == NULL) {
 		free(cape_page_index);
+		free(cape_captured_bmp);
+		free(cape_page_slot);
 		cape_page_index = NULL;
+		cape_captured_bmp = NULL;
+		cape_page_slot = NULL;
 		return;
 	}
 	cape_page_index_count = tracked_range_count;
@@ -1489,20 +1505,39 @@ static int cape_capture_dirty_page(unsigned int pid, unsigned long fault_addr)
 
 	aligned_addr = fault_addr & ~(PAGE_SIZE - 1);
 
-	/* Duplicate fault: another thread already captured this page's
-	 * pre-image, so there is nothing to do but let the caller clear WP.
-	 * Lock-free and O(1) — this is the common case once the app has more
-	 * compute threads than the page has distinct first-writers. */
+	/* Fast path: tracked page. The claim rejects duplicate faults O(1)
+	 * and lock-free; the winner snapshots straight into its fixed slot,
+	 * no linked-list walk. Only the pointers need zeroing — data[] is
+	 * fully overwritten by the read, so skip the 4 KiB memset. */
 	page_idx = cape_page_index_of(aligned_addr);
-	if (page_idx >= 0 && !cape_captured_claim(page_idx))
-		return 0;
+	if (page_idx >= 0) {
+		if (!cape_captured_claim(page_idx))
+			return 0;
 
-	/* Snapshot before the caller clears WP: every writer to this page is
-	 * still blocked in the fault, so the pre-image cannot change under
-	 * us. Untracked pages (page_idx < 0) skip the claim and rely on the
-	 * duplicate check inside the locked insert below. The list is only
-	 * walked/mutated under cape_pagelist_lock — concurrent inserts rewire
-	 * next/before pointers. */
+		current_node = malloc(sizeof(struct page_node));
+		if (current_node == NULL)
+			return 1;
+		if (read_remote_memory(pid, aligned_addr,
+				       &(current_node->data), PAGE_SIZE) != 0) {
+			free(current_node);
+			return 1;
+		}
+		current_node->addr = aligned_addr;
+		current_node->before = NULL;
+		current_node->next = NULL;
+		/* Distinct slots for distinct pages; the claim serialises the
+		 * one page. No lock needed even with the handler pool. */
+		cape_page_slot[page_idx] = current_node;
+
+		CAPE_PROFILE_ADD_NS(dirty_capture_ns, start_ns);
+		CAPE_PROFILE_INC(dirty_pages_captured);
+		return 0;
+	}
+
+	/* Slow fallback: page outside every tracked range (should not happen —
+	 * an unregistered scope is a transpiler bug). Keep the old sorted
+	 * linked-list insert so correctness is preserved; cape_materialize_
+	 * dirty_list merges these with the slot pages. */
 	current_node = malloc(sizeof(struct page_node));
 	if (current_node == NULL)
 		return 1;
@@ -1547,6 +1582,56 @@ static int cape_capture_dirty_page(unsigned int pid, unsigned long fault_addr)
 	CAPE_PROFILE_ADD_NS(dirty_capture_ns, start_ns);
 	CAPE_PROFILE_INC(dirty_pages_captured);
 	return 0;
+}
+
+/* Rebuild list_head/list_end from the captured slots in ascending address
+ * order (= index order). Runs once per generate on the monitor thread, after
+ * quiesce, so no handler is mid-capture. Slot pages are chained by append
+ * (O(1) each since indices ascend); any untracked pages already sitting in
+ * the list from the fallback path are preserved via sorted insert. */
+static void cape_materialize_dirty_list(void)
+{
+	unsigned long i;
+
+	if (cape_page_slot == NULL)
+		return;
+
+	for (i = 0; i < cape_page_index_total; ++i) {
+		struct page_node *node = cape_page_slot[i];
+
+		if (node == NULL)
+			continue;
+		cape_page_slot[i] = NULL;
+		node->before = NULL;
+		node->next = NULL;
+
+		if (list_head == NULL) {
+			list_head = list_end = node;
+		} else if (node->addr > list_end->addr) {
+			node->before = list_end;
+			list_end->next = node;
+			list_end = node;
+		} else {
+			struct page_node *p = list_head;
+
+			while (p != NULL && p->addr < node->addr)
+				p = p->next;
+			if (p == NULL) {
+				node->before = list_end;
+				list_end->next = node;
+				list_end = node;
+			} else if (p == list_head) {
+				node->next = list_head;
+				list_head->before = node;
+				list_head = node;
+			} else {
+				node->next = p;
+				node->before = p->before;
+				p->before->next = node;
+				p->before = node;
+			}
+		}
+	}
 }
 
 /* Read and service ONE uffd message. Returns 1 if a message was consumed
@@ -3517,13 +3602,17 @@ int main(int argc, char * argv[]){
 						tracked_range_count++;
 						/* Drain handlers before swapping the index out
 						 * from under them; the child is stopped here so
-						 * no new faults can arrive. Pages already
-						 * claimed keep their bits: the rebuild renumbers
-						 * indices, so re-claiming is the safe reset. */
+						 * no new faults can arrive. Move already-captured
+						 * pages from the slots into list_head first — the
+						 * rebuild frees and renumbers the slot array, so
+						 * their pre-images would otherwise be lost. Then
+						 * re-mark the captured bits under the new numbering
+						 * from the list. */
 						if (cape_fault_quiesce() != 0) {
 							fprintf(stderr, "Monitor %ld: quiesce failed on range add\n", node);
 							exit(1);
 						}
+						cape_materialize_dirty_list();
 						cape_page_index_rebuild();
 						cape_captured_rebuild_from_list();
 						if (tracking_is_enabled &&
@@ -4012,7 +4101,11 @@ int require_generate_checkpoint(){
 	if (rc != 0)
 		return rc;
 
-	//generate new check point	
+	/* Chain the O(1)-captured slot pages into list_head (address order)
+	 * for generate_checkpoint to consume. */
+	cape_materialize_dirty_list();
+
+	//generate new check point
     final_ckpt_stream = generate_checkpoint(child_id,
 											list_head,
 											&final_ckpt,
