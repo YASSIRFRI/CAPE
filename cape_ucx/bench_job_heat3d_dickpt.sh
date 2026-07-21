@@ -63,7 +63,7 @@ mkdir -p "${BOOTSTRAP_ROOT}"
 NODES_LIST=(${NODES_LIST:-32 64})
 SIZE_NODES="${SIZE_NODES:-64}"
 REPS="${REPS:-10}"
-PROFILE="${PROFILE:-0}"
+PROFILE="${PROFILE:-1}"
 
 # ── Multithreaded compute: one monitor/rank/checkpoint per node ────────────────
 # Still ONE SLURM task = ONE monitor + ONE traced app per node (one address
