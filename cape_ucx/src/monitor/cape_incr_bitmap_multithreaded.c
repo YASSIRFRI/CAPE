@@ -1138,6 +1138,47 @@ static void cape_profile_record_merged_ckpt(size_t bytes) { (void)bytes; }
 static inline void cape_profile_report(void) {}
 #endif
 
+/* Dump the profile at most once, from whichever teardown path fires first:
+ * clean loop exit, atexit, or a SIGTERM/SIGINT from srun tearing the step
+ * down before the child's normal exit is seen. Without this the report was
+ * lost whenever the launcher killed the monitor. */
+static volatile int cape_profile_reported;
+
+static void cape_profile_report_once(void)
+{
+	if (__atomic_exchange_n(&cape_profile_reported, 1, __ATOMIC_ACQ_REL))
+		return;
+	cape_profile_report();
+}
+
+static void cape_profile_signal(int sig)
+{
+	cape_profile_report_once();
+	_exit(128 + sig);
+}
+
+static void cape_profile_install(void)
+{
+	struct sigaction sa;
+
+#ifdef CAPE_PROFILE
+	fprintf(stderr, "[DICKPT PROFILE] enabled rank=%ld (dumps at exit)\n",
+		node);
+#else
+	fprintf(stderr,
+		"[DICKPT PROFILE] DISABLED — rebuild with PROFILE=1 rank=%ld\n",
+		node);
+#endif
+	fflush(stderr);
+
+	atexit(cape_profile_report_once);
+
+	memset(&sa, 0, sizeof(sa));
+	sa.sa_handler = cape_profile_signal;
+	sigaction(SIGTERM, &sa, NULL);
+	sigaction(SIGINT, &sa, NULL);
+}
+
 static FILE *open_binary_memstream(unsigned char **bufloc, size_t *sizeloc)
 {
 	return open_memstream((char **)bufloc, sizeloc);
@@ -3222,6 +3263,7 @@ int main(int argc, char * argv[]){
 				cape_prepin_affinity_valid = 1;
 			if (cape_apply_affinity(1) != 0)
 				return 1;
+			cape_profile_install();
 			CAPE_DBG("parent before cape_ucx_init");
 			cape_ucx_init();
 			CAPE_DBG("parent after cape_ucx_init");
@@ -3604,7 +3646,7 @@ int main(int argc, char * argv[]){
 		close(control_fd);
 	free(tracked_ranges);
 	cape_ucx_finalize();
-	cape_profile_report();
+	cape_profile_report_once();
 	return 0;
 }
 
