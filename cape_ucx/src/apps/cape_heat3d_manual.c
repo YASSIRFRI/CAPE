@@ -251,6 +251,15 @@ int main(int argc, char *argv[])
 	 * Allocated before tracking starts; both live outside the tracked
 	 * region so thread-private state is never shipped in a checkpoint. */
 	int nthreads = hb_thread_count();
+	/* Cap to the work available: the phases split this rank's interior
+	 * i-planes, and hb_run_phase clamps workers to plane count anyway.
+	 * Requesting more threads than planes only wastes stacks and clone/
+	 * join overhead with zero extra parallelism. */
+	int interior_planes = i_hi - i_lo;
+	if (interior_planes < 1)
+		interior_planes = 1;
+	if (nthreads > interior_planes)
+		nthreads = interior_planes;
 	struct hb_task *tasks = calloc(nthreads, sizeof(*tasks));
 	if (tasks == NULL) {
 		fprintf(stderr, "node %lu: task alloc failed\n", node);

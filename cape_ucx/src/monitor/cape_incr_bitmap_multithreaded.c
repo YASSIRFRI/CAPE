@@ -1672,7 +1672,11 @@ static int cape_fault_worker(void *arg)
 
 static void cape_fault_pool_start(void)
 {
-	int want = cape_env_int("CAPE_MONITOR_FAULT_THREADS", 4);
+	/* Default 0 = serial fault handling on the monitor thread. The app is
+	 * what scales (its CLONE_VM compute threads); the monitor stays one
+	 * thread per node. Set CAPE_MONITOR_FAULT_THREADS>0 only to experiment
+	 * with a parallel handler pool. */
+	int want = cape_env_int("CAPE_MONITOR_FAULT_THREADS", 0);
 	int t;
 
 	if (want > CAPE_FAULT_THREADS_MAX)
