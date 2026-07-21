@@ -127,8 +127,21 @@ static int cape_fault_pool_size;                 /* running handler count */
 static volatile int cape_fault_pool_run;
 static volatile int cape_fault_pool_err;
 static int cape_fault_inflight;                  /* atomic: events being handled */
+static int cape_fault_inflight_peak;             /* atomic: max concurrent handlers */
 static int32_t cape_fault_join[CAPE_FAULT_THREADS_MAX];
 static char *cape_fault_stack[CAPE_FAULT_THREADS_MAX];
+
+/* Per-worker profiling: proves the pool actually spreads across cores.
+ * events = uffd messages this worker serviced; wakeups = epoll_wait returns
+ * with work; last_cpu = CPU the worker was on at its last service (via
+ * sched_getcpu). Global peak concurrency = highest simultaneous inflight;
+ * if it never exceeds 1, the workers are serialized, not parallel. */
+struct cape_worker_stat {
+	unsigned long events;
+	unsigned long wakeups;
+	int last_cpu;
+};
+static struct cape_worker_stat cape_worker_stats[CAPE_FAULT_THREADS_MAX];
 static cpu_set_t cape_prepin_affinity;           /* mask before monitor self-pin */
 static int cape_prepin_affinity_valid;
 static int32_t cape_pagelist_lock_word;
@@ -1079,6 +1092,29 @@ static void cape_profile_report(void)
 	fprintf(stderr, "  %-30s : %.6f%%\n",
 		"merged_last/tracked",
 		cape_profile_pct_of_tracked(cape_profile.merged_ckpt_last_bytes));
+
+	/* Fault-pool parallelism: per-worker service counts + the CPU each
+	 * last ran on, and peak concurrent handlers. If events pile on one
+	 * worker, or peak stays at 1, the pool is not actually using cores. */
+	{
+		int w;
+		unsigned long total_ev = 0;
+
+		fprintf(stderr, "  %-30s : %d\n", "fault_pool_size",
+			cape_fault_pool_size);
+		fprintf(stderr, "  %-30s : %d\n", "fault_inflight_peak",
+			cape_fault_inflight_peak);
+		for (w = 0; w < cape_fault_pool_size; ++w) {
+			fprintf(stderr,
+				"    worker[%d]  events=%-10lu wakeups=%-8lu last_cpu=%d\n",
+				w, cape_worker_stats[w].events,
+				cape_worker_stats[w].wakeups,
+				cape_worker_stats[w].last_cpu);
+			total_ev += cape_worker_stats[w].events;
+		}
+		fprintf(stderr, "  %-30s : %lu\n", "fault_pool_events_total",
+			total_ev);
+	}
 	fflush(stderr);
 #undef P_NS
 #undef P_CNT
@@ -1520,7 +1556,11 @@ int cape_drain_userfaultfd(void);
 
 static int cape_fault_worker(void *arg)
 {
-	(void)arg;
+	int wid = (int)(long)arg;
+	struct cape_worker_stat *st = (wid >= 0 &&
+				       wid < CAPE_FAULT_THREADS_MAX)
+				      ? &cape_worker_stats[wid] : NULL;
+
 	if (cape_prepin_affinity_valid)
 		sched_setaffinity(0, sizeof(cape_prepin_affinity),
 				  &cape_prepin_affinity);
@@ -1537,6 +1577,11 @@ static int cape_fault_worker(void *arg)
 		if (n == 0 || (ev.events & EPOLLIN) == 0)
 			continue;
 
+		if (st != NULL) {
+			st->wakeups++;
+			st->last_cpu = sched_getcpu();
+		}
+
 		/* One wakeup, drain the whole burst: the uffd is level-
 		 * triggered and non-blocking, so read until EAGAIN instead of
 		 * paying an epoll_wait syscall per fault. Under a several-
@@ -1546,10 +1591,25 @@ static int cape_fault_worker(void *arg)
 		 * kernel-atomic, so multiple workers draining the same fd just
 		 * take disjoint messages (the loser gets EAGAIN -> r==0). */
 		for (;;) {
-			int r;
+			int inflight, r;
 
-			__atomic_add_fetch(&cape_fault_inflight, 1,
-					   __ATOMIC_ACQ_REL);
+			inflight = __atomic_add_fetch(&cape_fault_inflight, 1,
+						      __ATOMIC_ACQ_REL);
+			/* Track peak concurrency: if this never tops 1, the
+			 * workers are serialized (kernel or lock bound), not
+			 * running in parallel — the number to watch. */
+			for (;;) {
+				int peak = __atomic_load_n(
+					&cape_fault_inflight_peak,
+					__ATOMIC_RELAXED);
+				if (inflight <= peak)
+					break;
+				if (__atomic_compare_exchange_n(
+					    &cape_fault_inflight_peak, &peak,
+					    inflight, 0, __ATOMIC_RELAXED,
+					    __ATOMIC_RELAXED))
+					break;
+			}
 			r = cape_handle_userfault_event();
 			__atomic_sub_fetch(&cape_fault_inflight, 1,
 					   __ATOMIC_ACQ_REL);
@@ -1560,6 +1620,8 @@ static int cape_fault_worker(void *arg)
 			}
 			if (r == 0)
 				break;
+			if (st != NULL)
+				st->events++;
 		}
 	}
 	return 0;
@@ -1590,9 +1652,10 @@ static void cape_fault_pool_start(void)
 			break;
 		}
 		cape_fault_join[t] = 1;
+		cape_worker_stats[t].last_cpu = -1;
 		if (clone(cape_fault_worker,
 			  cape_fault_stack[t] + CAPE_FAULT_STACK_BYTES,
-			  flags, NULL, NULL, NULL,
+			  flags, (void *)(long)t, NULL, NULL,
 			  &cape_fault_join[t]) == -1) {
 			munmap(cape_fault_stack[t], CAPE_FAULT_STACK_BYTES);
 			cape_fault_stack[t] = NULL;
