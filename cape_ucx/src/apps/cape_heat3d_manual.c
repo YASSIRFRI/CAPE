@@ -77,6 +77,13 @@ static unsigned long get_ms_of_day(void)
 	return (unsigned long)(tv.tv_sec * 1000UL + tv.tv_usec / 1000UL);
 }
 
+static unsigned long get_us_of_day(void)
+{
+	struct timeval tv;
+	gettimeofday(&tv, NULL);
+	return (unsigned long)(tv.tv_sec * 1000000UL + tv.tv_usec);
+}
+
 /* ── clone(2)-based compute threads ──────────────────────────────────────
  * Minimal thread pool substitute: per phase we clone one worker per plane
  * sub-slab, each runs the phase kernel on its planes and exits; the parent
@@ -298,6 +305,7 @@ int main(int argc, char *argv[])
 
 	for (rep = 1; rep <= reps; rep++) {
 		unsigned long t0, t1;
+		unsigned long sweep_us = 0, writeback_us = 0, ckpt_us = 0;
 		int it;
 
 		/* Identical initial/boundary condition on every rank: the cube
@@ -336,14 +344,20 @@ int main(int argc, char *argv[])
 				p[plane - 1] = p[plane - 1];
 			}
 
+			unsigned long ts;
+
+			ts = get_us_of_day();
 			dickpt_start_ckpt();
+			ckpt_us += get_us_of_day() - ts;
 
 			/* Jacobi sweep over this rank's interior planes, split
 			 * over the compute threads by sub-slab. Reads the
 			 * neighbours' halo planes produced by the previous
 			 * merge; UNEW is written on disjoint planes per thread,
 			 * so no synchronization is needed inside the phase. */
+			ts = get_us_of_day();
 			hb_run_phase(tasks, nthreads, HB_SWEEP, i_lo, i_hi);
+			sweep_us += get_us_of_day() - ts;
 
 			/* Commit our slab into the shared cube (the dirty set),
 			 * same sub-slab split. Write back ONLY cells whose value
@@ -359,11 +373,15 @@ int main(int argc, char *argv[])
 			 * advantage. The write-back MUST be a separate phase
 			 * after the sweep completes: it mutates U planes that
 			 * neighbouring sub-slabs' sweeps read. */
+			ts = get_us_of_day();
 			hb_run_phase(tasks, nthreads, HB_WRITEBACK, i_lo, i_hi);
+			writeback_us += get_us_of_day() - ts;
 
+			ts = get_us_of_day();
 			dickpt_generate_ckpt();
 			dickpt_allreduce_ckpt();
 			dickpt_stop_ckpt();
+			ckpt_us += get_us_of_day() - ts;
 		}
 
 		t1 = get_ms_of_day();
@@ -378,8 +396,11 @@ int main(int argc, char *argv[])
 			printf("VERIFY OK  rep=%d iters=%d avg_interior=%.8f center=%.8f\n",
 			       rep, iters, sum / denom,
 			       U(n / 2, n / 2, n / 2));
-			printf("RESULT n=%d d=%d rep=%d ms=%lu\n",
-			       n, iters, rep, t1 - t0);
+			printf("RESULT n=%d d=%d rep=%d ms=%lu "
+			       "sweep_ms=%lu writeback_ms=%lu ckpt_ms=%lu\n",
+			       n, iters, rep, t1 - t0,
+			       sweep_us / 1000UL, writeback_us / 1000UL,
+			       ckpt_us / 1000UL);
 			fflush(stdout);
 		}
 	}
