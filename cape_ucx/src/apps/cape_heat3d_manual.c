@@ -98,6 +98,7 @@ struct hb_task {
 	enum hb_phase phase;
 	int i_lo, i_hi;              /* this worker's plane range */
 	int n;
+	int cpu;                     /* core to pin this worker to (-1 = none) */
 	size_t plane;
 	double *u, *unew;
 	int32_t join_futex;          /* nonzero while thread alive */
@@ -109,6 +110,13 @@ static void hb_kernel(const struct hb_task *t)
 	int n = t->n, i, j, k;
 	size_t plane = t->plane;
 	double *u = t->u, *unew = t->unew;
+
+	if (t->cpu >= 0) {
+		cpu_set_t one;
+		CPU_ZERO(&one);
+		CPU_SET(t->cpu, &one);
+		sched_setaffinity(0, sizeof(one), &one);
+	}
 
 #define TU(i, j, k)    u[((size_t)(i) * plane) + ((size_t)(j) * n) + (k)]
 #define TUNEW(i, j, k) unew[((size_t)(i) * plane) + ((size_t)(j) * n) + (k)]
@@ -167,10 +175,13 @@ static int hb_run_phase(struct hb_task *tasks, int nt, enum hb_phase phase,
 	if (nt > planes)
 		nt = planes;
 
+	int online = (int)sysconf(_SC_NPROCESSORS_ONLN);
 	for (t = 0; t < nt; t++) {
 		tasks[t].phase = phase;
 		tasks[t].i_lo = i_lo + (int)(((long)planes * t) / nt);
 		tasks[t].i_hi = i_lo + (int)(((long)planes * (t + 1)) / nt);
+		/* Spread workers across distinct physical cores. */
+		tasks[t].cpu = (online > 0) ? (t % online) : -1;
 	}
 
 	spawned = 0;
@@ -295,13 +306,41 @@ int main(int argc, char *argv[])
 			}
 		}
 	}
-	if (node == 0) {
+	{
+		/* All ranks: widen the inherited CPU mask to every online core
+		 * BEFORE cloning workers (they inherit it). SLURM's step launch
+		 * hands out a 1-cpu mask here even with --cpu-bind=none; the step
+		 * cgroup cpuset still contains every core, so this widen succeeds
+		 * and lets the pinned workers actually spread. */
 		cpu_set_t aff;
-		int ncpu = -1;
+		int ncpu = -1, online = (int)sysconf(_SC_NPROCESSORS_ONLN);
+		int widened = 0, widen_errno = 0;
 		if (sched_getaffinity(0, sizeof(aff), &aff) == 0)
 			ncpu = CPU_COUNT(&aff);
-		printf("heat3d: %d compute thread(s) per node, "
-		       "affinity=%d cpus\n", nthreads, ncpu);
+		if (ncpu >= 0 && ncpu < online) {
+			cpu_set_t wide;
+			int c;
+			CPU_ZERO(&wide);
+			for (c = 0; c < online && c < CPU_SETSIZE; c++)
+				CPU_SET(c, &wide);
+			if (sched_setaffinity(0, sizeof(wide), &wide) == 0)
+				widened = 1;
+			else
+				widen_errno = errno;
+		}
+		if (node == 0) {
+			printf("heat3d: %d compute thread(s) per node, "
+			       "affinity=%d cpus (online=%d)\n",
+			       nthreads, ncpu, online);
+			if (widened)
+				printf("heat3d: widened affinity to %d online "
+				       "cpus (srun cpu-bind artifact, fixed)\n",
+				       online);
+			else if (widen_errno)
+				printf("heat3d: cannot widen affinity (%s) -- "
+				       "step cgroup cpuset is capped\n",
+				       strerror(widen_errno));
+		}
 	}
 
 	dickpt_send_num_jobs((unsigned long)n);

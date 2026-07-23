@@ -1,6 +1,8 @@
 #!/bin/bash
 #SBATCH --job-name=bench_heat3d_dickpt
 #SBATCH --nodes=16
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=32
 #SBATCH --time=01:00:00
 #SBATCH --output=bench_heat3d_dickpt_%j.out
 #SBATCH --error=bench_heat3d_dickpt_%j.err
@@ -134,8 +136,9 @@ run_time() {
     fi
     rm -rf "${bdir}"; mkdir -p "${bdir}"; : > "${log}"
 
-    echo "[launch] ${tag}  (1 rank/node, cpus/task=${CPUS_PER_TASK}, compute threads=${nt})"
+    echo "[launch] ${tag}  (1 rank/node, cpus/task=${CPUS_PER_TASK}, compute threads=${nt}, fault threads=${nt})"
     CAPE_COMPUTE_THREADS="${nt}" \
+    CAPE_MONITOR_FAULT_THREADS="${nt}" \
     CAPE_UCX_BOOTSTRAP_ID="${bid}" CAPE_UCX_BOOTSTRAP_DIR="${bdir}" \
     srun --exclusive --mpi="${SRUN_MPI_MODE}" --nodes="${nn}" --ntasks="${nn}" \
          --ntasks-per-node=1 --cpus-per-task="${CPUS_PER_TASK}" \
