@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=bench_heat3d_dickpt
-#SBATCH --nodes=64
+#SBATCH --nodes=32
 #SBATCH --exclusive
 #SBATCH --time=06:00:00
 #SBATCH --output=bench_heat3d_dickpt_%j.out
