@@ -49,7 +49,7 @@ mkdir -p "${BOOTSTRAP_ROOT}"
 THREADS_LIST=(${THREADS_LIST:-1 2 4 8 16 32})
 BENCH_NODES="${BENCH_NODES:-16}"
 SIZE_NODES="${SIZE_NODES:-16}"
-REPS="${REPS:-10}"
+REPS="${REPS:-1}"
 PROFILE="${PROFILE:-0}"
 
 # One monitor/rank/checkpoint per node; give the task all cores so the compute
