@@ -295,8 +295,14 @@ int main(int argc, char *argv[])
 			}
 		}
 	}
-	if (node == 0)
-		printf("heat3d: %d compute thread(s) per node\n", nthreads);
+	if (node == 0) {
+		cpu_set_t aff;
+		int ncpu = -1;
+		if (sched_getaffinity(0, sizeof(aff), &aff) == 0)
+			ncpu = CPU_COUNT(&aff);
+		printf("heat3d: %d compute thread(s) per node, "
+		       "affinity=%d cpus\n", nthreads, ncpu);
+	}
 
 	dickpt_send_num_jobs((unsigned long)n);
 

@@ -139,7 +139,7 @@ run_time() {
     CAPE_UCX_BOOTSTRAP_ID="${bid}" CAPE_UCX_BOOTSTRAP_DIR="${bdir}" \
     srun --exclusive --mpi="${SRUN_MPI_MODE}" --nodes="${nn}" --ntasks="${nn}" \
          --ntasks-per-node=1 --cpus-per-task="${CPUS_PER_TASK}" \
-         --distribution=block:block \
+         --cpu-bind=none --distribution=block:block \
          "${MONITOR}" "${BIN}" "${N_DIM}" "${N_ITERS}" "${REPS}" >>"${log}" 2>&1 || rc=$?
     rm -rf "${bdir}"
     if [ "${rc}" -ne 0 ]; then echo "[fail] ${tag} rc=${rc} log=${log}" >&2; return 0; fi
@@ -176,7 +176,7 @@ run_size() {
     CAPE_UCX_BOOTSTRAP_ID="${bid}" CAPE_UCX_BOOTSTRAP_DIR="${bdir}" \
     srun --exclusive --export=ALL --mpi="${SRUN_MPI_MODE}" --nodes="${nn}" --ntasks="${nn}" \
          --ntasks-per-node=1 --cpus-per-task="${CPUS_PER_TASK}" \
-         --distribution=block:block \
+         --cpu-bind=none --distribution=block:block \
          "${MONITOR}" "${BIN}" "${N_DIM}" "${N_ITERS_SIZE}" 1 >>"${log}" 2>&1 || rc=$?
     rm -rf "${bdir}"
     if [ "${rc}" -ne 0 ]; then echo "[fail] ${tag} rc=${rc} log=${log}" >&2; return 0; fi

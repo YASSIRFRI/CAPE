@@ -268,13 +268,43 @@ int main(int argc, char *argv[])
 			break;
 		}
 	}
-	if (node == 0) {
+	{
+		/* All ranks: if the inherited mask is narrower than the online
+		 * CPU set, try to widen to every online CPU BEFORE the worker
+		 * threads are cloned (they inherit this mask). Success => the
+		 * 1-cpu mask was an srun cpu-bind artifact and is now fixed;
+		 * EINVAL => the step cgroup cpuset itself is capped and this is
+		 * an allocation (cpus-per-task) problem no app trick can escape. */
 		cpu_set_t aff;
-		int ncpu = -1;
+		int ncpu = -1, online = (int)sysconf(_SC_NPROCESSORS_ONLN);
+		int widened = 0, widen_errno = 0;
 		if (sched_getaffinity(0, sizeof(aff), &aff) == 0)
 			ncpu = CPU_COUNT(&aff);
-		printf("matmul: %d compute thread(s) per node, "
-		       "affinity=%d cpus\n", nthreads, ncpu);
+		if (ncpu >= 0 && ncpu < online) {
+			cpu_set_t wide;
+			int c;
+			CPU_ZERO(&wide);
+			for (c = 0; c < online && c < CPU_SETSIZE; c++)
+				CPU_SET(c, &wide);
+			if (sched_setaffinity(0, sizeof(wide), &wide) == 0)
+				widened = 1;
+			else
+				widen_errno = errno;
+		}
+		if (node == 0) {
+			printf("matmul: %d compute thread(s) per node, "
+			       "affinity=%d cpus (online=%d)\n",
+			       nthreads, ncpu, online);
+			if (widened)
+				printf("matmul: widened affinity to %d online "
+				       "cpus (srun cpu-bind artifact, fixed)\n",
+				       online);
+			else if (widen_errno)
+				printf("matmul: cannot widen affinity (%s) -- "
+				       "step cgroup cpuset is capped; fix the "
+				       "srun cpu allocation\n",
+				       strerror(widen_errno));
+		}
 	}
 
 	dickpt_send_num_jobs((unsigned long)n);
