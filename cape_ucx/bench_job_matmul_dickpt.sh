@@ -1,8 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=bench_matmul_dickpt
 #SBATCH --nodes=16
-#SBATCH --exclusive
-#SBATCH --time=04:00:00
+#SBATCH --time=01:00:00
 #SBATCH --output=bench_matmul_dickpt_%j.out
 #SBATCH --error=bench_matmul_dickpt_%j.err
 #SBATCH --partition=compute
