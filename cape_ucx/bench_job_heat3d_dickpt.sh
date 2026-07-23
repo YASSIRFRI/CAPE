@@ -45,8 +45,8 @@ mkdir -p "${BOOTSTRAP_ROOT}"
 
 # Thread-scaling sweep: vary compute threads/rank from 1 up to 32.
 THREADS_LIST=(${THREADS_LIST:-1 2 4 8 16 32})
-BENCH_NODES="${BENCH_NODES:-64}"
-SIZE_NODES="${SIZE_NODES:-64}"
+BENCH_NODES="${BENCH_NODES:-16}"
+SIZE_NODES="${SIZE_NODES:-16}"
 REPS="${REPS:-10}"
 PROFILE="${PROFILE:-0}"
 
