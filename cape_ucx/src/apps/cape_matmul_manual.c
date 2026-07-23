@@ -61,6 +61,7 @@ static unsigned long get_us_of_day(void)
 struct mm_task {
 	int n;
 	int row_lo, row_hi;          /* this worker's row range */
+	int cpu;                     /* core to pin this worker to (-1 = none) */
 	const double (*a)[MAX_N];
 	const double (*b)[MAX_N];
 	double (*c)[MAX_N];
@@ -71,9 +72,16 @@ struct mm_task {
 static void mm_kernel(struct mm_task *t)
 {
 	int n = t->n, i, j, k;
+	if (t->cpu >= 0) {
+		cpu_set_t one;
+		CPU_ZERO(&one);
+		CPU_SET(t->cpu, &one);
+		sched_setaffinity(0, sizeof(one), &one);
+	}
 	if (getenv("CAPE_AFFINITY_DEBUG")) {
-		fprintf(stderr, "matmul: worker rows %d..%d running on cpu %d\n",
-			t->row_lo, t->row_hi, sched_getcpu());
+		fprintf(stderr, "matmul: worker rows %d..%d pinned cpu=%d "
+			"running on cpu %d\n",
+			t->row_lo, t->row_hi, t->cpu, sched_getcpu());
 		fflush(stderr);
 	}
 	for (i = t->row_lo; i < t->row_hi; i++) {
@@ -119,9 +127,12 @@ static void mm_run(struct mm_task *tasks, int nt, int row_lo, int row_hi)
 	if (nt > rows)
 		nt = rows;
 
+	int online = (int)sysconf(_SC_NPROCESSORS_ONLN);
 	for (t = 0; t < nt; t++) {
 		tasks[t].row_lo = row_lo + (int)(((long)rows * t) / nt);
 		tasks[t].row_hi = row_lo + (int)(((long)rows * (t + 1)) / nt);
+		/* Spread workers across distinct physical cores. */
+		tasks[t].cpu = (online > 0) ? (t % online) : -1;
 	}
 
 	for (t = 1; t < nt; t++) {
