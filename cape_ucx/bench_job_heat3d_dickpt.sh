@@ -6,23 +6,8 @@
 #SBATCH --output=bench_heat3d_dickpt_%j.out
 #SBATCH --error=bench_heat3d_dickpt_%j.err
 #SBATCH --partition=compute
+#SBATCH --hint=nomultithread
 
-# 3D diffusion / Jacobi 7-point stencil (thermal/fluid diffusion) — DICKPT.
-#
-# Two phases, one allocation (128 nodes):
-#   PHASE 1 (timing)   : scaling sweep nodes = 8,16,32,64,128, REPS runs each,
-#                        timing only. CSV: impl,app,n,d,nodes,rep,app_ms,job_id
-#   PHASE 2 (ckpt size): a SINGLE run at 128 nodes with the monitor's
-#                        per-iteration size logging on (CAPE_CKPT_SIZE_LOG=1,
-#                        REPS=1 so iter maps 1:1). The heat source is a small
-#                        hot patch at the centre of the i==0 face, so early on
-#                        only a few cells near the source move; the incremental
-#                        checkpoint starts tiny and grows as the warm hemisphere
-#                        expands into the cube.
-#                        CSV: impl,app,nodes,rank,iter,kind,bytes,job_id
-#                        (kind=local: per-rank delta; kind=merged: global union).
-#
-# The binary is built once and reused by both phases.
 
 set -euo pipefail
 
@@ -60,24 +45,17 @@ mkdir -p "${BUILD_DIR}/bin" "${BUILD_DIR}/obj" "${BUILD_DIR}/lib" 2>/dev/null ||
 BOOTSTRAP_ROOT="${BOOTSTRAP_ROOT:-${BUILD_DIR}/ucx_bootstrap}"
 mkdir -p "${BOOTSTRAP_ROOT}"
 
-NODES_LIST=(${NODES_LIST:-32 64})
+# Thread-scaling sweep: vary compute threads/rank from 1 up to 32.
+THREADS_LIST=(${THREADS_LIST:-1 2 4 8 16 32})
+BENCH_NODES="${BENCH_NODES:-64}"
 SIZE_NODES="${SIZE_NODES:-64}"
 REPS="${REPS:-10}"
-PROFILE="${PROFILE:-1}"
+PROFILE="${PROFILE:-0}"
 
-# ── Multithreaded compute: one monitor/rank/checkpoint per node ────────────────
-# Still ONE SLURM task = ONE monitor + ONE traced app per node (one address
-# space, one uffd, one checkpoint per node — memory does NOT scale with cores).
-# The app itself splits the Jacobi sweep + write-back over clone(CLONE_VM)
-# compute threads (see cape_heat3d_manual.c). Thread count: CAPE_COMPUTE_THREADS
-# if set, else one per CPU in the app's affinity mask (= node cores minus the
-# monitor's pinned core). --cpus-per-task must hand the task the whole node.
-CPUS_PER_TASK="${CPUS_PER_TASK:-${SLURM_CPUS_ON_NODE:-16}}"
+# One monitor/rank/checkpoint per node; give the task all cores so the compute
+# threads have physical cores to land on (max thread count in the sweep).
+CPUS_PER_TASK="${CPUS_PER_TASK:-${SLURM_CPUS_ON_NODE:-32}}"
 
-# Lmod's bash init dereferences LD_LIBRARY_PATH / LD_PRELOAD (and friends);
-# under `set -u` an unset value aborts `module load`, silently leaving
-# EBROOT*/UCX_INC empty and breaking the build (an empty -I swallows the .c
-# source -> "gcc: no input files"). Seed them, or relax -u around module ops.
 export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}"
 export LD_PRELOAD="${LD_PRELOAD:-}"
 export MANPATH="${MANPATH:-}"
@@ -132,21 +110,22 @@ BIN="${BUILD_DIR}/bin/${BIN_NAME}"
 TOTAL_NODES="${SLURM_JOB_NUM_NODES:-128}"
 
 TIME_CSV="${RESULTS_DIR}/bench_${APP}_dickpt_${JOB_TAG}.csv"
-echo "impl,app,n,d,nodes,rep,app_ms,job_id" > "${TIME_CSV}"
+echo "impl,app,n,d,nodes,threads,rep,app_ms,job_id" > "${TIME_CSV}"
 SIZE_CSV="${RESULTS_DIR}/bench_${APP}_ckptsize_${JOB_TAG}.csv"
 echo "impl,app,nodes,rank,iter,kind,bytes,job_id" > "${SIZE_CSV}"
 
 echo "Benchmarking DICKPT ${APP} (3D diffusion)"
 echo "App:     src/apps/cape_${APP}_manual.c -> ${BIN}"
 echo "Monitor: src/monitor/cape_incr_bitmap_multithreaded.c -> ${MONITOR}"
-echo "Nodes: ${NODES_LIST[*]}  Reps: ${REPS}  N=${N_DIM} iters=${N_ITERS}  MPI mode: ${SRUN_MPI_MODE}"
+echo "Nodes: ${BENCH_NODES}  Threads: ${THREADS_LIST[*]}  Reps: ${REPS}  N=${N_DIM} iters=${N_ITERS}  MPI mode: ${SRUN_MPI_MODE}"
 echo "Timing CSV: ${TIME_CSV}"
 echo "Size CSV:   ${SIZE_CSV}  (single run at ${SIZE_NODES} nodes, iters=${N_ITERS_SIZE})"
 
-# ── PHASE 1: execution-time scaling sweep ──────────────────────────────────────
+# ── PHASE 1: thread-scaling sweep (fixed nodes, vary compute threads) ───────────
 run_time() {
-    local nn="$1"
-    local tag="dickpt_${APP}_nodes${nn}"
+    local nt="$1"
+    local nn="${BENCH_NODES}"
+    local tag="dickpt_${APP}_threads${nt}"
     local log="${RESULTS_DIR}/${tag}.log"
     local bid="${JOB_TAG}_${tag}"
     local bdir="${BOOTSTRAP_ROOT}/${bid}"
@@ -157,7 +136,8 @@ run_time() {
     fi
     rm -rf "${bdir}"; mkdir -p "${bdir}"; : > "${log}"
 
-    echo "[launch] ${tag}  (1 rank/node, cpus/task=${CPUS_PER_TASK}, compute threads=${CAPE_COMPUTE_THREADS:-auto})"
+    echo "[launch] ${tag}  (1 rank/node, cpus/task=${CPUS_PER_TASK}, compute threads=${nt})"
+    CAPE_COMPUTE_THREADS="${nt}" \
     CAPE_UCX_BOOTSTRAP_ID="${bid}" CAPE_UCX_BOOTSTRAP_DIR="${bdir}" \
     srun --exclusive --mpi="${SRUN_MPI_MODE}" --nodes="${nn}" --ntasks="${nn}" \
          --ntasks-per-node=1 --cpus-per-task="${CPUS_PER_TASK}" \
@@ -166,18 +146,18 @@ run_time() {
     rm -rf "${bdir}"
     if [ "${rc}" -ne 0 ]; then echo "[fail] ${tag} rc=${rc} log=${log}" >&2; return 0; fi
 
-    awk -v impl="dickpt" -v app="${APP}" -v nn="${nn}" -v job="${JOB_TAG}" '
+    awk -v impl="dickpt" -v app="${APP}" -v nn="${nn}" -v nt="${nt}" -v job="${JOB_TAG}" '
         /^RESULT / {
             n=""; dd=""; rep=""; ms="";
             for (i=1;i<=NF;i++) { split($i,kv,"="); if(kv[1]=="n")n=kv[2]; if(kv[1]=="d")dd=kv[2]; if(kv[1]=="rep")rep=kv[2]; if(kv[1]=="ms")ms=kv[2]; }
-            if (n!="" && ms!="") printf "%s,%s,%s,%s,%s,%s,%s,%s\n", impl,app,n,dd,nn,rep,ms,job;
+            if (n!="" && ms!="") printf "%s,%s,%s,%s,%s,%s,%s,%s,%s\n", impl,app,n,dd,nn,nt,rep,ms,job;
         }' "${log}" >> "${TIME_CSV}"
     echo "[done]   ${tag}"
 }
 
 echo ""
-echo "=== PHASE 1: execution time ==="
-for nn in "${NODES_LIST[@]}"; do run_time "${nn}"; done
+echo "=== PHASE 1: execution time (thread sweep) ==="
+for nt in "${THREADS_LIST[@]}"; do run_time "${nt}"; done
 
 # ── PHASE 2: per-iteration checkpoint size (logged once) ───────────────────────
 run_size() {
