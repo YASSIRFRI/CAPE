@@ -1,15 +1,16 @@
 #!/bin/bash
 #SBATCH --job-name=bench_matmul_dickpt
-#SBATCH --qos=himem-cpu
-#SBATCH --nodes=128
+#SBATCH --nodes=16
 #SBATCH --exclusive
 #SBATCH --time=04:00:00
 #SBATCH --output=bench_matmul_dickpt_%j.out
 #SBATCH --error=bench_matmul_dickpt_%j.err
 #SBATCH --partition=compute
+#SBATCH --hint=nomultithread
 
-# Distributed dense matrix multiply (block / compute-bound) — DICKPT.
-# Sweeps nodes = 8,16,32,64,128, REPS runs each. CSV: impl,app,n,d,nodes,rep,app_ms,job_id
+# Distributed dense matrix multiply (compute-bound N^3) — DICKPT.
+# Thread-scaling sweep: fixed 16 nodes, vary compute threads/rank 1..32.
+# CSV: impl,app,n,d,nodes,threads,rep,app_ms,compute_ms,ckpt_ms,job_id
 
 set -euo pipefail
 
@@ -33,22 +34,28 @@ mkdir -p "${BUILD_DIR}/bin" "${BUILD_DIR}/obj" "${BUILD_DIR}/lib" 2>/dev/null ||
 BOOTSTRAP_ROOT="${BOOTSTRAP_ROOT:-${BUILD_DIR}/ucx_bootstrap}"
 mkdir -p "${BOOTSTRAP_ROOT}"
 
-NODES_LIST=(${NODES_LIST:-8 16 32 64 128})
+# Thread-scaling sweep: vary compute threads/rank from 1 up to 32.
+THREADS_LIST=(${THREADS_LIST:-1 2 4 8 16 32})
+BENCH_NODES="${BENCH_NODES:-16}"
 REPS="${REPS:-10}"
 PROFILE="${PROFILE:-0}"
 
-# Hybrid: multiple DICKPT ranks per node (see bench_job_heat3d_dickpt.sh).
-# RANKS_PER_NODE>1 launches several monitor+child processes per node;
-# CPUS_PER_RANK cores per task; block distribution keeps a node's ranks a
-# contiguous global-rank range for the monitor's hierarchical allreduce.
-RANKS_PER_NODE="${RANKS_PER_NODE:-1}"
-CPUS_PER_RANK="${CPUS_PER_RANK:-2}"
+# One monitor/rank/checkpoint per node; give the task all cores so the compute
+# threads have physical cores to land on (max thread count in the sweep).
+CPUS_PER_TASK="${CPUS_PER_TASK:-${SLURM_CPUS_ON_NODE:-32}}"
 
+export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}"
+export LD_PRELOAD="${LD_PRELOAD:-}"
+export MANPATH="${MANPATH:-}"
+export MODULEPATH="${MODULEPATH:-}"
+
+set +u
 module purge
 module load GCCcore/14.2.0
 module load UCX/1.18.0-GCCcore-14.2.0
 module load UCC/1.3.0-GCCcore-14.2.0 2>/dev/null || module load UCC 2>/dev/null || true
 module load PMIx/5.0.6-GCCcore-14.2.0 2>/dev/null || module load PMIx 2>/dev/null || true
+set -u
 
 if [ -n "${EBROOTUCX:-}" ]; then
     UCX_INC="${EBROOTUCX}/include"; UCX_LIB="${EBROOTUCX}/lib"
@@ -84,24 +91,25 @@ fi
 
 make -C "${PROJECT_DIR}" cleanall \
     EXE_FOLDER="${BUILD_DIR}/bin" O_FOLDER="${BUILD_DIR}/obj" L_FOLDER="${BUILD_DIR}/lib" 2>/dev/null || true
-make -C "${PROJECT_DIR}" dickpt_bitmap_monitor "${TARGET}" PROFILE="${PROFILE}" "${MAKE_ARGS[@]}"
+make -C "${PROJECT_DIR}" dickpt_bitmap_multithreaded_monitor "${TARGET}" PROFILE="${PROFILE}" "${MAKE_ARGS[@]}"
 
-MONITOR="${BUILD_DIR}/bin/cape_dickpt_bitmap_monitor"
+MONITOR="${BUILD_DIR}/bin/cape_dickpt_bitmap_multithreaded_monitor"
 BIN="${BUILD_DIR}/bin/${BIN_NAME}"
 TOTAL_NODES="${SLURM_JOB_NUM_NODES:-128}"
 
 CSV="${RESULTS_DIR}/bench_${APP}_dickpt_${JOB_TAG}.csv"
-echo "impl,app,n,d,nodes,rep,app_ms,job_id" > "${CSV}"
+echo "impl,app,n,d,nodes,threads,rep,app_ms,compute_ms,ckpt_ms,job_id" > "${CSV}"
 
-echo "Benchmarking DICKPT ${APP}"
+echo "Benchmarking DICKPT ${APP} (compute-bound N^3)"
 echo "App:     src/apps/cape_${APP}_manual.c -> ${BIN}"
-echo "Monitor: src/monitor/cape_incr_bitmap.c -> ${MONITOR}"
-echo "Nodes: ${NODES_LIST[*]}  Reps: ${REPS}  N=${N_DIM}  MPI mode: ${SRUN_MPI_MODE}"
+echo "Monitor: src/monitor/cape_incr_bitmap_multithreaded.c -> ${MONITOR}"
+echo "Nodes: ${BENCH_NODES}  Threads: ${THREADS_LIST[*]}  Reps: ${REPS}  N=${N_DIM}  MPI mode: ${SRUN_MPI_MODE}"
 echo "CSV: ${CSV}"
 
 run_one() {
-    local nn="$1"
-    local tag="dickpt_${APP}_nodes${nn}"
+    local nt="$1"
+    local nn="${BENCH_NODES}"
+    local tag="dickpt_${APP}_threads${nt}"
     local log="${RESULTS_DIR}/${tag}.log"
     local bid="${JOB_TAG}_${tag}"
     local bdir="${BOOTSTRAP_ROOT}/${bid}"
@@ -112,27 +120,26 @@ run_one() {
     fi
     rm -rf "${bdir}"; mkdir -p "${bdir}"; : > "${log}"
 
-    echo "[launch] ${tag}"
-    local ntasks=$((nn * RANKS_PER_NODE))
+    echo "[launch] ${tag}  (1 rank/node, cpus/task=${CPUS_PER_TASK}, compute threads=${nt})"
+    CAPE_COMPUTE_THREADS="${nt}" \
     CAPE_UCX_BOOTSTRAP_ID="${bid}" CAPE_UCX_BOOTSTRAP_DIR="${bdir}" \
-    CAPE_RANKS_PER_NODE="${RANKS_PER_NODE}" \
-    srun --exclusive --mpi="${SRUN_MPI_MODE}" --nodes="${nn}" --ntasks="${ntasks}" \
-         --ntasks-per-node="${RANKS_PER_NODE}" --cpus-per-task="${CPUS_PER_RANK}" \
+    srun --exclusive --mpi="${SRUN_MPI_MODE}" --nodes="${nn}" --ntasks="${nn}" \
+         --ntasks-per-node=1 --cpus-per-task="${CPUS_PER_TASK}" \
          --distribution=block:block \
          "${MONITOR}" "${BIN}" "${N_DIM}" "${REPS}" >>"${log}" 2>&1 || rc=$?
     rm -rf "${bdir}"
     if [ "${rc}" -ne 0 ]; then echo "[fail] ${tag} rc=${rc} log=${log}" >&2; return 0; fi
 
-    awk -v impl="dickpt" -v app="${APP}" -v nn="${nn}" -v job="${JOB_TAG}" '
+    awk -v impl="dickpt" -v app="${APP}" -v nn="${nn}" -v nt="${nt}" -v job="${JOB_TAG}" '
         /^RESULT / {
-            n=""; dd=""; rep=""; ms="";
-            for (i=1;i<=NF;i++) { split($i,kv,"="); if(kv[1]=="n")n=kv[2]; if(kv[1]=="d")dd=kv[2]; if(kv[1]=="rep")rep=kv[2]; if(kv[1]=="ms")ms=kv[2]; }
-            if (n!="" && ms!="") printf "%s,%s,%s,%s,%s,%s,%s,%s\n", impl,app,n,dd,nn,rep,ms,job;
+            n=""; dd=""; rep=""; ms=""; cp=""; ck="";
+            for (i=1;i<=NF;i++) { split($i,kv,"="); if(kv[1]=="n")n=kv[2]; if(kv[1]=="d")dd=kv[2]; if(kv[1]=="rep")rep=kv[2]; if(kv[1]=="ms")ms=kv[2]; if(kv[1]=="compute_ms")cp=kv[2]; if(kv[1]=="ckpt_ms")ck=kv[2]; }
+            if (n!="" && ms!="") printf "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n", impl,app,n,dd,nn,nt,rep,ms,cp,ck,job;
         }' "${log}" >> "${CSV}"
     echo "[done]   ${tag}"
 }
 
-for nn in "${NODES_LIST[@]}"; do run_one "${nn}"; done
+for nt in "${THREADS_LIST[@]}"; do run_one "${nt}"; done
 
 echo ""
 echo "Done. DICKPT ${APP} CSV: ${CSV}"
