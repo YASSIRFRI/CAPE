@@ -71,6 +71,11 @@ struct mm_task {
 static void mm_kernel(struct mm_task *t)
 {
 	int n = t->n, i, j, k;
+	if (getenv("CAPE_AFFINITY_DEBUG")) {
+		fprintf(stderr, "matmul: worker rows %d..%d running on cpu %d\n",
+			t->row_lo, t->row_hi, sched_getcpu());
+		fflush(stderr);
+	}
 	for (i = t->row_lo; i < t->row_hi; i++) {
 		double *ci = t->c[i];
 		for (k = 0; k < n; k++) {
@@ -263,8 +268,14 @@ int main(int argc, char *argv[])
 			break;
 		}
 	}
-	if (node == 0)
-		printf("matmul: %d compute thread(s) per node\n", nthreads);
+	if (node == 0) {
+		cpu_set_t aff;
+		int ncpu = -1;
+		if (sched_getaffinity(0, sizeof(aff), &aff) == 0)
+			ncpu = CPU_COUNT(&aff);
+		printf("matmul: %d compute thread(s) per node, "
+		       "affinity=%d cpus\n", nthreads, ncpu);
+	}
 
 	dickpt_send_num_jobs((unsigned long)n);
 
