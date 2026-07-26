@@ -1815,6 +1815,8 @@ static void cape_fault_pool_start(void)
 	fflush(stderr);
 }
 
+static void cape_diff_pool_stop(void);   /* defined near generate_checkpoint */
+
 static void cape_fault_pool_stop(void)
 {
 	int t;
@@ -3746,6 +3748,7 @@ int main(int argc, char * argv[]){
 		ptrace(PTRACE_CONT, child_id, NULL, NULL);
 	}
 	cape_fault_pool_stop();
+	cape_diff_pool_stop();
 	if (userfault_fd >= 0)
 		close(userfault_fd);
 	if (control_fd >= 0)
@@ -3969,13 +3972,12 @@ struct cape_diff_job {
 	int child_id;
 };
 
-/* Per-page diff: process_vm_readv the current page and word-compare against
- * the monitor's pre-fault snapshot. Independent across pages (only
- * process_vm_readv + local memory touched), so a range [lo,hi) can run on
- * any thread; the caller keeps output order via the shared index. */
-static void *cape_diff_page_range(void *arg)
+/* Per-page diff over [lo,hi): process_vm_readv the current page and
+ * word-compare against the monitor's pre-fault snapshot. Independent across
+ * pages (only process_vm_readv + local memory touched), so any range can run
+ * on any thread; slot i in pp[]/nodes[] fixes output order for the caller. */
+static void cape_diff_run(const struct cape_diff_job *job)
 {
-	struct cape_diff_job *job = arg;
 	size_t i;
 
 	for (i = job->lo; i < job->hi; ++i) {
@@ -4014,7 +4016,143 @@ static void *cape_diff_page_range(void *arg)
 		if (out->changed == NULL) { perror("malloc(changed)"); exit(1); }
 		memcpy(out->changed, tmp_changed, (size_t)nc * sizeof(uint32_t));
 	}
-	return NULL;
+}
+
+/* Persistent diff worker pool. generate_checkpoint is called once per
+ * iteration (hundreds of times per run), so spawning pthreads per call would
+ * cost more than the diff itself on a small dirty set. Instead spin the
+ * workers up ONCE (lazily, sized by CAPE_MONITOR_FAULT_THREADS) and dispatch
+ * each iteration's page ranges over a condvar. For N lanes we create N-1
+ * helper threads (helper id runs job slot id, 1..N-1) and the calling monitor
+ * thread runs slot 0 itself -- N lanes across N cores, no idle spin. */
+#define CAPE_DIFF_POOL_MAX CAPE_FAULT_THREADS_MAX
+static pthread_t cape_diff_tid[CAPE_DIFF_POOL_MAX];
+static struct cape_diff_job cape_diff_jobs[CAPE_DIFF_POOL_MAX];
+static pthread_mutex_t cape_diff_mtx = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t cape_diff_go = PTHREAD_COND_INITIALIZER;
+static pthread_cond_t cape_diff_done = PTHREAD_COND_INITIALIZER;
+static int cape_diff_workers;      /* helper threads spun up (max lanes - 1) */
+static int cape_diff_cur_lanes;    /* lanes active for the current dispatch */
+static unsigned long cape_diff_gen;    /* bumped each dispatch */
+static int cape_diff_pending;      /* helper jobs not yet finished */
+static int cape_diff_stop;
+
+static void *cape_diff_worker(void *arg)
+{
+	long id = (long)arg;          /* 1..cape_diff_workers; job slot == id */
+	unsigned long seen = 0;
+
+	/* The monitor self-pins to a single core; without this the helpers
+	 * inherit that mask and all serialize onto one CPU (no speedup).
+	 * Restore the pre-pin node share, same as the fault-handler pool. */
+	if (cape_prepin_affinity_valid)
+		sched_setaffinity(0, sizeof(cape_prepin_affinity),
+				  &cape_prepin_affinity);
+
+	for (;;) {
+		struct cape_diff_job job;
+		int active;
+
+		pthread_mutex_lock(&cape_diff_mtx);
+		while (cape_diff_gen == seen && !cape_diff_stop)
+			pthread_cond_wait(&cape_diff_go, &cape_diff_mtx);
+		if (cape_diff_stop) {
+			pthread_mutex_unlock(&cape_diff_mtx);
+			return NULL;
+		}
+		seen = cape_diff_gen;
+		/* This dispatch may use fewer lanes than the pool has (smaller
+		 * dirty set). Lanes >= cape_diff_cur_lanes have no job and must
+		 * NOT touch cape_diff_pending. */
+		active = (id < cape_diff_cur_lanes);
+		if (active)
+			job = cape_diff_jobs[id];
+		pthread_mutex_unlock(&cape_diff_mtx);
+
+		if (!active)
+			continue;
+
+		cape_diff_run(&job);
+
+		pthread_mutex_lock(&cape_diff_mtx);
+		if (--cape_diff_pending == 0)
+			pthread_cond_signal(&cape_diff_done);
+		pthread_mutex_unlock(&cape_diff_mtx);
+	}
+}
+
+/* Lazily size and start the pool for `lanes` total workers (caller + helpers).
+ * Returns the number of lanes actually available (>=1). */
+static int cape_diff_pool_ensure(int lanes)
+{
+	long i;
+
+	if (lanes < 1)
+		lanes = 1;
+	if (lanes > CAPE_DIFF_POOL_MAX)
+		lanes = CAPE_DIFF_POOL_MAX;
+	/* Helpers needed = lanes-1; grow the pool if this call wants more. */
+	while (cape_diff_workers < lanes - 1) {
+		i = cape_diff_workers + 1;   /* job slot for the new helper */
+		if (pthread_create(&cape_diff_tid[cape_diff_workers], NULL,
+				   cape_diff_worker, (void *)i) != 0)
+			break;               /* fall back to fewer lanes */
+		cape_diff_workers++;
+	}
+	return cape_diff_workers + 1;
+}
+
+/* Split [0,cap) diff work over `lanes` lanes: helpers run slots 1..lanes-1,
+ * the caller runs slot 0, then we wait for the helpers. */
+static void cape_diff_dispatch(struct page_node **nodes, struct pack_page *pp,
+			       size_t cap, int child_id, int lanes)
+{
+	size_t chunk;
+	int t;
+
+	if (lanes < 1)
+		lanes = 1;
+	chunk = (cap + (size_t)lanes - 1) / (size_t)lanes;
+
+	pthread_mutex_lock(&cape_diff_mtx);
+	for (t = 0; t < lanes; ++t) {
+		cape_diff_jobs[t].nodes = nodes;
+		cape_diff_jobs[t].pp = pp;
+		cape_diff_jobs[t].child_id = child_id;
+		cape_diff_jobs[t].lo = (size_t)t * chunk;
+		cape_diff_jobs[t].hi = cape_diff_jobs[t].lo + chunk;
+		if (cape_diff_jobs[t].hi > cap)
+			cape_diff_jobs[t].hi = cap;
+	}
+	cape_diff_cur_lanes = lanes;
+	cape_diff_pending = lanes - 1;   /* helpers only */
+	cape_diff_gen++;
+	if (cape_diff_pending > 0)
+		pthread_cond_broadcast(&cape_diff_go);
+	pthread_mutex_unlock(&cape_diff_mtx);
+
+	/* Caller runs lane 0 while helpers run in parallel. */
+	cape_diff_run(&cape_diff_jobs[0]);
+
+	pthread_mutex_lock(&cape_diff_mtx);
+	while (cape_diff_pending > 0)
+		pthread_cond_wait(&cape_diff_done, &cape_diff_mtx);
+	pthread_mutex_unlock(&cape_diff_mtx);
+}
+
+static void cape_diff_pool_stop(void)
+{
+	int i;
+
+	if (cape_diff_workers == 0)
+		return;
+	pthread_mutex_lock(&cape_diff_mtx);
+	cape_diff_stop = 1;
+	pthread_cond_broadcast(&cape_diff_go);
+	pthread_mutex_unlock(&cape_diff_mtx);
+	for (i = 0; i < cape_diff_workers; ++i)
+		pthread_join(cape_diff_tid[i], NULL);
+	cape_diff_workers = 0;
 }
 
  FILE *generate_checkpoint(int child_id,
@@ -4059,7 +4197,7 @@ static void *cape_diff_page_range(void *arg)
 		cap++;
 	if (cap != 0) {
 		struct page_node **nodes;
-		int nthreads = cape_fault_pool_size;
+		int lanes = cape_fault_pool_size;   /* == CAPE_MONITOR_FAULT_THREADS */
 
 		pp = calloc(cap, sizeof(*pp));
 		if (pp == NULL) { perror("calloc(pack_page)"); exit(1); }
@@ -4069,39 +4207,24 @@ static void *cape_diff_page_range(void *arg)
 		     old_node = old_node->next, ++k)
 			nodes[k] = old_node;
 
-		/* Per-page work (process_vm_readv + word-diff) is independent
-		 * across pages -- only the diff, not the linked list, needs
-		 * an order, and slot i in pp[]/nodes[] already fixes that
-		 * order. Reuse the fault-handler thread count: those clone(2)
-		 * threads are idle here (cape_fault_quiesce() above drained
-		 * them), so no extra cores are spent. This is the dominant
-		 * cost when a checkpoint's dirty set is large -- the merge/
-		 * write pass below stays serial (small, and must preserve
-		 * output order). */
-		if (nthreads > (int)cap)
-			nthreads = (int)cap;
-		if (nthreads > 1) {
-			pthread_t tid[CAPE_FAULT_THREADS_MAX];
-			struct cape_diff_job jobs[CAPE_FAULT_THREADS_MAX];
-			int t;
-			size_t chunk = (cap + (size_t)nthreads - 1) / (size_t)nthreads;
-
-			for (t = 0; t < nthreads; ++t) {
-				jobs[t].nodes = nodes;
-				jobs[t].pp = pp;
-				jobs[t].child_id = child_id;
-				jobs[t].lo = (size_t)t * chunk;
-				jobs[t].hi = jobs[t].lo + chunk;
-				if (jobs[t].hi > cap)
-					jobs[t].hi = cap;
-				pthread_create(&tid[t], NULL,
-					cape_diff_page_range, &jobs[t]);
-			}
-			for (t = 0; t < nthreads; ++t)
-				pthread_join(tid[t], NULL);
+		/* Per-page work (process_vm_readv + word-diff) is the dominant
+		 * checkpoint cost and is independent across pages -- slot i in
+		 * pp[]/nodes[] fixes output order, so ranges can run on any
+		 * thread. Spread over a PERSISTENT worker pool (started once,
+		 * sized by CAPE_MONITOR_FAULT_THREADS) so we pay no per-iter
+		 * thread spawn. lanes<=1 keeps the fully serial path. The
+		 * compaction/write pass below stays serial (small, ordered). */
+		if (lanes < 1)
+			lanes = 1;
+		if (lanes > (int)cap)
+			lanes = (int)cap;
+		if (lanes > 1)
+			lanes = cape_diff_pool_ensure(lanes);
+		if (lanes > 1) {
+			cape_diff_dispatch(nodes, pp, cap, child_id, lanes);
 		} else {
 			struct cape_diff_job job = { nodes, pp, 0, cap, child_id };
-			cape_diff_page_range(&job);
+			cape_diff_run(&job);
 		}
 		free(nodes);
 	}
