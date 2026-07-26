@@ -1384,7 +1384,16 @@ static int cape_apply_affinity(int monitor_process)
 
 	CPU_ZERO(&target);
 	if (monitor_process) {
-		CPU_SET(monitor_cpu, &target);
+		/* Do NOT pin the monitor to a single core: checkpoint
+		 * generation (process_vm_readv + word-diff over the dirty set)
+		 * is parallelized across the diff worker pool, and the app
+		 * threads are stopped while it runs, so the monitor must be
+		 * free to spread over the whole rank share. Only an explicit
+		 * CAPE_MONITOR_CORE/CAPE_MANAGEMENT_CORE list narrows it. */
+		if (monitor_env != NULL && monitor_env[0] != '\0')
+			target = parsed;
+		else
+			target = rank_set;
 	} else {
 		child_env = getenv("CAPE_CHILD_CORES");
 		if (child_env == NULL || child_env[0] == '\0')
