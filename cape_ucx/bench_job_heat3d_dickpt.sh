@@ -160,30 +160,36 @@ echo ""
 echo "=== PHASE 1: execution time (thread sweep) ==="
 for nt in "${THREADS_LIST[@]}"; do run_time "${nt}"; done
 
-# ── Amdahl check: not all DICKPT work parallelizes (fault handling is
-# single-consumer-per-thread but bitmap merge/writeback has serial parts).
-# Compare measured speedup vs ideal linear speedup to expose the serial
-# fraction, using thread=1 app_ms as baseline (avg over reps).
+# ── Per-phase scaling: ckpt_ms lumps four monitor calls. Break it out so we
+# can see which phase actually scales with threads. Only gen_ms (checkpoint
+# generation: process_vm_readv + word-diff) is parallelized in the monitor;
+# start/allred/stop are serial ioctl / cross-node merge and are expected flat.
+# Columns: app_ms=8 sweep=9 wb=10 ckpt=11 start=12 gen=13 allred=14 stop=15 job=16
 echo ""
-echo "=== Speedup vs ideal (serial-fraction check, fault_threads=compute_threads) ==="
+echo "=== Per-phase avg ms and speedup vs threads=1 (gen_ms is the parallelized one) ==="
 awk -F, -v job="${JOB_TAG}" '
-    NR>1 && $16==job { sum[$6]+=$8; cnt[$6]++ }
+    NR>1 && $16==job {
+        n[$6]++;
+        app[$6]+=$8; sweep[$6]+=$9; wb[$6]+=$10; ck[$6]+=$11;
+        st[$6]+=$12; gn[$6]+=$13; ar[$6]+=$14; sp[$6]+=$15;
+    }
     END {
-        if (!(1 in sum)) { print "[skip] no threads=1 baseline in CSV"; exit }
-        base = sum[1]/cnt[1]
-        printf "%-8s %-12s %-12s %-10s %-10s\n", "threads", "app_ms", "speedup", "ideal", "serial_frac"
-        n = asorti(sum, idx)
-        for (i=1;i<=n;i++) {
-            t = idx[i]; avg = sum[t]/cnt[t]
-            speedup = base/avg
-            ideal = t
-            # Amdahl: speedup = 1/((1-p)+p/t)  =>  (1-p) = (t/speedup - 1)/(t-1)
-            if (t > 1) {
-                serial = (t/speedup - 1)/(t-1)
-                printf "%-8s %-12.3f %-12.3f %-10d %-10.4f\n", t, avg, speedup, ideal, serial
-            } else {
-                printf "%-8s %-12.3f %-12.3f %-10d %-10s\n", t, avg, speedup, ideal, "-"
-            }
+        if (!(1 in n)) { print "[skip] no threads=1 baseline in CSV"; exit }
+        printf "%-8s %-9s %-9s %-9s %-9s %-9s %-9s %-9s %-9s\n",
+               "threads","app","sweep","wb","ckpt","start","gen","allred","stop";
+        m = asorti(n, idx);
+        for (i=1;i<=m;i++){ t=idx[i]; c=n[t];
+            printf "%-8s %-9.0f %-9.0f %-9.0f %-9.0f %-9.0f %-9.0f %-9.0f %-9.0f\n",
+                   t, app[t]/c, sweep[t]/c, wb[t]/c, ck[t]/c,
+                   st[t]/c, gn[t]/c, ar[t]/c, sp[t]/c;
+        }
+        print "";
+        printf "%-8s %-10s %-10s %-10s\n","threads","gen_speedup","gen_ideal","gen_serialfrac";
+        g1 = gn[1]/n[1];
+        for (i=1;i<=m;i++){ t=idx[i]; g=gn[t]/n[t];
+            su = (g>0)? g1/g : 0;
+            if (t>1) printf "%-8s %-10.3f %-10d %-10.4f\n", t, su, t, (t/su-1)/(t-1);
+            else     printf "%-8s %-10.3f %-10d %-10s\n", t, su, t, "-";
         }
     }' "${TIME_CSV}"
 
