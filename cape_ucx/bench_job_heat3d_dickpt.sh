@@ -110,7 +110,7 @@ BIN="${BUILD_DIR}/bin/${BIN_NAME}"
 TOTAL_NODES="${SLURM_JOB_NUM_NODES:-128}"
 
 TIME_CSV="${RESULTS_DIR}/bench_${APP}_dickpt_${JOB_TAG}.csv"
-echo "impl,app,n,d,nodes,threads,rep,app_ms,sweep_ms,writeback_ms,ckpt_ms,job_id" > "${TIME_CSV}"
+echo "impl,app,n,d,nodes,threads,rep,app_ms,sweep_ms,writeback_ms,ckpt_ms,start_ms,gen_ms,allred_ms,stop_ms,job_id" > "${TIME_CSV}"
 SIZE_CSV="${RESULTS_DIR}/bench_${APP}_ckptsize_${JOB_TAG}.csv"
 echo "impl,app,nodes,rank,iter,kind,bytes,job_id" > "${SIZE_CSV}"
 
@@ -149,9 +149,9 @@ run_time() {
 
     awk -v impl="dickpt" -v app="${APP}" -v nn="${nn}" -v nt="${nt}" -v job="${JOB_TAG}" '
         /^RESULT / {
-            n=""; dd=""; rep=""; ms=""; sw=""; wb=""; ck="";
-            for (i=1;i<=NF;i++) { split($i,kv,"="); if(kv[1]=="n")n=kv[2]; if(kv[1]=="d")dd=kv[2]; if(kv[1]=="rep")rep=kv[2]; if(kv[1]=="ms")ms=kv[2]; if(kv[1]=="sweep_ms")sw=kv[2]; if(kv[1]=="writeback_ms")wb=kv[2]; if(kv[1]=="ckpt_ms")ck=kv[2]; }
-            if (n!="" && ms!="") printf "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n", impl,app,n,dd,nn,nt,rep,ms,sw,wb,ck,job;
+            n=""; dd=""; rep=""; ms=""; sw=""; wb=""; ck=""; st=""; gn=""; ar=""; sp="";
+            for (i=1;i<=NF;i++) { split($i,kv,"="); if(kv[1]=="n")n=kv[2]; if(kv[1]=="d")dd=kv[2]; if(kv[1]=="rep")rep=kv[2]; if(kv[1]=="ms")ms=kv[2]; if(kv[1]=="sweep_ms")sw=kv[2]; if(kv[1]=="writeback_ms")wb=kv[2]; if(kv[1]=="ckpt_ms")ck=kv[2]; if(kv[1]=="start_ms")st=kv[2]; if(kv[1]=="gen_ms")gn=kv[2]; if(kv[1]=="allred_ms")ar=kv[2]; if(kv[1]=="stop_ms")sp=kv[2]; }
+            if (n!="" && ms!="") printf "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n", impl,app,n,dd,nn,nt,rep,ms,sw,wb,ck,st,gn,ar,sp,job;
         }' "${log}" >> "${TIME_CSV}"
     echo "[done]   ${tag}"
 }
@@ -167,7 +167,7 @@ for nt in "${THREADS_LIST[@]}"; do run_time "${nt}"; done
 echo ""
 echo "=== Speedup vs ideal (serial-fraction check, fault_threads=compute_threads) ==="
 awk -F, -v job="${JOB_TAG}" '
-    NR>1 && $12==job { sum[$6]+=$8; cnt[$6]++ }
+    NR>1 && $16==job { sum[$6]+=$8; cnt[$6]++ }
     END {
         if (!(1 in sum)) { print "[skip] no threads=1 baseline in CSV"; exit }
         base = sum[1]/cnt[1]

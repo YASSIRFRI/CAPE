@@ -351,6 +351,7 @@ int main(int argc, char *argv[])
 	for (rep = 1; rep <= reps; rep++) {
 		unsigned long t0, t1;
 		unsigned long sweep_us = 0, writeback_us = 0, ckpt_us = 0;
+		unsigned long start_us = 0, gen_us = 0, allred_us = 0, stop_us = 0;
 		int it;
 
 		/* Identical initial/boundary condition on every rank: the cube
@@ -393,7 +394,7 @@ int main(int argc, char *argv[])
 
 			ts = get_us_of_day();
 			dickpt_start_ckpt();
-			ckpt_us += get_us_of_day() - ts;
+			{ unsigned long d = get_us_of_day() - ts; start_us += d; ckpt_us += d; }
 
 			/* Jacobi sweep over this rank's interior planes, split
 			 * over the compute threads by sub-slab. Reads the
@@ -424,9 +425,15 @@ int main(int argc, char *argv[])
 
 			ts = get_us_of_day();
 			dickpt_generate_ckpt();
+			{ unsigned long d = get_us_of_day() - ts; gen_us += d; ckpt_us += d; }
+
+			ts = get_us_of_day();
 			dickpt_allreduce_ckpt();
+			{ unsigned long d = get_us_of_day() - ts; allred_us += d; ckpt_us += d; }
+
+			ts = get_us_of_day();
 			dickpt_stop_ckpt();
-			ckpt_us += get_us_of_day() - ts;
+			{ unsigned long d = get_us_of_day() - ts; stop_us += d; ckpt_us += d; }
 		}
 
 		t1 = get_ms_of_day();
@@ -442,10 +449,13 @@ int main(int argc, char *argv[])
 			       rep, iters, sum / denom,
 			       U(n / 2, n / 2, n / 2));
 			printf("RESULT n=%d d=%d rep=%d ms=%lu "
-			       "sweep_ms=%lu writeback_ms=%lu ckpt_ms=%lu\n",
+			       "sweep_ms=%lu writeback_ms=%lu ckpt_ms=%lu "
+			       "start_ms=%lu gen_ms=%lu allred_ms=%lu stop_ms=%lu\n",
 			       n, iters, rep, t1 - t0,
 			       sweep_us / 1000UL, writeback_us / 1000UL,
-			       ckpt_us / 1000UL);
+			       ckpt_us / 1000UL,
+			       start_us / 1000UL, gen_us / 1000UL,
+			       allred_us / 1000UL, stop_us / 1000UL);
 			fflush(stdout);
 		}
 	}
