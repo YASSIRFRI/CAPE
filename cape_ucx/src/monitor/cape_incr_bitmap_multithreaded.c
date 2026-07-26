@@ -38,6 +38,7 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <pthread.h>
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <errno.h>
@@ -3954,12 +3955,74 @@ void end_shared_data(){
  * + L: contain only data in sharing-data attributes list
  * ------------------------------------------------------------------------
  */
- FILE *generate_checkpoint(int child_id, 
+struct pack_page {
+	uint64_t  addr;
+	uint8_t   bmp[BMP_WORD_BMP_BYTES];
+	uint32_t  n_changed;
+	uint32_t *changed;
+};
+
+struct cape_diff_job {
+	struct page_node **nodes;
+	struct pack_page *pp;
+	size_t lo, hi;
+	int child_id;
+};
+
+/* Per-page diff: process_vm_readv the current page and word-compare against
+ * the monitor's pre-fault snapshot. Independent across pages (only
+ * process_vm_readv + local memory touched), so a range [lo,hi) can run on
+ * any thread; the caller keeps output order via the shared index. */
+static void *cape_diff_page_range(void *arg)
+{
+	struct cape_diff_job *job = arg;
+	size_t i;
+
+	for (i = job->lo; i < job->hi; ++i) {
+		struct page_node *old_node = job->nodes[i];
+		struct pack_page *out = &job->pp[i];
+		unsigned char current_page[BMP_PAGE_SIZE];
+		uint32_t tmp_changed[BMP_WORDS_PER_PAGE];
+		const uint32_t *pre  = (const uint32_t *)old_node->data;
+		const uint32_t *post = (const uint32_t *)current_page;
+		unsigned w, nc = 0;
+
+		if (read_remote_memory(job->child_id, old_node->addr,
+				       current_page, BMP_PAGE_SIZE) != 0) {
+			fprintf(stderr,
+				"Monitor %ld: failed to read dirty page 0x%lx\n",
+				node, old_node->addr);
+			continue;
+		}
+
+		memset(out->bmp, 0, BMP_WORD_BMP_BYTES);
+		for (w = 0; w < BMP_WORDS_PER_PAGE; ++w) {
+			unsigned long waddr = old_node->addr + (unsigned long)w * 4u;
+			if (!is_address_shared(waddr))
+				continue;
+			if (pre[w] != post[w]) {
+				wbmp_set(out->bmp, w);
+				tmp_changed[nc++] = post[w];
+			}
+		}
+		if (nc == 0)
+			continue;
+
+		out->addr = (uint64_t)old_node->addr;
+		out->n_changed = nc;
+		out->changed = malloc((size_t)nc * sizeof(uint32_t));
+		if (out->changed == NULL) { perror("malloc(changed)"); exit(1); }
+		memcpy(out->changed, tmp_changed, (size_t)nc * sizeof(uint32_t));
+	}
+	return NULL;
+}
+
+ FILE *generate_checkpoint(int child_id,
  	struct page_node * list,
  	unsigned char **ckpt_data,
  	size_t *ckpt_size,
  	unsigned char cflag,
- 	unsigned long tsp){	
+ 	unsigned long tsp){
 
 	FILE *stream;
 	struct page_node *old_node;
@@ -3968,12 +4031,6 @@ void end_shared_data(){
 	CAPE_PROFILE_NS_VAR(profile_start_ns);
 	CAPE_PROFILE_NS_START(profile_start_ns);
 
-	struct pack_page {
-		uint64_t  addr;
-		uint8_t   bmp[BMP_WORD_BMP_BYTES];
-		uint32_t  n_changed;
-		uint32_t *changed;
-	};
 	struct pack_page *pp = NULL;
 	size_t cap = 0, n = 0, k;
 
@@ -4001,43 +4058,58 @@ void end_shared_data(){
 	for (old_node = list; old_node != NULL; old_node = old_node->next)
 		cap++;
 	if (cap != 0) {
+		struct page_node **nodes;
+		int nthreads = cape_fault_pool_size;
+
 		pp = calloc(cap, sizeof(*pp));
 		if (pp == NULL) { perror("calloc(pack_page)"); exit(1); }
+		nodes = malloc(cap * sizeof(*nodes));
+		if (nodes == NULL) { perror("malloc(nodes)"); exit(1); }
+		for (old_node = list, k = 0; old_node != NULL;
+		     old_node = old_node->next, ++k)
+			nodes[k] = old_node;
+
+		/* Per-page work (process_vm_readv + word-diff) is independent
+		 * across pages -- only the diff, not the linked list, needs
+		 * an order, and slot i in pp[]/nodes[] already fixes that
+		 * order. Reuse the fault-handler thread count: those clone(2)
+		 * threads are idle here (cape_fault_quiesce() above drained
+		 * them), so no extra cores are spent. This is the dominant
+		 * cost when a checkpoint's dirty set is large -- the merge/
+		 * write pass below stays serial (small, and must preserve
+		 * output order). */
+		if (nthreads > (int)cap)
+			nthreads = (int)cap;
+		if (nthreads > 1) {
+			pthread_t tid[CAPE_FAULT_THREADS_MAX];
+			struct cape_diff_job jobs[CAPE_FAULT_THREADS_MAX];
+			int t;
+			size_t chunk = (cap + (size_t)nthreads - 1) / (size_t)nthreads;
+
+			for (t = 0; t < nthreads; ++t) {
+				jobs[t].nodes = nodes;
+				jobs[t].pp = pp;
+				jobs[t].child_id = child_id;
+				jobs[t].lo = (size_t)t * chunk;
+				jobs[t].hi = jobs[t].lo + chunk;
+				if (jobs[t].hi > cap)
+					jobs[t].hi = cap;
+				pthread_create(&tid[t], NULL,
+					cape_diff_page_range, &jobs[t]);
+			}
+			for (t = 0; t < nthreads; ++t)
+				pthread_join(tid[t], NULL);
+		} else {
+			struct cape_diff_job job = { nodes, pp, 0, cap, child_id };
+			cape_diff_page_range(&job);
+		}
+		free(nodes);
 	}
 
-	for (old_node = list; old_node != NULL; old_node = old_node->next) {
-		unsigned char current_page[BMP_PAGE_SIZE];
-		uint32_t tmp_changed[BMP_WORDS_PER_PAGE];
-		const uint32_t *pre  = (const uint32_t *)old_node->data;
-		const uint32_t *post = (const uint32_t *)current_page;
-		unsigned w, nc = 0;
-
-		if (read_remote_memory(child_id, old_node->addr,
-				       current_page, BMP_PAGE_SIZE) != 0) {
-			fprintf(stderr,
-				"Monitor %ld: failed to read dirty page 0x%lx\n",
-				node, old_node->addr);
+	for (k = 0; k < cap; ++k) {
+		if (pp[k].n_changed == 0)
 			continue;
-		}
-
-		memset(pp[n].bmp, 0, BMP_WORD_BMP_BYTES);
-		for (w = 0; w < BMP_WORDS_PER_PAGE; ++w) {
-			unsigned long waddr = old_node->addr + (unsigned long)w * 4u;
-			if (!is_address_shared(waddr))
-				continue;
-			if (pre[w] != post[w]) {
-				wbmp_set(pp[n].bmp, w);
-				tmp_changed[nc++] = post[w];
-			}
-		}
-		if (nc == 0)
-			continue;
-
-		pp[n].addr = (uint64_t)old_node->addr;
-		pp[n].n_changed = nc;
-		pp[n].changed = malloc((size_t)nc * sizeof(uint32_t));
-		if (pp[n].changed == NULL) { perror("malloc(changed)"); exit(1); }
-		memcpy(pp[n].changed, tmp_changed, (size_t)nc * sizeof(uint32_t));
+		pp[n] = pp[k];
 		n++;
 	}
 
