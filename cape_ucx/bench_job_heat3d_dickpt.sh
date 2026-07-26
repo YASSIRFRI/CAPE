@@ -142,7 +142,7 @@ run_time() {
     CAPE_UCX_BOOTSTRAP_ID="${bid}" CAPE_UCX_BOOTSTRAP_DIR="${bdir}" \
     srun --exclusive --mpi="${SRUN_MPI_MODE}" --nodes="${nn}" --ntasks="${nn}" \
          --ntasks-per-node=1 --cpus-per-task="${CPUS_PER_TASK}" \
-         --cpu-bind=none --distribution=block:block \
+         --cpu-bind=core --distribution=block:block \
          "${MONITOR}" "${BIN}" "${N_DIM}" "${N_ITERS}" "${REPS}" >>"${log}" 2>&1 || rc=$?
     rm -rf "${bdir}"
     if [ "${rc}" -ne 0 ]; then echo "[fail] ${tag} rc=${rc} log=${log}" >&2; return 0; fi
@@ -159,6 +159,33 @@ run_time() {
 echo ""
 echo "=== PHASE 1: execution time (thread sweep) ==="
 for nt in "${THREADS_LIST[@]}"; do run_time "${nt}"; done
+
+# ── Amdahl check: not all DICKPT work parallelizes (fault handling is
+# single-consumer-per-thread but bitmap merge/writeback has serial parts).
+# Compare measured speedup vs ideal linear speedup to expose the serial
+# fraction, using thread=1 app_ms as baseline (avg over reps).
+echo ""
+echo "=== Speedup vs ideal (serial-fraction check, fault_threads=compute_threads) ==="
+awk -F, -v job="${JOB_TAG}" '
+    NR>1 && $12==job { sum[$6]+=$8; cnt[$6]++ }
+    END {
+        if (!(1 in sum)) { print "[skip] no threads=1 baseline in CSV"; exit }
+        base = sum[1]/cnt[1]
+        printf "%-8s %-12s %-12s %-10s %-10s\n", "threads", "app_ms", "speedup", "ideal", "serial_frac"
+        n = asorti(sum, idx)
+        for (i=1;i<=n;i++) {
+            t = idx[i]; avg = sum[t]/cnt[t]
+            speedup = base/avg
+            ideal = t
+            # Amdahl: speedup = 1/((1-p)+p/t)  =>  (1-p) = (t/speedup - 1)/(t-1)
+            if (t > 1) {
+                serial = (t/speedup - 1)/(t-1)
+                printf "%-8s %-12.3f %-12.3f %-10d %-10.4f\n", t, avg, speedup, ideal, serial
+            } else {
+                printf "%-8s %-12.3f %-12.3f %-10d %-10s\n", t, avg, speedup, ideal, "-"
+            }
+        }
+    }' "${TIME_CSV}"
 
 # ── PHASE 2: per-iteration checkpoint size (logged once) ───────────────────────
 run_size() {
