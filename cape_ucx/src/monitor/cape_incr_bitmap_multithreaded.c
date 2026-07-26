@@ -468,6 +468,18 @@ static void free_bitmap_section(struct bmp_section_view *view)
 	view->present = 0;
 }
 
+/* Upper bound on one merged page's on-stream payload: the 128 B word bitmap
+ * plus at most one 4 B word per bitmap slot. */
+#define CAPE_MERGED_PAGE_MAX \
+	(BMP_WORD_BMP_BYTES + BMP_WORDS_PER_PAGE * (unsigned)sizeof(uint32_t))
+
+/* Generic persistent worker pool (parallel-for), defined far below. Used by
+ * both the checkpoint page diff and the allreduce page merge to spread
+ * independent per-page ranges over CAPE_MONITOR_FAULT_THREADS lanes. */
+typedef void (*cape_par_fn)(void *ctx, size_t lo, size_t hi);
+static int  cape_pool_ensure(int lanes);
+static void cape_par_for(cape_par_fn fn, void *ctx, size_t n, int lanes);
+
 static int write_bitmap_page_payload(FILE *out, const struct bmp_page_view *pg)
 {
 	size_t bytes = (size_t)pg->n_changed * sizeof(uint32_t);
@@ -477,6 +489,19 @@ static int write_bitmap_page_payload(FILE *out, const struct bmp_page_view *pg)
 	if (bytes != 0 && fwrite(pg->changed, bytes, 1, out) != 1)
 		return 1;
 	return 0;
+}
+
+/* Same payload as write_bitmap_page_payload, into a caller buffer (>=
+ * CAPE_MERGED_PAGE_MAX). Returns bytes written. */
+static size_t write_bitmap_page_payload_buf(uint8_t *dst,
+					    const struct bmp_page_view *pg)
+{
+	size_t bytes = (size_t)pg->n_changed * sizeof(uint32_t);
+
+	memcpy(dst, pg->word_bmp, BMP_WORD_BMP_BYTES);
+	if (bytes != 0)
+		memcpy(dst + BMP_WORD_BMP_BYTES, pg->changed, bytes);
+	return BMP_WORD_BMP_BYTES + bytes;
 }
 
 /* ===== reduction lookup / apply =====
@@ -618,9 +643,12 @@ static void unpack_page(const struct bmp_page_view *pg,
 	}
 }
 
-static int emit_merged_page(FILE *out, uint64_t addr,
-			    const struct bmp_page_view *o,
-			    const struct bmp_page_view *n)
+/* Merge two views of the same page into `dst` (>= CAPE_MERGED_PAGE_MAX):
+ * word bitmap followed by the merged changed-words. Returns bytes written.
+ * Pure function of its inputs -- safe to run concurrently on distinct dst. */
+static size_t emit_merged_page_buf(uint8_t *dst, uint64_t addr,
+				   const struct bmp_page_view *o,
+				   const struct bmp_page_view *n)
 {
 	uint32_t o_words[BMP_WORDS_PER_PAGE], n_words[BMP_WORDS_PER_PAGE];
 	uint8_t  o_have[BMP_WORDS_PER_PAGE],  n_have[BMP_WORDS_PER_PAGE];
@@ -691,17 +719,54 @@ per_word:
 		w++;
 	}
 
-	if (fwrite(bmp, BMP_WORD_BMP_BYTES, 1, out) != 1)
-		return 1;
+	memcpy(dst, bmp, BMP_WORD_BMP_BYTES);
 	bytes = (size_t)out_count * sizeof(uint32_t);
-	if (bytes != 0 && fwrite(out_words, bytes, 1, out) != 1)
-		return 1;
-	return 0;
+	if (bytes != 0)
+		memcpy(dst + BMP_WORD_BMP_BYTES, out_words, bytes);
+	return BMP_WORD_BMP_BYTES + bytes;
 }
 
-/* Two-pointer walk over sorted page lists. Pages on only one side go
- * out verbatim. Pages on both sides go through emit_merged_page, which
- * does word-level merging with reduction lookup. */
+struct merge_slot {
+	uint64_t addr;
+	const struct bmp_page_view *o;
+	const struct bmp_page_view *n;
+};
+
+/* Parallel merge context: each slot's on-stream payload is computed into its
+ * own CAPE_MERGED_PAGE_MAX-sized cell of `buf` (no sharing between slots), and
+ * its length recorded in `len[]`. The compute is a pure function of the input
+ * views + the read-only reduction list, so ranges run concurrently. The
+ * caller then writes the cells back in slot order to keep the stream layout. */
+struct merge_emit_ctx {
+	const struct merge_slot *slots;
+	uint8_t *buf;
+	size_t  *len;
+};
+
+static void merge_emit_range(void *ctxp, size_t lo, size_t hi)
+{
+	struct merge_emit_ctx *ctx = ctxp;
+	size_t i;
+
+	for (i = lo; i < hi; ++i) {
+		const struct merge_slot *s = &ctx->slots[i];
+		uint8_t *dst = ctx->buf + i * CAPE_MERGED_PAGE_MAX;
+
+		if (s->o != NULL && s->n != NULL)
+			ctx->len[i] = emit_merged_page_buf(dst, s->addr,
+							   s->o, s->n);
+		else
+			ctx->len[i] = write_bitmap_page_payload_buf(dst,
+					s->o ? s->o : s->n);
+	}
+}
+
+/* Two-pointer walk over sorted page lists (serial, cheap). Pages on only one
+ * side go out verbatim; pages on both sides are word-merged with reduction
+ * lookup. The per-page emit is the expensive part (unpack + merge over ~5000
+ * pages at saturation) and dominates the cross-node allreduce, so it is
+ * parallelized over the worker pool: compute every page payload into its own
+ * buffer cell, then write them back in order. */
 static int merge_bitmap_sections(FILE *out,
 				 const struct bmp_section_view *older,
 				 const struct bmp_section_view *newer)
@@ -709,12 +774,11 @@ static int merge_bitmap_sections(FILE *out,
 	unsigned long marker = BMP_S;
 	uint32_t total = 0, i;
 	uint32_t ia = 0, ib = 0;
-	struct merge_slot {
-		uint64_t addr;
-		const struct bmp_page_view *o;
-		const struct bmp_page_view *n;
-	} *slots = NULL;
+	struct merge_slot *slots = NULL;
+	uint8_t *buf = NULL;
+	size_t *len = NULL;
 	size_t cap;
+	struct merge_emit_ctx ectx;
 
 	if (!older->present && !newer->present)
 		return 0;
@@ -750,6 +814,16 @@ static int merge_bitmap_sections(FILE *out,
 		}
 	}
 
+	buf = malloc((size_t)total * CAPE_MERGED_PAGE_MAX);
+	len = malloc((size_t)total * sizeof(*len));
+	if (buf == NULL || len == NULL)
+		goto fail;
+
+	ectx.slots = slots;
+	ectx.buf = buf;
+	ectx.len = len;
+	cape_par_for(merge_emit_range, &ectx, (size_t)total, cape_fault_pool_size);
+
 	if (fwrite(&marker, sizeof(marker), 1, out) != 1 ||
 	    fwrite(&total, sizeof(total), 1, out) != 1)
 		goto fail;
@@ -759,21 +833,18 @@ static int merge_bitmap_sections(FILE *out,
 			goto fail;
 	}
 	for (i = 0; i < total; ++i) {
-		if (slots[i].o != NULL && slots[i].n != NULL) {
-			if (emit_merged_page(out, slots[i].addr,
-					     slots[i].o, slots[i].n) != 0)
-				goto fail;
-		} else {
-			const struct bmp_page_view *pg = slots[i].o ?
-				slots[i].o : slots[i].n;
-			if (write_bitmap_page_payload(out, pg) != 0)
-				goto fail;
-		}
+		if (len[i] != 0 &&
+		    fwrite(buf + (size_t)i * CAPE_MERGED_PAGE_MAX, len[i], 1, out) != 1)
+			goto fail;
 	}
+	free(len);
+	free(buf);
 	free(slots);
 	return 0;
 
 fail:
+	free(len);
+	free(buf);
 	free(slots);
 	return 1;
 }
@@ -1824,7 +1895,7 @@ static void cape_fault_pool_start(void)
 	fflush(stderr);
 }
 
-static void cape_diff_pool_stop(void);   /* defined near generate_checkpoint */
+static void cape_pool_stop(void);   /* defined near generate_checkpoint */
 
 static void cape_fault_pool_stop(void)
 {
@@ -3757,7 +3828,7 @@ int main(int argc, char * argv[]){
 		ptrace(PTRACE_CONT, child_id, NULL, NULL);
 	}
 	cape_fault_pool_stop();
-	cape_diff_pool_stop();
+	cape_pool_stop();
 	if (userfault_fd >= 0)
 		close(userfault_fd);
 	if (control_fd >= 0)
@@ -3974,10 +4045,9 @@ struct pack_page {
 	uint32_t *changed;
 };
 
-struct cape_diff_job {
+struct cape_diff_ctx {
 	struct page_node **nodes;
 	struct pack_page *pp;
-	size_t lo, hi;
 	int child_id;
 };
 
@@ -3985,20 +4055,21 @@ struct cape_diff_job {
  * word-compare against the monitor's pre-fault snapshot. Independent across
  * pages (only process_vm_readv + local memory touched), so any range can run
  * on any thread; slot i in pp[]/nodes[] fixes output order for the caller. */
-static void cape_diff_run(const struct cape_diff_job *job)
+static void cape_diff_run(void *ctxp, size_t lo, size_t hi)
 {
+	struct cape_diff_ctx *ctx = ctxp;
 	size_t i;
 
-	for (i = job->lo; i < job->hi; ++i) {
-		struct page_node *old_node = job->nodes[i];
-		struct pack_page *out = &job->pp[i];
+	for (i = lo; i < hi; ++i) {
+		struct page_node *old_node = ctx->nodes[i];
+		struct pack_page *out = &ctx->pp[i];
 		unsigned char current_page[BMP_PAGE_SIZE];
 		uint32_t tmp_changed[BMP_WORDS_PER_PAGE];
 		const uint32_t *pre  = (const uint32_t *)old_node->data;
 		const uint32_t *post = (const uint32_t *)current_page;
 		unsigned w, nc = 0;
 
-		if (read_remote_memory(job->child_id, old_node->addr,
+		if (read_remote_memory(ctx->child_id, old_node->addr,
 				       current_page, BMP_PAGE_SIZE) != 0) {
 			fprintf(stderr,
 				"Monitor %ld: failed to read dirty page 0x%lx\n",
@@ -4006,14 +4077,26 @@ static void cape_diff_run(const struct cape_diff_job *job)
 			continue;
 		}
 
-		memset(out->bmp, 0, BMP_WORD_BMP_BYTES);
-		for (w = 0; w < BMP_WORDS_PER_PAGE; ++w) {
-			unsigned long waddr = old_node->addr + (unsigned long)w * 4u;
-			if (!is_address_shared(waddr))
-				continue;
-			if (pre[w] != post[w]) {
-				wbmp_set(out->bmp, w);
-				tmp_changed[nc++] = post[w];
+		/* Shared-region membership is constant across a 4 KiB page
+		 * because regions are page-aligned: if the first AND last word
+		 * of the page are shared, every word is (a gap would itself be
+		 * page-aligned). Resolve it ONCE per page instead of walking the
+		 * region list 1024x; only a page straddling a region edge falls
+		 * back to the per-word check. */
+		{
+			unsigned long a0 = old_node->addr;
+			unsigned long aN = a0 + (unsigned long)(BMP_WORDS_PER_PAGE - 1) * 4u;
+			int whole = is_address_shared(a0) && is_address_shared(aN);
+
+			memset(out->bmp, 0, BMP_WORD_BMP_BYTES);
+			for (w = 0; w < BMP_WORDS_PER_PAGE; ++w) {
+				if (!whole &&
+				    !is_address_shared(a0 + (unsigned long)w * 4u))
+					continue;
+				if (pre[w] != post[w]) {
+					wbmp_set(out->bmp, w);
+					tmp_changed[nc++] = post[w];
+				}
 			}
 		}
 		if (nc == 0)
@@ -4027,28 +4110,36 @@ static void cape_diff_run(const struct cape_diff_job *job)
 	}
 }
 
-/* Persistent diff worker pool. generate_checkpoint is called once per
- * iteration (hundreds of times per run), so spawning pthreads per call would
- * cost more than the diff itself on a small dirty set. Instead spin the
- * workers up ONCE (lazily, sized by CAPE_MONITOR_FAULT_THREADS) and dispatch
- * each iteration's page ranges over a condvar. For N lanes we create N-1
- * helper threads (helper id runs job slot id, 1..N-1) and the calling monitor
- * thread runs slot 0 itself -- N lanes across N cores, no idle spin. */
-#define CAPE_DIFF_POOL_MAX CAPE_FAULT_THREADS_MAX
-static pthread_t cape_diff_tid[CAPE_DIFF_POOL_MAX];
-static struct cape_diff_job cape_diff_jobs[CAPE_DIFF_POOL_MAX];
-static pthread_mutex_t cape_diff_mtx = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t cape_diff_go = PTHREAD_COND_INITIALIZER;
-static pthread_cond_t cape_diff_done = PTHREAD_COND_INITIALIZER;
-static int cape_diff_workers;      /* helper threads spun up (max lanes - 1) */
-static int cape_diff_cur_lanes;    /* lanes active for the current dispatch */
-static unsigned long cape_diff_gen;    /* bumped each dispatch */
-static int cape_diff_pending;      /* helper jobs not yet finished */
-static int cape_diff_stop;
+/* Persistent worker pool = a parallel-for over independent index ranges.
+ * The monitor calls it hundreds of times per run (once per checkpoint for the
+ * page diff, four times more per checkpoint for the hypercube merge steps), so
+ * spawning pthreads per call would cost more than the work on a small range.
+ * Workers are spun up ONCE (lazily, sized by CAPE_MONITOR_FAULT_THREADS) and
+ * park on a condvar. For N lanes we create N-1 helper threads (helper id runs
+ * job slot id, 1..N-1) and the calling monitor thread runs slot 0 itself --
+ * N lanes across N cores, no idle spin. Every dispatch is a barrier (caller
+ * waits for all helpers), so a single global pool is reused by all call sites;
+ * they never overlap. */
+#define CAPE_POOL_MAX CAPE_FAULT_THREADS_MAX
+struct cape_par_job {
+	cape_par_fn fn;
+	void       *ctx;
+	size_t      lo, hi;
+};
+static pthread_t cape_pool_tid[CAPE_POOL_MAX];
+static struct cape_par_job cape_pool_jobs[CAPE_POOL_MAX];
+static pthread_mutex_t cape_pool_mtx = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t cape_pool_go = PTHREAD_COND_INITIALIZER;
+static pthread_cond_t cape_pool_done = PTHREAD_COND_INITIALIZER;
+static int cape_pool_workers;      /* helper threads spun up (max lanes - 1) */
+static int cape_pool_cur_lanes;    /* lanes active for the current dispatch */
+static unsigned long cape_pool_gen;    /* bumped each dispatch */
+static int cape_pool_pending;      /* helper jobs not yet finished */
+static int cape_pool_stop;
 
-static void *cape_diff_worker(void *arg)
+static void *cape_pool_worker(void *arg)
 {
-	long id = (long)arg;          /* 1..cape_diff_workers; job slot == id */
+	long id = (long)arg;          /* 1..cape_pool_workers; job slot == id */
 	unsigned long seen = 0;
 
 	/* The monitor self-pins to a single core; without this the helpers
@@ -4059,109 +4150,117 @@ static void *cape_diff_worker(void *arg)
 				  &cape_prepin_affinity);
 
 	for (;;) {
-		struct cape_diff_job job;
+		struct cape_par_job job;
 		int active;
 
-		pthread_mutex_lock(&cape_diff_mtx);
-		while (cape_diff_gen == seen && !cape_diff_stop)
-			pthread_cond_wait(&cape_diff_go, &cape_diff_mtx);
-		if (cape_diff_stop) {
-			pthread_mutex_unlock(&cape_diff_mtx);
+		pthread_mutex_lock(&cape_pool_mtx);
+		while (cape_pool_gen == seen && !cape_pool_stop)
+			pthread_cond_wait(&cape_pool_go, &cape_pool_mtx);
+		if (cape_pool_stop) {
+			pthread_mutex_unlock(&cape_pool_mtx);
 			return NULL;
 		}
-		seen = cape_diff_gen;
+		seen = cape_pool_gen;
 		/* This dispatch may use fewer lanes than the pool has (smaller
-		 * dirty set). Lanes >= cape_diff_cur_lanes have no job and must
-		 * NOT touch cape_diff_pending. */
-		active = (id < cape_diff_cur_lanes);
+		 * range). Lanes >= cape_pool_cur_lanes have no job and must NOT
+		 * touch cape_pool_pending. */
+		active = (id < cape_pool_cur_lanes);
 		if (active)
-			job = cape_diff_jobs[id];
-		pthread_mutex_unlock(&cape_diff_mtx);
+			job = cape_pool_jobs[id];
+		pthread_mutex_unlock(&cape_pool_mtx);
 
 		if (!active)
 			continue;
 
-		cape_diff_run(&job);
+		job.fn(job.ctx, job.lo, job.hi);
 
-		pthread_mutex_lock(&cape_diff_mtx);
-		if (--cape_diff_pending == 0)
-			pthread_cond_signal(&cape_diff_done);
-		pthread_mutex_unlock(&cape_diff_mtx);
+		pthread_mutex_lock(&cape_pool_mtx);
+		if (--cape_pool_pending == 0)
+			pthread_cond_signal(&cape_pool_done);
+		pthread_mutex_unlock(&cape_pool_mtx);
 	}
 }
 
 /* Lazily size and start the pool for `lanes` total workers (caller + helpers).
  * Returns the number of lanes actually available (>=1). */
-static int cape_diff_pool_ensure(int lanes)
+static int cape_pool_ensure(int lanes)
 {
 	long i;
 
 	if (lanes < 1)
 		lanes = 1;
-	if (lanes > CAPE_DIFF_POOL_MAX)
-		lanes = CAPE_DIFF_POOL_MAX;
+	if (lanes > CAPE_POOL_MAX)
+		lanes = CAPE_POOL_MAX;
 	/* Helpers needed = lanes-1; grow the pool if this call wants more. */
-	while (cape_diff_workers < lanes - 1) {
-		i = cape_diff_workers + 1;   /* job slot for the new helper */
-		if (pthread_create(&cape_diff_tid[cape_diff_workers], NULL,
-				   cape_diff_worker, (void *)i) != 0)
+	while (cape_pool_workers < lanes - 1) {
+		i = cape_pool_workers + 1;   /* job slot for the new helper */
+		if (pthread_create(&cape_pool_tid[cape_pool_workers], NULL,
+				   cape_pool_worker, (void *)i) != 0)
 			break;               /* fall back to fewer lanes */
-		cape_diff_workers++;
+		cape_pool_workers++;
 	}
-	return cape_diff_workers + 1;
+	return cape_pool_workers + 1;
 }
 
-/* Split [0,cap) diff work over `lanes` lanes: helpers run slots 1..lanes-1,
- * the caller runs slot 0, then we wait for the helpers. */
-static void cape_diff_dispatch(struct page_node **nodes, struct pack_page *pp,
-			       size_t cap, int child_id, int lanes)
+/* Run fn over [0,n) split into `lanes` contiguous ranges: helpers run slots
+ * 1..lanes-1, the caller runs slot 0, then waits for the helpers. lanes<=1 (or
+ * n==0) runs entirely in the caller. Blocks until all ranges complete. */
+static void cape_par_for(cape_par_fn fn, void *ctx, size_t n, int lanes)
 {
 	size_t chunk;
 	int t;
 
 	if (lanes < 1)
 		lanes = 1;
-	chunk = (cap + (size_t)lanes - 1) / (size_t)lanes;
-
-	pthread_mutex_lock(&cape_diff_mtx);
-	for (t = 0; t < lanes; ++t) {
-		cape_diff_jobs[t].nodes = nodes;
-		cape_diff_jobs[t].pp = pp;
-		cape_diff_jobs[t].child_id = child_id;
-		cape_diff_jobs[t].lo = (size_t)t * chunk;
-		cape_diff_jobs[t].hi = cape_diff_jobs[t].lo + chunk;
-		if (cape_diff_jobs[t].hi > cap)
-			cape_diff_jobs[t].hi = cap;
+	if ((size_t)lanes > n)
+		lanes = (n == 0) ? 1 : (int)n;
+	/* Ensure the pool AFTER clamping to n, so cape_pool_pending never counts
+	 * a helper that was never started (that would deadlock the barrier). */
+	if (lanes > 1)
+		lanes = cape_pool_ensure(lanes);
+	if (lanes <= 1) {
+		fn(ctx, 0, n);
+		return;
 	}
-	cape_diff_cur_lanes = lanes;
-	cape_diff_pending = lanes - 1;   /* helpers only */
-	cape_diff_gen++;
-	if (cape_diff_pending > 0)
-		pthread_cond_broadcast(&cape_diff_go);
-	pthread_mutex_unlock(&cape_diff_mtx);
+	chunk = (n + (size_t)lanes - 1) / (size_t)lanes;
+
+	pthread_mutex_lock(&cape_pool_mtx);
+	for (t = 0; t < lanes; ++t) {
+		cape_pool_jobs[t].fn = fn;
+		cape_pool_jobs[t].ctx = ctx;
+		cape_pool_jobs[t].lo = (size_t)t * chunk;
+		cape_pool_jobs[t].hi = cape_pool_jobs[t].lo + chunk;
+		if (cape_pool_jobs[t].hi > n)
+			cape_pool_jobs[t].hi = n;
+	}
+	cape_pool_cur_lanes = lanes;
+	cape_pool_pending = lanes - 1;   /* helpers only */
+	cape_pool_gen++;
+	pthread_cond_broadcast(&cape_pool_go);
+	pthread_mutex_unlock(&cape_pool_mtx);
 
 	/* Caller runs lane 0 while helpers run in parallel. */
-	cape_diff_run(&cape_diff_jobs[0]);
+	fn(ctx, cape_pool_jobs[0].lo, cape_pool_jobs[0].hi);
 
-	pthread_mutex_lock(&cape_diff_mtx);
-	while (cape_diff_pending > 0)
-		pthread_cond_wait(&cape_diff_done, &cape_diff_mtx);
-	pthread_mutex_unlock(&cape_diff_mtx);
+	pthread_mutex_lock(&cape_pool_mtx);
+	while (cape_pool_pending > 0)
+		pthread_cond_wait(&cape_pool_done, &cape_pool_mtx);
+	pthread_mutex_unlock(&cape_pool_mtx);
 }
 
-static void cape_diff_pool_stop(void)
+static void cape_pool_stop(void)
 {
 	int i;
 
-	if (cape_diff_workers == 0)
+	if (cape_pool_workers == 0)
 		return;
-	pthread_mutex_lock(&cape_diff_mtx);
-	cape_diff_stop = 1;
-	pthread_cond_broadcast(&cape_diff_go);
-	pthread_mutex_unlock(&cape_diff_mtx);
-	for (i = 0; i < cape_diff_workers; ++i)
-		pthread_join(cape_diff_tid[i], NULL);
-	cape_diff_workers = 0;
+	pthread_mutex_lock(&cape_pool_mtx);
+	cape_pool_stop = 1;
+	pthread_cond_broadcast(&cape_pool_go);
+	pthread_mutex_unlock(&cape_pool_mtx);
+	for (i = 0; i < cape_pool_workers; ++i)
+		pthread_join(cape_pool_tid[i], NULL);
+	cape_pool_workers = 0;
 }
 
  FILE *generate_checkpoint(int child_id,
@@ -4216,24 +4315,14 @@ static void cape_diff_pool_stop(void)
 		     old_node = old_node->next, ++k)
 			nodes[k] = old_node;
 
-		/* Per-page work (process_vm_readv + word-diff) is the dominant
-		 * checkpoint cost and is independent across pages -- slot i in
-		 * pp[]/nodes[] fixes output order, so ranges can run on any
-		 * thread. Spread over a PERSISTENT worker pool (started once,
-		 * sized by CAPE_MONITOR_FAULT_THREADS) so we pay no per-iter
-		 * thread spawn. lanes<=1 keeps the fully serial path. The
-		 * compaction/write pass below stays serial (small, ordered). */
-		if (lanes < 1)
-			lanes = 1;
-		if (lanes > (int)cap)
-			lanes = (int)cap;
-		if (lanes > 1)
-			lanes = cape_diff_pool_ensure(lanes);
-		if (lanes > 1) {
-			cape_diff_dispatch(nodes, pp, cap, child_id, lanes);
-		} else {
-			struct cape_diff_job job = { nodes, pp, 0, cap, child_id };
-			cape_diff_run(&job);
+		/* Per-page work (process_vm_readv + word-diff) is independent
+		 * across pages -- slot i in pp[]/nodes[] fixes output order, so
+		 * ranges run on any thread. Spread over the PERSISTENT pool
+		 * (sized by CAPE_MONITOR_FAULT_THREADS) so no per-iter spawn.
+		 * The compaction/write pass below stays serial (small, ordered). */
+		{
+			struct cape_diff_ctx dc = { nodes, pp, child_id };
+			cape_par_for(cape_diff_run, &dc, cap, lanes);
 		}
 		free(nodes);
 	}
