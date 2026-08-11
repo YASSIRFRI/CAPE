@@ -14,10 +14,19 @@ SRC_BASE="$(basename "${SRC}" .c)"
 OUT="${2:-${SRC_BASE}}"
 CAPE_DIR="${CAPE_DIR:-${SCRIPT_DIR}/../../..}"
 
-# 1) Transpile (TXL).
-TXL_BIN="${TXL_BIN:-txl}"
-if ! command -v "${TXL_BIN}" >/dev/null 2>&1; then
-    echo "ERROR: txl not on PATH. Set TXL_BIN=/path/to/txl or install TXL." >&2
+# 1) Transpile (TXL). Prefer the bundled binary we ship with CAPE.
+BUNDLED_TXL="${CAPE_DIR}/transform/dompcc/txl"
+if [ -z "${TXL_BIN:-}" ]; then
+    if [ -x "${BUNDLED_TXL}" ]; then
+        TXL_BIN="${BUNDLED_TXL}"
+    else
+        TXL_BIN="txl"
+    fi
+fi
+if ! command -v "${TXL_BIN}" >/dev/null 2>&1 && [ ! -x "${TXL_BIN}" ]; then
+    echo "ERROR: cannot locate txl." >&2
+    echo "       Tried bundled binary: ${BUNDLED_TXL}" >&2
+    echo "       Set TXL_BIN=/path/to/txl if you want to override it." >&2
     exit 1
 fi
 CAPE_SRC="${SRC_BASE}_cape.c"

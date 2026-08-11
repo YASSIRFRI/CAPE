@@ -12,7 +12,7 @@
 # DICKPT bitmap monitor. The app (cape_task_depend_manual.c) is produced by running
 #   txl tests/test_task_depend.c omptodickpt.Txl
 # in transform/txl/openmptodickpt. Set REGEN=1 to regenerate it
-# here (requires `txl` on PATH); otherwise the committed copy is used.
+# here; the bundled transform/dompcc/txl binary is used by default.
 #
 # Pass criteria: the app prints "DEPEND_RESULT ... status=OK", meaning the
 # diamond-DAG tasks were dispatched respecting depend(in/out/inout) — each
@@ -49,13 +49,24 @@ REGEN="${REGEN:-0}"
 
 # Optionally regenerate the app from OpenMP source via the TXL transpiler.
 TXL_DIR="${TXL_DIR:-${PROJECT_DIR}/transform/txl/openmptodickpt}"
+TXL_BIN_BUNDLED="${PROJECT_DIR}/transform/dompcc/txl"
+if [ -z "${TXL_BIN:-}" ]; then
+    if [ -x "${TXL_BIN_BUNDLED}" ]; then
+        TXL_BIN="${TXL_BIN_BUNDLED}"
+    else
+        TXL_BIN="txl"
+    fi
+fi
 APP_SRC="${PROJECT_DIR}/src/apps/cape_task_depend_manual.c"
 if [ "${REGEN}" = "1" ]; then
-    if ! command -v txl &>/dev/null; then
-        echo "ERROR: REGEN=1 but txl not on PATH" >&2; exit 1
+    if ! command -v "${TXL_BIN}" &>/dev/null && [ ! -x "${TXL_BIN}" ]; then
+        echo "ERROR: REGEN=1 but txl was not found." >&2
+        echo "       Tried bundled binary: ${TXL_BIN_BUNDLED}" >&2
+        echo "       Set TXL_BIN=/path/to/txl to override it." >&2
+        exit 1
     fi
-    echo "Regenerating ${APP_SRC} via TXL"
-    ( cd "${TXL_DIR}" && txl tests/test_task_depend.c omptodickpt.Txl ) > "${APP_SRC}.tmp" 2>/dev/null
+    echo "Regenerating ${APP_SRC} via TXL (${TXL_BIN})"
+    ( cd "${TXL_DIR}" && "${TXL_BIN}" tests/test_task_depend.c omptodickpt.Txl ) > "${APP_SRC}.tmp" 2>/dev/null
     mv "${APP_SRC}.tmp" "${APP_SRC}"
 fi
 [ -f "${APP_SRC}" ] || { echo "ERROR: missing ${APP_SRC} (run with REGEN=1)" >&2; exit 1; }
