@@ -34,10 +34,27 @@ else
 PROF_FLAGS =
 endif
 
+# ── PAPI (optional hardware counters; build with PAPI=1) ─────────────────────
+#   make dickpt_bitmap_multithreaded_monitor PAPI=1
+#   make omp_heat3d PAPI=1 PAPI_ROOT=/opt/papi
+# Without PAPI=1 the cape_papi.h calls compile to nothing.
+PAPI ?= 0
+ifeq ($(PAPI),1)
+PAPI_FLAGS ?= $(if $(PAPI_ROOT),-I$(PAPI_ROOT)/include,$(shell pkg-config --cflags papi 2>/dev/null))
+PAPI_LINK  ?= $(if $(PAPI_ROOT),-L$(PAPI_ROOT)/lib -lpapi -Wl$(comma)-rpath$(comma)$(PAPI_ROOT)/lib,$(shell pkg-config --libs papi 2>/dev/null))
+ifeq ($(strip $(PAPI_LINK)),)
+PAPI_LINK := -lpapi
+endif
+PAPI_CFLAGS = -DUSE_PAPI $(PAPI_FLAGS)
+else
+PAPI_CFLAGS =
+PAPI_LINK   =
+endif
+
 # ── Compiler & flags ─────────────────────────────────────────────────────────
 CC      ?= cc
-CFLAGS   = -O2 -I./$(I_FOLDER) -I$(UCX_SRC) -I$(UCX_GEN) $(PMIX_FLAGS) $(PROF_FLAGS)
-LDFLAGS  = -L$(UCX_LIB) -lucp -lucs $(PMIX_LINK) -Wl,-rpath,$(UCX_LIB) -lpthread
+CFLAGS   = -O2 -I./$(I_FOLDER) -I$(UCX_SRC) -I$(UCX_GEN) $(PMIX_FLAGS) $(PROF_FLAGS) $(PAPI_CFLAGS)
+LDFLAGS  = -L$(UCX_LIB) -lucp -lucs $(PMIX_LINK) -Wl,-rpath,$(UCX_LIB) -lpthread $(PAPI_LINK)
 OMP_CFLAGS = -O2 -fopenmp
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -123,6 +140,11 @@ cape_test_heap:
 omp_gradient:
 	$(CC) -w $(OMP_CFLAGS) $(C_FOLDER)/omp_apps/omp_gradient.c -o $(EXE_FOLDER)/omp_gradient
 
+# Shared-memory OpenMP baseline for the DICKPT heat3d benchmark.
+omp_heat3d:
+	@mkdir -p $(EXE_FOLDER)
+	$(CC) -w $(OMP_CFLAGS) $(PAPI_CFLAGS) $(C_FOLDER)/omp_apps/omp_heat3d.c -o $(EXE_FOLDER)/omp_heat3d -lm -lpthread $(PAPI_LINK)
+
 apps: cape_mamult cape_mamult2d cape_matvec cape_gradient cape_memwrite \
       cape_pi cape_prime cape_prime_number \
       cape_reduction cape_for cape_for_nowait cape_parallel_for \
@@ -175,7 +197,7 @@ $(info [dickpt] binutils bin: $(DICKPT_BINUTILS_BIN)  (source: $(DICKPT_BINUTILS
 DICKPT_LD_PREFIX := -B$(DICKPT_BINUTILS_BIN)/
 endif
 endif
-DICKPT_COMPILE = $(CC) -w -O2 -mno-red-zone -I./$(I_FOLDER) -no-pie -fno-pie $(DICKPT_LD_PREFIX)
+DICKPT_COMPILE = $(CC) -w -O2 -mno-red-zone -I./$(I_FOLDER) -no-pie -fno-pie $(PAPI_CFLAGS) $(DICKPT_LD_PREFIX)
 DICKPT_RUNTIME = $(C_FOLDER)/apps/cape_dickpt_runtime.c
 
 # Monitor (needs UCX for inter-node communication)
@@ -280,7 +302,7 @@ dickpt_heat_manual:
 # Benchmark: 3D diffusion / Jacobi 7-point stencil (thermal/fluid diffusion)
 dickpt_heat3d_manual:
 	@mkdir -p $(EXE_FOLDER)
-	$(DICKPT_COMPILE) $(C_FOLDER)/apps/cape_heat3d_manual.c $(DICKPT_RUNTIME) -o $(EXE_FOLDER)/dickpt_heat3d_manual -lm
+	$(DICKPT_COMPILE) $(C_FOLDER)/apps/cape_heat3d_manual.c $(DICKPT_RUNTIME) -o $(EXE_FOLDER)/dickpt_heat3d_manual -lm -lpthread $(PAPI_LINK)
 
 # Build monitor + all dickpt apps
 dickpt: dickpt_monitor dickpt_mul_manual dickpt_matvec_manual dickpt_gradient_manual dickpt_memwrite_manual dickpt_write_stress dickpt_reduction_manual dickpt_task_example dickpt_task_manual dickpt_task_depend_manual dickpt_task_nested_manual dickpt_critical_manual dickpt_atomic_manual dickpt_montecarlo_manual dickpt_nbody_manual dickpt_matmul_manual dickpt_heat_manual dickpt_heat3d_manual
@@ -299,5 +321,5 @@ cleanall:
         cape_write_stress cape_bitmap_write_stress \
         cape_pi cape_prime cape_prime_number \
         cape_reduction cape_for cape_for_nowait cape_parallel_for \
-        cape_vector1 cape_vector2 cape_critical cape_critical2 omp_gradient \
+        cape_vector1 cape_vector2 cape_critical cape_critical2 omp_gradient omp_heat3d \
         cape_sections_nowait cape_nested_parallel_sections cape_test_heap

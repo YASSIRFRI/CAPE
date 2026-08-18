@@ -51,6 +51,11 @@ BENCH_NODES="${BENCH_NODES:-16}"
 SIZE_NODES="${SIZE_NODES:-16}"
 REPS="${REPS:-1}"
 PROFILE="${PROFILE:-1}"
+# PAPI=1 builds monitor + app with hardware counters (cape_papi.h) and dumps
+# per-region load/store, L1/L2/L3-miss and TLB-miss totals at exit. Regions:
+#   generate_ckpt / par_for_lane  — monitor checkpoint path (the suspect)
+#   app_sweep / app_writeback     — application compute, for scale
+PAPI="${PAPI:-0}"
 
 # One monitor/rank/checkpoint per node; give the task all cores so the compute
 # threads have physical cores to land on (max thread count in the sweep).
@@ -67,6 +72,9 @@ module load GCCcore/14.2.0
 module load UCX/1.18.0-GCCcore-14.2.0
 module load UCC/1.3.0-GCCcore-14.2.0 2>/dev/null || module load UCC 2>/dev/null || true
 module load PMIx/5.0.6-GCCcore-14.2.0 2>/dev/null || module load PMIx 2>/dev/null || true
+if [ "${PAPI}" = "1" ]; then
+    module load PAPI/7.1.0-GCCcore-14.2.0 2>/dev/null || module load PAPI 2>/dev/null || true
+fi
 set -u
 
 if [ -n "${EBROOTUCX:-}" ]; then
@@ -96,7 +104,11 @@ MAKE_ARGS=(
     EXE_FOLDER="${BUILD_DIR}/bin" O_FOLDER="${BUILD_DIR}/obj" L_FOLDER="${BUILD_DIR}/lib"
     UCX_SRC="${UCX_INC}" UCX_GEN="${UCX_INC}" UCX_LIB="${UCX_LIB}"
     "PMIX_FLAGS=${PMIX_FLAGS}" "PMIX_LINK=${PMIX_LINK}" CC=gcc
+    PAPI="${PAPI}"
 )
+if [ "${PAPI}" = "1" ] && [ -n "${EBROOTPAPI:-}" ]; then
+    MAKE_ARGS+=(PAPI_ROOT="${EBROOTPAPI}")
+fi
 if [ -n "${EBROOTUCC:-}" ]; then
     MAKE_ARGS+=(UCC_SRC="${EBROOTUCC}/include" UCC_LIB="${EBROOTUCC}/lib")
 fi
@@ -229,6 +241,15 @@ run_size() {
 echo ""
 echo "=== PHASE 2: checkpoint size (logged once) ==="
 run_size "${SIZE_NODES}"
+
+if [ "${PAPI}" = "1" ]; then
+    echo ""
+    echo "=== PAPI counters per region (monitor + app, all runs) ==="
+    grep -h -A 14 '^\[PAPI\] region=' "${RESULTS_DIR}"/dickpt_${APP}_*.log || true
+    echo "Read: par_for_lane = the parallel checkpoint diff (process_vm_readv +"
+    echo "      word compare). High L3_TCM/est_dram_bw with low IPC there means"
+    echo "      the checkpoint path is memory-bound, not syscall-bound."
+fi
 
 echo ""
 echo "Done. DICKPT ${APP}"

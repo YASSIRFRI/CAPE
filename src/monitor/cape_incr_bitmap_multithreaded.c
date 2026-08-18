@@ -51,6 +51,16 @@
 #include "../include/cape_monitor.h"
 #include "../include/cape_dickpt_uffd.h"
 #include "../include/cape_signal.h"
+#include "../include/cape_papi.h"
+
+/* PAPI regions (no-ops unless built with PAPI=1). generate_ckpt covers the
+ * whole checkpoint-generation call on the monitor thread; par_for_lane is
+ * summed over every worker lane that runs a parallel range — that is where the
+ * process_vm_readv + word-diff memory traffic lives, so its L1/L2/L3/TLB miss
+ * counts are the direct test of "the checkpoint path is memory-bound". */
+static struct cape_papi_region cape_papi_generate = CAPE_PAPI_REGION("generate_ckpt");
+static struct cape_papi_region cape_papi_lane = CAPE_PAPI_REGION("par_for_lane");
+
 
 #include <ucp/api/ucp.h>
 #ifdef USE_PMIX
@@ -1239,6 +1249,7 @@ static void cape_profile_report_once(void)
 	if (__atomic_exchange_n(&cape_profile_reported, 1, __ATOMIC_ACQ_REL))
 		return;
 	cape_profile_report();
+	cape_papi_report();
 }
 
 static void cape_profile_signal(int sig)
@@ -3448,6 +3459,9 @@ int main(int argc, char * argv[]){
 			if (cape_apply_affinity(1) != 0)
 				return 1;
 			cape_profile_install();
+			/* PAPI must be initialized before the diff worker pool
+			 * is created so each worker can register its EventSet. */
+			cape_papi_init();
 			CAPE_DBG("parent before cape_ucx_init");
 			cape_ucx_init();
 			CAPE_DBG("parent after cape_ucx_init");
@@ -4172,7 +4186,12 @@ static void *cape_pool_worker(void *arg)
 		if (!active)
 			continue;
 
-		job.fn(job.ctx, job.lo, job.hi);
+		{
+			struct cape_papi_probe pr;
+			cape_papi_start(&cape_papi_lane, &pr);
+			job.fn(job.ctx, job.lo, job.hi);
+			cape_papi_stop(&cape_papi_lane, &pr);
+		}
 
 		pthread_mutex_lock(&cape_pool_mtx);
 		if (--cape_pool_pending == 0)
@@ -4219,7 +4238,10 @@ static void cape_par_for(cape_par_fn fn, void *ctx, size_t n, int lanes)
 	if (lanes > 1)
 		lanes = cape_pool_ensure(lanes);
 	if (lanes <= 1) {
+		struct cape_papi_probe pr;
+		cape_papi_start(&cape_papi_lane, &pr);
 		fn(ctx, 0, n);
+		cape_papi_stop(&cape_papi_lane, &pr);
 		return;
 	}
 	chunk = (n + (size_t)lanes - 1) / (size_t)lanes;
@@ -4240,7 +4262,12 @@ static void cape_par_for(cape_par_fn fn, void *ctx, size_t n, int lanes)
 	pthread_mutex_unlock(&cape_pool_mtx);
 
 	/* Caller runs lane 0 while helpers run in parallel. */
-	fn(ctx, cape_pool_jobs[0].lo, cape_pool_jobs[0].hi);
+	{
+		struct cape_papi_probe pr;
+		cape_papi_start(&cape_papi_lane, &pr);
+		fn(ctx, cape_pool_jobs[0].lo, cape_pool_jobs[0].hi);
+		cape_papi_stop(&cape_papi_lane, &pr);
+	}
 
 	pthread_mutex_lock(&cape_pool_mtx);
 	while (cape_pool_pending > 0)
@@ -4276,6 +4303,8 @@ static void cape_pool_stop(void)
 	unsigned long marker = BMP_S;
 	CAPE_PROFILE_NS_VAR(profile_start_ns);
 	CAPE_PROFILE_NS_START(profile_start_ns);
+	struct cape_papi_probe papi_pr;
+	cape_papi_start(&cape_papi_generate, &papi_pr);
 
 	struct pack_page *pp = NULL;
 	size_t cap = 0, n = 0, k;
@@ -4371,6 +4400,7 @@ static void cape_pool_stop(void)
 		}
 		*ckpt_size = (size_t)pos;
 	}
+	cape_papi_stop(&cape_papi_generate, &papi_pr);
 	cape_profile_record_generated_ckpt(*ckpt_size);
 	CAPE_PROFILE_ADD_NS(generate_ckpt_ns, profile_start_ns);
 	CAPE_PROFILE_INC(generate_ckpt_calls);

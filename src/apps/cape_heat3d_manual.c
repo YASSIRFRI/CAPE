@@ -62,6 +62,7 @@
 #include <sys/syscall.h>
 #include <linux/futex.h>
 #include "../../include/cape_dickpt.h"
+#include "../../include/cape_papi.h"
 
 #define DEFAULT_N 128
 #define DEFAULT_ITERS 100
@@ -101,15 +102,29 @@ struct hb_task {
 	int cpu;                     /* core to pin this worker to (-1 = none) */
 	size_t plane;
 	double *u, *unew;
+	int papi;                    /* 1 = measure this slab with PAPI */
 	int32_t join_futex;          /* nonzero while thread alive */
 	char *stack;                 /* private mmap, reused every phase */
 };
+
+/* Compute-phase PAPI regions: the DICKPT app's counterpart to omp_heat3d's
+ * omp_sweep / omp_writeback, so app-side memory behaviour can be compared to
+ * the monitor's checkpoint path (regions generate_ckpt / par_for_lane).
+ *
+ * ONLY slab 0 — the main thread — is measured. The workers here are raw
+ * clone(2) threads without CLONE_SETTLS, so they share the parent's TLS block:
+ * a __thread PAPI EventSet handle would be shared, not per-thread. Counting
+ * one slab is sound anyway (slabs are equal-sized and run the same kernel);
+ * scale by the thread count for a whole-node figure. */
+static struct cape_papi_region papi_sweep = CAPE_PAPI_REGION("app_sweep");
+static struct cape_papi_region papi_writeback = CAPE_PAPI_REGION("app_writeback");
 
 static void hb_kernel(const struct hb_task *t)
 {
 	int n = t->n, i, j, k;
 	size_t plane = t->plane;
 	double *u = t->u, *unew = t->unew;
+	struct cape_papi_probe pr;
 
 	if (t->cpu >= 0) {
 		cpu_set_t one;
@@ -120,6 +135,9 @@ static void hb_kernel(const struct hb_task *t)
 
 #define TU(i, j, k)    u[((size_t)(i) * plane) + ((size_t)(j) * n) + (k)]
 #define TUNEW(i, j, k) unew[((size_t)(i) * plane) + ((size_t)(j) * n) + (k)]
+	if (t->papi)
+		cape_papi_start(t->phase == HB_SWEEP ? &papi_sweep
+						    : &papi_writeback, &pr);
 	if (t->phase == HB_SWEEP) {
 		for (i = t->i_lo; i < t->i_hi; i++)
 			for (j = 1; j < n - 1; j++)
@@ -137,6 +155,9 @@ static void hb_kernel(const struct hb_task *t)
 					if (TUNEW(i, j, k) != TU(i, j, k))
 						TU(i, j, k) = TUNEW(i, j, k);
 	}
+	if (t->papi)
+		cape_papi_stop(t->phase == HB_SWEEP ? &papi_sweep
+						   : &papi_writeback, &pr);
 #undef TU
 #undef TUNEW
 }
@@ -182,6 +203,7 @@ static int hb_run_phase(struct hb_task *tasks, int nt, enum hb_phase phase,
 		tasks[t].i_hi = i_lo + (int)(((long)planes * (t + 1)) / nt);
 		/* Spread workers across distinct physical cores. */
 		tasks[t].cpu = (online > 0) ? (t % online) : -1;
+		tasks[t].papi = (t == 0);   /* main thread only; see above */
 	}
 
 	spawned = 0;
@@ -343,6 +365,8 @@ int main(int argc, char *argv[])
 		}
 	}
 
+	cape_papi_init();
+
 	dickpt_send_num_jobs((unsigned long)n);
 
 #define U(i, j, k)    u[((size_t)(i) * plane) + ((size_t)(j) * n) + (k)]
@@ -462,6 +486,7 @@ int main(int argc, char *argv[])
 
 #undef U
 #undef UNEW
+	cape_papi_report();
 	free(unew);
 	return 0;
 }

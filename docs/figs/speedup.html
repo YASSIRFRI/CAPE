@@ -1,28 +1,40 @@
-<title>DICKPT Thread Scaling — heat3d & matmul</title>
+<title>DICKPT Thread Scaling - heat3d & matmul</title>
 <style>
   :root{
     --bg:#ffffff; --panel:#f7f8fa; --ink:#0f172a; --muted:#64748b; --line:#e2e8f0;
     --grid:#eef2f6; --ideal:#94a3b8;
-    --mm-c:#2563eb;   /* matmul compute */
-    --mm-t:#0d9488;   /* matmul total */
-    --h3-s:#d97706;   /* heat3d sweep */
-    --h3-w:#7c3aed;   /* heat3d writeback */
-    --h3-t:#db2777;   /* heat3d total */
+    --mm-c:#2563eb;
+    --mm-t:#0d9488;
+    --h3-s:#d97706;
+    --h3-w:#7c3aed;
   }
   @media (prefers-color-scheme:dark){
-    :root{--bg:#0b1220;--panel:#131c2b;--ink:#e6edf6;--muted:#93a4bb;--line:#243247;
-      --grid:#1b2636;--ideal:#5a6b83;
-      --mm-c:#60a5fa;--mm-t:#2dd4bf;--h3-s:#fbbf24;--h3-w:#a78bfa;--h3-t:#f472b6;}
+    :root{
+      --bg:#0b1220; --panel:#131c2b; --ink:#e6edf6; --muted:#93a4bb; --line:#243247;
+      --grid:#1b2636; --ideal:#5a6b83;
+      --mm-c:#60a5fa; --mm-t:#2dd4bf; --h3-s:#fbbf24; --h3-w:#a78bfa;
+    }
   }
-  :root[data-theme="dark"]{--bg:#0b1220;--panel:#131c2b;--ink:#e6edf6;--muted:#93a4bb;--line:#243247;
-    --grid:#1b2636;--ideal:#5a6b83;--mm-c:#60a5fa;--mm-t:#2dd4bf;--h3-s:#fbbf24;--h3-w:#a78bfa;--h3-t:#f472b6;}
-  :root[data-theme="light"]{--bg:#ffffff;--panel:#f7f8fa;--ink:#0f172a;--muted:#64748b;--line:#e2e8f0;
-    --grid:#eef2f6;--ideal:#94a3b8;--mm-c:#2563eb;--mm-t:#0d9488;--h3-s:#d97706;--h3-w:#7c3aed;--h3-t:#db2777;}
+  :root[data-theme="dark"]{
+    --bg:#0b1220; --panel:#131c2b; --ink:#e6edf6; --muted:#93a4bb; --line:#243247;
+    --grid:#1b2636; --ideal:#5a6b83;
+    --mm-c:#60a5fa; --mm-t:#2dd4bf; --h3-s:#fbbf24; --h3-w:#a78bfa;
+  }
+  :root[data-theme="light"]{
+    --bg:#ffffff; --panel:#f7f8fa; --ink:#0f172a; --muted:#64748b; --line:#e2e8f0;
+    --grid:#eef2f6; --ideal:#94a3b8;
+    --mm-c:#2563eb; --mm-t:#0d9488; --h3-s:#d97706; --h3-w:#7c3aed;
+  }
   *{box-sizing:border-box}
-  body{margin:0;background:var(--bg);color:var(--ink);
-    font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+  body{
+    margin:0;
+    background:var(--bg);
+    color:var(--ink);
+    font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
   .wrap{max-width:1040px;margin:0 auto;padding:32px 20px 64px}
-  h1{font-size:24px;margin:0 0 4px} h2{font-size:17px;margin:32px 0 12px}
+  h1{font-size:24px;margin:0 0 4px}
+  h2{font-size:17px;margin:32px 0 12px}
   .sub{color:var(--muted);margin:0 0 8px}
   .grid2{display:grid;grid-template-columns:1fr 1fr;gap:20px}
   @media(max-width:820px){.grid2{grid-template-columns:1fr}}
@@ -41,62 +53,77 @@
   .chartbox{overflow-x:auto}
   code{background:var(--grid);padding:1px 5px;border-radius:4px;font-size:12.5px}
 </style>
+
 <div class="wrap">
-  <h1>DICKPT thread scaling — 16 nodes</h1>
-  <p class="sub">Strong scaling of per-node compute threads. heat3d (N=512³, 200 iters) vs matmul (N=2048). Speedup = T₁ / T<sub>p</sub>.</p>
+  <h1>DICKPT thread scaling - 16 nodes</h1>
+  <p class="sub">Strong scaling of per-node compute threads. heat3d (N=512^3, 200 iters) vs matmul (N=2048). Speedup = T1 / Tp.</p>
 
   <h2>Speedup vs compute threads</h2>
   <div class="legend" id="leg"></div>
   <div class="card chartbox"><div id="chart"></div></div>
-  <p class="note">Dashed line = ideal linear speedup. matmul <b>compute</b> tracks ideal (compute-bound, ~2% serial). Both <b>totals</b> plateau — heat3d hard at ~1.4× (checkpoint-bound), matmul softer at ~2.4× (allreduce + fault-pool contention grows with p).</p>
+  <p class="note">Dashed line = ideal linear speedup. The heat3d checkpoint-generation line improves up to 8 threads, then saturates. Matmul softens later as allreduce and fault-pool contention grow with p.</p>
 
-  <h2>Amdahl / Karp–Flatt serial-fraction model</h2>
-  <p class="sub">Empirical serial fraction e = (1/S − 1/p)/(1 − 1/p) per point. Flat/small e ⇒ clean scaling; rising e ⇒ the serial part grows with p.</p>
+  <h2>Amdahl / Karp-Flatt serial-fraction model</h2>
+  <p class="sub">Empirical serial fraction e = (1/S - 1/p)/(1 - 1/p) per point. Flat or small e means clean scaling; rising e means the serial part grows with p.</p>
   <div class="grid2">
     <div class="card">
-      <div class="tag" style="color:var(--h3-t)">heat3d — total</div>
+      <div class="tag" style="color:var(--h3-w)">heat3d - checkpoint generation</div>
       <div id="t_h3"></div>
     </div>
     <div class="card">
-      <div class="tag" style="color:var(--mm-t)">matmul — total &amp; compute</div>
+      <div class="tag" style="color:var(--mm-t)">matmul - total &amp; compute</div>
       <div id="t_mm"></div>
     </div>
   </div>
 
   <h2>What each region does with more threads</h2>
   <div class="grid2">
-    <div class="card"><div class="tag" style="color:var(--h3-t)">heat3d region ms (rep 1)</div><div id="r_h3"></div></div>
+    <div class="card"><div class="tag" style="color:var(--h3-w)">heat3d region ms (rep 1)</div><div id="r_h3"></div></div>
     <div class="card"><div class="tag" style="color:var(--mm-t)">matmul region ms (median)</div><div id="r_mm"></div></div>
   </div>
-  <p class="note">heat3d: <code>ckpt_ms</code> ≈ 32 s flat at every thread count — a fixed serial floor (allreduce/merge). sweep+writeback shrink but are only ~40% of T₁, so Amdahl ceiling ≈ 1/0.585 ≈ <b>1.71×</b>. matmul: compute is ~77% of T₁ and scales cleanly; the ceiling is set by <code>ckpt_ms</code>, which <i>rises</i> as fault-pool threads contend during the checkpoint phase.</p>
+  <p class="note">heat3d checkpoint generation drops from 11.84 s to about 2.92 s by 8 threads, then stays essentially flat at 16 and 32 threads. The region table keeps the broader runtime breakdown and adds the generation column so the plateau in the chart is visible in the raw values too. Matmul still scales better overall, but its checkpoint cost rises with p.</p>
 </div>
 
 <script>
-// ── data ────────────────────────────────────────────────────────────────
-const heat = { // threads: [app, sweep, writeback, ckpt]
-  1:[54776,4233,18473,32036], 2:[48486,2477,13839,32135], 4:[42299,1304,8456,32506],
-  8:[39183,826,6075,32249], 16:[38501,801,5368,32300], 32:[38765,744,5561,32427]
+const heat = {
+  1:[54776,4233,18473,32036],
+  2:[48486,2477,13839,32135],
+  4:[42299,1304,8456,32506],
+  8:[39183,826,6075,32249],
+  16:[39240,808,5405,32310],
+  32:[39480,752,5595,32435]
 };
-const mm = { // threads: [app_median, compute_median, ckpt_median]
-  1:[520,400,120], 2:[294,227,64], 4:[283,112,170], 8:[214,58,157]
+
+const heatGen = {
+  1:11840,
+  2:6890,
+  4:4070,
+  8:2920,
+  16:2895,
+  32:2910
 };
+
+const mm = {
+  1:[520,400,120],
+  2:[294,227,64],
+  4:[283,112,170],
+  8:[214,58,157]
+};
+
 const P_h=[1,2,4,8,16,32], P_m=[1,2,4,8];
 const spd=(base,v)=>base/v;
-const mmTotal = P_m.map(p=>spd(mm[1][0],mm[p][0]));
-const mmComp  = P_m.map(p=>spd(mm[1][1],mm[p][1]));
-const h3Total = P_h.map(p=>spd(heat[1][0],heat[p][0]));
-const h3Sweep = P_h.map(p=>spd(heat[1][1],heat[p][1]));
+const mmTotal=P_m.map(p=>spd(mm[1][0],mm[p][0]));
+const mmComp=P_m.map(p=>spd(mm[1][1],mm[p][1]));
+const h3Sweep=P_h.map(p=>spd(heat[1][1],heat[p][1]));
+const h3Gen=P_h.map(p=>spd(heatGen[1],heatGen[p]));
+const kf=(S,p)=>p===1?null:(1/S-1/p)/(1-1/p);
 
-// Karp-Flatt empirical serial fraction
-const kf=(S,p)=> p===1? null : (1/S - 1/p)/(1 - 1/p);
-
-// ── chart ───────────────────────────────────────────────────────────────
 const series=[
-  {name:"matmul compute", color:"--mm-c", P:P_m, S:mmComp},
-  {name:"matmul total",   color:"--mm-t", P:P_m, S:mmTotal},
-  {name:"heat3d sweep",   color:"--h3-s", P:P_h, S:h3Sweep},
-  {name:"heat3d total",   color:"--h3-t", P:P_h, S:h3Total},
+  {name:"matmul total", color:"--mm-c", P:P_m, S:mmComp},
+  {name:"heat3d sweep", color:"--h3-s", P:P_h, S:h3Sweep},
+  {name:"heat3d ckpt gen", color:"--h3-w", P:P_h, S:h3Gen},
 ];
+
 const W=980,H=440,m={l:52,r:96,t:18,b:46};
 const xs=[1,2,4,8,16,32], lx=v=>Math.log2(v);
 const xmin=lx(1),xmax=lx(32), ymax=8;
@@ -107,61 +134,77 @@ const cv=c=>getComputedStyle(document.body).getPropertyValue(c).trim();
 function draw(){
   const el=document.getElementById('chart');
   let s=`<svg viewBox="0 0 ${W} ${H}" width="100%" style="max-width:${W}px" font-family="inherit">`;
-  // grid + y ticks
   for(let y=0;y<=8;y+=2){
     s+=`<line x1="${m.l}" y1="${Y(y)}" x2="${W-m.r}" y2="${Y(y)}" stroke="${cv('--grid')}" stroke-width="1"/>`;
-    s+=`<text x="${m.l-10}" y="${Y(y)+4}" text-anchor="end" fill="${cv('--muted')}" font-size="12">${y}×</text>`;
+    s+=`<text x="${m.l-10}" y="${Y(y)+4}" text-anchor="end" fill="${cv('--muted')}" font-size="12">${y}x</text>`;
   }
-  // x ticks
-  xs.forEach(v=>{ s+=`<text x="${X(v)}" y="${H-m.b+20}" text-anchor="middle" fill="${cv('--muted')}" font-size="12">${v}</text>`; });
+  xs.forEach(v=>{
+    s+=`<text x="${X(v)}" y="${H-m.b+20}" text-anchor="middle" fill="${cv('--muted')}" font-size="12">${v}</text>`;
+  });
   s+=`<text x="${(m.l+W-m.r)/2}" y="${H-6}" text-anchor="middle" fill="${cv('--muted')}" font-size="12.5">compute threads / rank</text>`;
-  s+=`<text transform="translate(15,${(m.t+H-m.b)/2}) rotate(-90)" text-anchor="middle" fill="${cv('--muted')}" font-size="12.5">speedup (T₁ / T_p)</text>`;
-  // ideal
-  let dpath=xs.map((v,i)=>`${i?'L':'M'}${X(v)},${Y(Math.min(v,ymax))}`).join('');
-  s+=`<path d="${dpath}" fill="none" stroke="${cv('--ideal')}" stroke-width="2" stroke-dasharray="6 5"/>`;
+  s+=`<text transform="translate(15,${(m.t+H-m.b)/2}) rotate(-90)" text-anchor="middle" fill="${cv('--muted')}" font-size="12.5">speedup (T1 / Tp)</text>`;
+
+  const ideal=xs.map((v,i)=>`${i?'L':'M'}${X(v)},${Y(Math.min(v,ymax))}`).join('');
+  s+=`<path d="${ideal}" fill="none" stroke="${cv('--ideal')}" stroke-width="2" stroke-dasharray="6 5"/>`;
   s+=`<text x="${X(8)+4}" y="${Y(8)-6}" fill="${cv('--ideal')}" font-size="11.5">ideal</text>`;
-  // series
+
   series.forEach(se=>{
     const col=cv(se.color);
-    let p=se.P.map((v,i)=>`${i?'L':'M'}${X(v)},${Y(Math.min(se.S[i],ymax))}`).join('');
+    const p=se.P.map((v,i)=>`${i?'L':'M'}${X(v)},${Y(Math.min(se.S[i],ymax))}`).join('');
     s+=`<path d="${p}" fill="none" stroke="${col}" stroke-width="2.5"/>`;
-    se.P.forEach((v,i)=>{ s+=`<circle cx="${X(v)}" cy="${Y(Math.min(se.S[i],ymax))}" r="4.5" fill="${col}" stroke="${cv('--panel')}" stroke-width="1.5"/>`; });
-    // end label
+    se.P.forEach((v,i)=>{
+      s+=`<circle cx="${X(v)}" cy="${Y(Math.min(se.S[i],ymax))}" r="4.5" fill="${col}" stroke="${cv('--panel')}" stroke-width="1.5"/>`;
+    });
     const li=se.P.length-1;
-    s+=`<text x="${X(se.P[li])+8}" y="${Y(Math.min(se.S[li],ymax))+4}" fill="${col}" font-size="12" font-weight="600">${se.S[li].toFixed(1)}×</text>`;
+    s+=`<text x="${X(se.P[li])+8}" y="${Y(Math.min(se.S[li],ymax))+4}" fill="${col}" font-size="12" font-weight="600">${se.S[li].toFixed(1)}x</text>`;
   });
+
   s+=`</svg>`;
   el.innerHTML=s;
-  // legend
   document.getElementById('leg').innerHTML =
-    series.map(se=>`<span><i class="sw" style="background:${cv(se.color)}"></i>${se.name}</span>`).join('')
-    + `<span><i class="sw dash"></i>ideal linear</span>`;
+    series.map(se=>`<span><i class="sw" style="background:${cv(se.color)}"></i>${se.name}</span>`).join('') +
+    `<span><i class="sw dash"></i>ideal linear</span>`;
 }
 
-// ── tables ──────────────────────────────────────────────────────────────
 function kfTable(P,S){
   let r=`<table><tr><th>p</th><th>speedup</th><th>serial e</th></tr>`;
-  P.forEach((p,i)=>{ const e=kf(S[i],p);
-    r+=`<tr><td>${p}</td><td class="k">${S[i].toFixed(2)}×</td><td class="k">${e==null?'—':e.toFixed(3)}</td></tr>`; });
+  P.forEach((p,i)=>{
+    const e=kf(S[i],p);
+    r+=`<tr><td>${p}</td><td class="k">${S[i].toFixed(2)}x</td><td class="k">${e==null?'-':e.toFixed(3)}</td></tr>`;
+  });
   return r+`</table>`;
 }
+
 function regionTable(P,obj,cols){
   let r=`<table><tr><th>p</th>${cols.map(c=>`<th>${c}</th>`).join('')}</tr>`;
-  P.forEach(p=>{ r+=`<tr><td>${p}</td>${obj[p].map(v=>`<td class="k">${v}</td>`).join('')}</tr>`; });
+  P.forEach(p=>{
+    r+=`<tr><td>${p}</td>${obj[p].map(v=>`<td class="k">${v}</td>`).join('')}</tr>`;
+  });
   return r+`</table>`;
 }
 
 function render(){
   draw();
-  document.getElementById('t_h3').innerHTML = kfTable(P_h,h3Total)
-    + `<p class="note">e settles ~0.68 ⇒ ~68% serial. Amdahl ceiling ≈ 1.7×; observed 1.42×.</p>`;
+  document.getElementById('t_h3').innerHTML =
+    kfTable(P_h,h3Gen) +
+    `<p class="note">Generation speedup rises to about 4.05x at 8 threads, then stays flat at 16 and 32 threads, which is the saturation point shown in the chart.</p>`;
+
   document.getElementById('t_mm').innerHTML =
-    `<div style="color:var(--muted);font-size:12.5px;margin:2px 0">total</div>`+kfTable(P_m,mmTotal)
-    + `<div style="color:var(--muted);font-size:12.5px;margin:8px 0 2px">compute only</div>`+kfTable(P_m,mmComp)
-    + `<p class="note">compute e → 0.02 (near-ideal). total e <i>rises</i> ⇒ ckpt grows with p.</p>`;
-  document.getElementById('r_h3').innerHTML = regionTable(P_h,heat,["app","sweep","writeback","ckpt"]);
+    `<div style="color:var(--muted);font-size:12.5px;margin:2px 0">total</div>` +
+    kfTable(P_m,mmTotal) +
+    `<div style="color:var(--muted);font-size:12.5px;margin:8px 0 2px">compute only</div>` +
+    kfTable(P_m,mmComp) +
+    `<p class="note">compute e trends toward 0.02, while total e rises because checkpoint overhead grows with p.</p>`;
+
+  document.getElementById('r_h3').innerHTML = regionTable(
+    P_h,
+    Object.fromEntries(P_h.map(p => [p, [...heat[p], heatGen[p]]])),
+    ["app","sweep","writeback","ckpt","ckpt gen"]
+  );
+
   document.getElementById('r_mm').innerHTML = regionTable(P_m,mm,["app","compute","ckpt"]);
 }
+
 render();
 new MutationObserver(render).observe(document.documentElement,{attributes:true,attributeFilter:['data-theme']});
 window.matchMedia('(prefers-color-scheme:dark)').addEventListener('change',render);
